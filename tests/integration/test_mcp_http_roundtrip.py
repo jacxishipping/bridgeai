@@ -1,8 +1,6 @@
 """Live MCP-over-HTTP round-trip against an in-process FastAPI+MCP embed when available."""
 from __future__ import annotations
 
-import os
-
 import pytest
 from fastapi.testclient import TestClient
 

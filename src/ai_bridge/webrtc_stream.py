@@ -318,6 +318,7 @@ def release_all_held_keys() -> int:
     if keys and platform.system() == "Windows":
         try:
             import ctypes
+
             from ai_bridge.tools import _vk_for_token
 
             u = ctypes.windll.user32
@@ -473,6 +474,7 @@ class ScreenTrack:
 
     def __new__(cls, *args, **kwargs):
         import fractions
+
         from aiortc import VideoStreamTrack
 
         class _Track(VideoStreamTrack):
@@ -620,6 +622,7 @@ class DesktopAudioTrack:
 
     def __new__(cls, *args, **kwargs):
         import fractions
+
         from aiortc import AudioStreamTrack
 
         from . import desktop_audio as desktop_audio_mod
@@ -1529,7 +1532,7 @@ class AgentStreamer:
             bitrate_kbps=self.bitrate_kbps,
         )
         self.video_track = track
-        sender = pc.addTrack(track)
+        pc.addTrack(track)
 
         # Prefer H.264 codec on the video transceiver per Section 5
         try:

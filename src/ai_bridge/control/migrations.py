@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import re
 import time
 from pathlib import Path

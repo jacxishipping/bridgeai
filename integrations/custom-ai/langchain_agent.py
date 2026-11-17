@@ -18,8 +18,9 @@ import sys
 # Ensure local package can be imported if running from repo
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src")))
 
-from ai_bridge import AIBridgeClient
 from _bridge_config import describe_result, require_bridge_url
+
+from ai_bridge import AIBridgeClient
 
 # JSON Schema type -> Python type for building pydantic arg models (I-03).
 _JSON_TYPE_MAP = {

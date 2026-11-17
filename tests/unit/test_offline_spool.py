@@ -1,6 +1,5 @@
 """Unit tests for Agent Fleet Offline Spooler (agents/common/spool.py)."""
 from pathlib import Path
-import pytest
 
 from agents.common.spool import TaskSpooler
 

@@ -23,8 +23,7 @@ from pathlib import Path
 import pytest
 
 from ai_bridge.control import db as dbmod
-from ai_bridge.control import migrations
-from ai_bridge.control import oidc
+from ai_bridge.control import migrations, oidc
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = REPO_ROOT / "migrations"
@@ -213,7 +212,6 @@ def test_approvals_fk_is_deferred_for_create_task_order(conn):
 
 
 def test_015_down_migration_preserves_rows_and_reapplies(conn):
-    now = dbmod.now()
     conn.execute(
         "INSERT INTO tasks (id, device_id, tenant, tool, args_json, tier, status,"
         " created_at, updated_at) VALUES ('t1','d1','default','get_system_info','{}',1,'queued',1,1)"

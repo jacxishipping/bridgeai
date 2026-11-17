@@ -7,8 +7,8 @@ Verifies:
 4. `list_devices()` shows all fleet devices and local host with active indicators and routing hints.
 """
 import pytest
-from ai_bridge import server as mcp_server
 
+from ai_bridge import server as mcp_server
 
 ADMIN = "a0f63388f83290e1dec8cdba8a140a2bacfa4e6801d916bd"
 

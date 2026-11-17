@@ -22,15 +22,15 @@ Usage:
     export AI_BRIDGE_TOKEN="your-admin-or-session-token"
     python ollama_local_agent.py "Check free memory on ubuntu and screenshot windows-pc"
 """
-import json
 import os
 import sys
 
 # Ensure local package can be imported if running from repo
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src")))
 
-from ai_bridge import AIBridgeClient
 from _bridge_config import describe_result, is_pending_approval, require_bridge_url
+
+from ai_bridge import AIBridgeClient
 
 MAX_TURNS = 8
 MODEL = "llama3.2"

@@ -8,13 +8,11 @@ Dispatches structured, rich formatted alert notifications across:
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
 import time
 import urllib.parse
-from typing import Any
 
 import httpx
 

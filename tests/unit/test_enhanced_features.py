@@ -1,7 +1,6 @@
 """Unit tests for Advanced Features: Multi-Monitor DXGI, WebRTC DataChannel, Terminal Streaming, and Standalone EXE Builder."""
 import json
 import time
-from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +14,6 @@ from ai_bridge.terminal_manager import (
     list_terminal_sessions,
 )
 from ai_bridge.webrtc_stream import AgentStreamer
-
 
 # --- Test 1: Screen Capture & Multi-Monitor ---
 

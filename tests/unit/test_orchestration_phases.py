@@ -11,17 +11,15 @@ Phase → primary test files (avoid renaming older milestone suites):
 """
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ai_bridge.control.app import create_app
 from ai_bridge.control import dispatch, orchestration, plane_state, role_catalog, task_runtime
 from ai_bridge.control.agent_memory import append_memory_chunk, load_agent_memory
+from ai_bridge.control.app import create_app
 from ai_bridge.policy import Policy
 
 
@@ -149,7 +147,7 @@ def test_task_runtime_cancel_interrupts_dispatch():
 def test_role_catalog_seed_idempotent(tmp_path):
     app = create_app(admin_token="adm-role", db_path=tmp_path / "roles.db")
     conn = app.state.conn
-    n1 = role_catalog.seed_role_catalog(conn)
+    role_catalog.seed_role_catalog(conn)
     n2 = role_catalog.seed_role_catalog(conn)
     assert n2 == 0
     rows = conn.execute("SELECT COUNT(*) AS c FROM custom_agents WHERE id LIKE 'agent-role-%'").fetchone()

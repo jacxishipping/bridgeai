@@ -6,6 +6,7 @@ Provides:
 3. Autonomous ReAct agent: /api/ai/agent (Bring-Your-Own-Key for OpenAI, Claude, Gemini, Groq, Ollama).
 4. OpenAI-compatible chat completions proxy: /v1/chat/completions (for LangChain, CrewAI, AutoGen, Cursor).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -24,8 +25,8 @@ from pydantic import BaseModel, Field
 
 from ..policy import TOOL_TIERS, RiskTier, normalize_tool_name
 from . import db as dbmod
-from .dispatch import dispatch
 from . import task_service as task_service_mod
+from .dispatch import dispatch
 from .mcp_client import execute_mcp_tool, format_mcp_tool_for_llm
 from .mcp_oauth import enforce_mcp_tool_policy, ensure_valid_mcp_token
 
@@ -86,7 +87,8 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         },
     },
     "take_screenshot": {
-        "description": "Capture the primary desktop display on a Windows workstation or GUI device. The screenshot is attached to the conversation as an image so you can inspect it; coordinates you read from it are native screen pixels.",
+        "description": "Capture the primary desktop display on a Windows workstation or GUI device. The screenshot is attached to the conversation as an image "
+        "so you can inspect it; coordinates you read from it are native screen pixels.",
         "category": "desktop",
         "parameters": {
             "type": "object",
@@ -542,8 +544,14 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
 # Add aliases and additional mapped tools
 from ..connectors import (  # noqa: E402
     browserbase as _browserbase,
+)
+from ..connectors import (  # noqa: E402
     firecrawl as _firecrawl,
+)
+from ..connectors import (  # noqa: E402
     microsoft365 as _m365,
+)
+from ..connectors import (  # noqa: E402
     you_search as _you_search,
 )
 
@@ -567,92 +575,458 @@ def _obj_schema(props: dict[str, Any], required: list[str] | None = None) -> dic
 
 _ADDITIONAL_TOOL_SPECS: dict[str, dict[str, Any]] = {
     # Workspace, dev, git, diagnostics
-    "read_workspace_file": {"description": "Read text contents of a confined workspace file.", "category": "filesystem", "parameters": _obj_schema({"relative_path": {"type": "string"}, "device": {"type": "string"}}, ["relative_path"])},
-    "search_workspace": {"description": "Search workspace files for a text query.", "category": "filesystem", "parameters": _obj_schema({"query": {"type": "string"}, "relative_directory": {"type": "string", "default": "."}, "device": {"type": "string"}}, ["query"])},
-    "create_workspace_file": {"description": "Create or overwrite a confined workspace file.", "category": "filesystem", "parameters": _obj_schema({"relative_path": {"type": "string"}, "content": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["relative_path", "content"])},
-    "edit_workspace_file": {"description": "Replace exact text inside a workspace file.", "category": "filesystem", "parameters": _obj_schema({"relative_path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}, "device": {"type": "string"}}, ["relative_path", "old_text", "new_text"])},
-    "move_workspace_file": {"description": "Move or rename a confined workspace file.", "category": "filesystem", "parameters": _obj_schema({"source": {"type": "string"}, "destination": {"type": "string"}, "device": {"type": "string"}}, ["source", "destination"])},
-    "delete_workspace_file": {"description": "Delete a confined workspace file (Tier 4 approval required).", "category": "filesystem", "parameters": _obj_schema({"relative_path": {"type": "string"}, "device": {"type": "string"}}, ["relative_path"])},
-    "workspace_project_structure": {"description": "Return a bounded tree view of project directories and files.", "category": "filesystem", "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "max_depth": {"type": "integer", "default": 3}, "device": {"type": "string"}})},
-    "dev_workspace_plan": {"description": "Inspect project type, toolchain, and structure for engineering planning.", "category": "diagnostic", "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "max_depth": {"type": "integer", "default": 3}, "device": {"type": "string"}})},
-    "run_linter": {"description": "Run the configured project linter (ruff check).", "category": "diagnostic", "parameters": _obj_schema({"timeout": {"type": "integer", "default": 60}, "device": {"type": "string"}})},
-    "run_project_tests_structured": {"description": "Run allowlisted project tests and return structured pass/fail counts.", "category": "diagnostic", "parameters": _obj_schema({"test_command": {"type": "string", "default": "pytest -q"}, "timeout": {"type": "integer", "default": 120}, "device": {"type": "string"}})},
-    "create_backup": {"description": "Create a confined zip backup archive of a workspace directory.", "category": "filesystem", "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "device": {"type": "string"}})},
-    "deploy_application": {"description": "Stage project artifacts into a confined deployment directory.", "category": "system", "parameters": _obj_schema({"project_directory": {"type": "string", "default": "."}, "target_directory": {"type": "string", "default": "deploy-staging"}, "device": {"type": "string"}})},
-    "git_create_branch": {"description": "Create and check out a new Git branch inside the workspace.", "category": "git", "parameters": _obj_schema({"branch_name": {"type": "string"}, "relative_directory": {"type": "string", "default": "."}, "device": {"type": "string"}}, ["branch_name"])},
-    "git_checkpoint": {"description": "Stage workspace changes and create a Git checkpoint commit.", "category": "git", "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "message": {"type": "string", "default": "ai-bridge checkpoint"}, "device": {"type": "string"}})},
-    "git_apply_patch": {"description": "Validate or apply a unified diff patch inside the workspace.", "category": "git", "parameters": _obj_schema({"patch_text": {"type": "string"}, "relative_directory": {"type": "string", "default": "."}, "check_only": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["patch_text"])},
-    "git_log": {"description": "Return concise recent Git commit history for a workspace repository.", "category": "git", "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "limit": {"type": "integer", "default": 20}, "device": {"type": "string"}})},
-    "git_commit": {"description": "Commit currently staged changes inside the workspace repository.", "category": "git", "parameters": _obj_schema({"message": {"type": "string"}, "relative_directory": {"type": "string", "default": "."}, "device": {"type": "string"}}, ["message"])},
-    "get_recent_logs": {"description": "Read recent system, application, or security logs from the target device.", "category": "diagnostic", "parameters": _obj_schema({"source": {"type": "string", "default": "system"}, "lines": {"type": "integer", "default": 50}, "device": {"type": "string"}})},
-    "run_diagnostic_task": {"description": "Run a read-only diagnostic task (uptime, disk_usage, memory_summary).", "category": "diagnostic", "parameters": _obj_schema({"task_name": {"type": "string"}, "device": {"type": "string"}}, ["task_name"])},
+    "read_workspace_file": {
+        "description": "Read text contents of a confined workspace file.",
+        "category": "filesystem",
+        "parameters": _obj_schema({"relative_path": {"type": "string"}, "device": {"type": "string"}}, ["relative_path"]),
+    },
+    "search_workspace": {
+        "description": "Search workspace files for a text query.",
+        "category": "filesystem",
+        "parameters": _obj_schema({"query": {"type": "string"}, "relative_directory": {"type": "string", "default": "."}, "device": {"type": "string"}}, ["query"]),
+    },
+    "create_workspace_file": {
+        "description": "Create or overwrite a confined workspace file.",
+        "category": "filesystem",
+        "parameters": _obj_schema(
+            {"relative_path": {"type": "string"}, "content": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["relative_path", "content"]
+        ),
+    },
+    "edit_workspace_file": {
+        "description": "Replace exact text inside a workspace file.",
+        "category": "filesystem",
+        "parameters": _obj_schema(
+            {"relative_path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}, "device": {"type": "string"}}, ["relative_path", "old_text", "new_text"]
+        ),
+    },
+    "move_workspace_file": {
+        "description": "Move or rename a confined workspace file.",
+        "category": "filesystem",
+        "parameters": _obj_schema({"source": {"type": "string"}, "destination": {"type": "string"}, "device": {"type": "string"}}, ["source", "destination"]),
+    },
+    "delete_workspace_file": {
+        "description": "Delete a confined workspace file (Tier 4 approval required).",
+        "category": "filesystem",
+        "parameters": _obj_schema({"relative_path": {"type": "string"}, "device": {"type": "string"}}, ["relative_path"]),
+    },
+    "workspace_project_structure": {
+        "description": "Return a bounded tree view of project directories and files.",
+        "category": "filesystem",
+        "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "max_depth": {"type": "integer", "default": 3}, "device": {"type": "string"}}),
+    },
+    "dev_workspace_plan": {
+        "description": "Inspect project type, toolchain, and structure for engineering planning.",
+        "category": "diagnostic",
+        "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "max_depth": {"type": "integer", "default": 3}, "device": {"type": "string"}}),
+    },
+    "run_linter": {
+        "description": "Run the configured project linter (ruff check).",
+        "category": "diagnostic",
+        "parameters": _obj_schema({"timeout": {"type": "integer", "default": 60}, "device": {"type": "string"}}),
+    },
+    "run_project_tests_structured": {
+        "description": "Run allowlisted project tests and return structured pass/fail counts.",
+        "category": "diagnostic",
+        "parameters": _obj_schema({"test_command": {"type": "string", "default": "pytest -q"}, "timeout": {"type": "integer", "default": 120}, "device": {"type": "string"}}),
+    },
+    "create_backup": {
+        "description": "Create a confined zip backup archive of a workspace directory.",
+        "category": "filesystem",
+        "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "device": {"type": "string"}}),
+    },
+    "deploy_application": {
+        "description": "Stage project artifacts into a confined deployment directory.",
+        "category": "system",
+        "parameters": _obj_schema({"project_directory": {"type": "string", "default": "."}, "target_directory": {"type": "string", "default": "deploy-staging"}, "device": {"type": "string"}}),
+    },
+    "git_create_branch": {
+        "description": "Create and check out a new Git branch inside the workspace.",
+        "category": "git",
+        "parameters": _obj_schema({"branch_name": {"type": "string"}, "relative_directory": {"type": "string", "default": "."}, "device": {"type": "string"}}, ["branch_name"]),
+    },
+    "git_checkpoint": {
+        "description": "Stage workspace changes and create a Git checkpoint commit.",
+        "category": "git",
+        "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "message": {"type": "string", "default": "ai-bridge checkpoint"}, "device": {"type": "string"}}),
+    },
+    "git_apply_patch": {
+        "description": "Validate or apply a unified diff patch inside the workspace.",
+        "category": "git",
+        "parameters": _obj_schema(
+            {"patch_text": {"type": "string"}, "relative_directory": {"type": "string", "default": "."}, "check_only": {"type": "boolean", "default": False}, "device": {"type": "string"}},
+            ["patch_text"],
+        ),
+    },
+    "git_log": {
+        "description": "Return concise recent Git commit history for a workspace repository.",
+        "category": "git",
+        "parameters": _obj_schema({"relative_directory": {"type": "string", "default": "."}, "limit": {"type": "integer", "default": 20}, "device": {"type": "string"}}),
+    },
+    "git_commit": {
+        "description": "Commit currently staged changes inside the workspace repository.",
+        "category": "git",
+        "parameters": _obj_schema({"message": {"type": "string"}, "relative_directory": {"type": "string", "default": "."}, "device": {"type": "string"}}, ["message"]),
+    },
+    "get_recent_logs": {
+        "description": "Read recent system, application, or security logs from the target device.",
+        "category": "diagnostic",
+        "parameters": _obj_schema({"source": {"type": "string", "default": "system"}, "lines": {"type": "integer", "default": 50}, "device": {"type": "string"}}),
+    },
+    "run_diagnostic_task": {
+        "description": "Run a read-only diagnostic task (uptime, disk_usage, memory_summary).",
+        "category": "diagnostic",
+        "parameters": _obj_schema({"task_name": {"type": "string"}, "device": {"type": "string"}}, ["task_name"]),
+    },
     # Desktop & native streaming
-    "capture_desktop_frame": {"description": "Capture a scaled JPEG desktop frame for iterative GUI navigation.", "category": "desktop", "parameters": _obj_schema({"scale": {"type": "number", "default": 0.75}, "quality": {"type": "integer", "default": 70}, "device": {"type": "string"}})},
-    "get_native_encode_status": {"description": "Inspect hardware/native H.264 encoder availability and timing settings.", "category": "desktop", "parameters": _obj_schema({"device": {"type": "string"}})},
+    "capture_desktop_frame": {
+        "description": "Capture a scaled JPEG desktop frame for iterative GUI navigation.",
+        "category": "desktop",
+        "parameters": _obj_schema({"scale": {"type": "number", "default": 0.75}, "quality": {"type": "integer", "default": 70}, "device": {"type": "string"}}),
+    },
+    "get_native_encode_status": {
+        "description": "Inspect hardware/native H.264 encoder availability and timing settings.",
+        "category": "desktop",
+        "parameters": _obj_schema({"device": {"type": "string"}}),
+    },
     "desktop_get_screenshot": {**TOOL_CATALOG["take_screenshot"], "description": "Canonical computer-use screenshot capture."},
-    "desktop_get_window_screenshot": {"description": "Capture a specific desktop window by HWND or title substring.", "category": "desktop", "parameters": _obj_schema({"hwnd": {"type": "integer"}, "title": {"type": "string"}, "scale": {"type": "number", "default": 1.0}, "device": {"type": "string"}})},
-    "desktop_get_status": {"description": "Inspect desktop GUI automation capability, backend library, and screen geometry.", "category": "desktop", "parameters": _obj_schema({"device": {"type": "string"}})},
-    "desktop_get_monitors": {"description": "List physical displays and bounding rectangles on the target workstation.", "category": "desktop", "parameters": _obj_schema({"device": {"type": "string"}})},
+    "desktop_get_window_screenshot": {
+        "description": "Capture a specific desktop window by HWND or title substring.",
+        "category": "desktop",
+        "parameters": _obj_schema({"hwnd": {"type": "integer"}, "title": {"type": "string"}, "scale": {"type": "number", "default": 1.0}, "device": {"type": "string"}}),
+    },
+    "desktop_get_status": {
+        "description": "Inspect desktop GUI automation capability, backend library, and screen geometry.",
+        "category": "desktop",
+        "parameters": _obj_schema({"device": {"type": "string"}}),
+    },
+    "desktop_get_monitors": {
+        "description": "List physical displays and bounding rectangles on the target workstation.",
+        "category": "desktop",
+        "parameters": _obj_schema({"device": {"type": "string"}}),
+    },
     "desktop_clipboard_get": {"description": "Read current text from the target desktop clipboard.", "category": "desktop", "parameters": _obj_schema({"device": {"type": "string"}})},
-    "desktop_clipboard_set": {"description": "Write text to the target desktop clipboard and optionally paste it.", "category": "desktop", "parameters": _obj_schema({"text": {"type": "string"}, "paste": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["text"])},
-    "desktop_mouse_move": {"description": "Move the desktop cursor to (x, y) in native pixels.", "category": "desktop", "parameters": _obj_schema({"x": {"type": "integer"}, "y": {"type": "integer"}, "device": {"type": "string"}}, ["x", "y"])},
-    "desktop_click": {"description": "Click the desktop mouse button at (x, y).", "category": "desktop", "parameters": _obj_schema({"x": {"type": "integer"}, "y": {"type": "integer"}, "button": {"type": "string", "default": "left"}, "clicks": {"type": "integer", "default": 1}, "device": {"type": "string"}}, ["x", "y"])},
-    "desktop_keyboard": {"description": "Type text or press/hold a named desktop key.", "category": "desktop", "parameters": _obj_schema({"text": {"type": "string"}, "key": {"type": "string"}, "action": {"type": "string", "default": "type"}, "device": {"type": "string"}})},
-    "desktop_scroll": {"description": "Scroll the mouse wheel vertically at an optional desktop position.", "category": "desktop", "parameters": _obj_schema({"delta": {"type": "integer", "default": -120}, "x": {"type": "integer"}, "y": {"type": "integer"}, "device": {"type": "string"}})},
-    "desktop_execute_command": {"description": "Execute a confined command on the desktop workstation.", "category": "desktop", "parameters": _obj_schema({"command": {"type": "string"}, "working_directory": {"type": "string", "default": ""}, "timeout": {"type": "integer", "default": 60}, "device": {"type": "string"}}, ["command"])},
-    "desktop_open_application": {"description": "Open an allowlisted desktop application or URL.", "category": "desktop", "parameters": _obj_schema({"app_name": {"type": "string"}, "url": {"type": "string"}, "device": {"type": "string"}}, ["app_name"])},
+    "desktop_clipboard_set": {
+        "description": "Write text to the target desktop clipboard and optionally paste it.",
+        "category": "desktop",
+        "parameters": _obj_schema({"text": {"type": "string"}, "paste": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["text"]),
+    },
+    "desktop_mouse_move": {
+        "description": "Move the desktop cursor to (x, y) in native pixels.",
+        "category": "desktop",
+        "parameters": _obj_schema({"x": {"type": "integer"}, "y": {"type": "integer"}, "device": {"type": "string"}}, ["x", "y"]),
+    },
+    "desktop_click": {
+        "description": "Click the desktop mouse button at (x, y).",
+        "category": "desktop",
+        "parameters": _obj_schema(
+            {"x": {"type": "integer"}, "y": {"type": "integer"}, "button": {"type": "string", "default": "left"}, "clicks": {"type": "integer", "default": 1}, "device": {"type": "string"}}, ["x", "y"]
+        ),
+    },
+    "desktop_keyboard": {
+        "description": "Type text or press/hold a named desktop key.",
+        "category": "desktop",
+        "parameters": _obj_schema({"text": {"type": "string"}, "key": {"type": "string"}, "action": {"type": "string", "default": "type"}, "device": {"type": "string"}}),
+    },
+    "desktop_scroll": {
+        "description": "Scroll the mouse wheel vertically at an optional desktop position.",
+        "category": "desktop",
+        "parameters": _obj_schema({"delta": {"type": "integer", "default": -120}, "x": {"type": "integer"}, "y": {"type": "integer"}, "device": {"type": "string"}}),
+    },
+    "desktop_execute_command": {
+        "description": "Execute a confined command on the desktop workstation.",
+        "category": "desktop",
+        "parameters": _obj_schema(
+            {"command": {"type": "string"}, "working_directory": {"type": "string", "default": ""}, "timeout": {"type": "integer", "default": 60}, "device": {"type": "string"}}, ["command"]
+        ),
+    },
+    "desktop_open_application": {
+        "description": "Open an allowlisted desktop application or URL.",
+        "category": "desktop",
+        "parameters": _obj_schema({"app_name": {"type": "string"}, "url": {"type": "string"}, "device": {"type": "string"}}, ["app_name"]),
+    },
     "desktop_get_windows": {"description": "List visible desktop windows and titles.", "category": "desktop", "parameters": _obj_schema({"device": {"type": "string"}})},
-    "desktop_wait": {"description": "Wait for a delay, visible OCR text, or an active window title.", "category": "desktop", "parameters": _obj_schema({"condition": {"type": "string", "default": "sleep"}, "text": {"type": "string"}, "window_title": {"type": "string"}, "seconds": {"type": "number", "default": 1.0}, "timeout_seconds": {"type": "number", "default": 10.0}, "device": {"type": "string"}})},
-    "desktop_verify_action": {"description": "Verify desktop state after input using window title, OCR text, and optional screenshot.", "category": "desktop", "parameters": _obj_schema({"expected_text": {"type": "string"}, "expected_window": {"type": "string"}, "wait_seconds": {"type": "number", "default": 0.35}, "capture_after": {"type": "boolean", "default": True}, "device": {"type": "string"}})},
-    "desktop_get_ui_elements": {"description": "Enumerate accessible UI automation elements on the desktop.", "category": "desktop", "parameters": _obj_schema({"include_controls": {"type": "boolean", "default": True}, "max_elements": {"type": "integer", "default": 25}, "monitor_index": {"type": "integer"}, "device": {"type": "string"}})},
-    "desktop_veto_action": {"description": "Cancel or veto a pending anticipatory desktop action by intent_id.", "category": "desktop", "parameters": _obj_schema({"intent_id": {"type": "string"}, "reason": {"type": "string", "default": "Operator override"}}, ["intent_id"])},
-    "desktop_anticipate_action": {"description": "Emit a countdown anticipatory overlay for an upcoming desktop GUI action.", "category": "desktop", "parameters": _obj_schema({"action": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"}, "label": {"type": "string"}, "countdown_ms": {"type": "integer", "default": 2000}}, ["action", "x", "y"])},
+    "desktop_wait": {
+        "description": "Wait for a delay, visible OCR text, or an active window title.",
+        "category": "desktop",
+        "parameters": _obj_schema(
+            {
+                "condition": {"type": "string", "default": "sleep"},
+                "text": {"type": "string"},
+                "window_title": {"type": "string"},
+                "seconds": {"type": "number", "default": 1.0},
+                "timeout_seconds": {"type": "number", "default": 10.0},
+                "device": {"type": "string"},
+            }
+        ),
+    },
+    "desktop_verify_action": {
+        "description": "Verify desktop state after input using window title, OCR text, and optional screenshot.",
+        "category": "desktop",
+        "parameters": _obj_schema(
+            {
+                "expected_text": {"type": "string"},
+                "expected_window": {"type": "string"},
+                "wait_seconds": {"type": "number", "default": 0.35},
+                "capture_after": {"type": "boolean", "default": True},
+                "device": {"type": "string"},
+            }
+        ),
+    },
+    "desktop_get_ui_elements": {
+        "description": "Enumerate accessible UI automation elements on the desktop.",
+        "category": "desktop",
+        "parameters": _obj_schema(
+            {"include_controls": {"type": "boolean", "default": True}, "max_elements": {"type": "integer", "default": 25}, "monitor_index": {"type": "integer"}, "device": {"type": "string"}}
+        ),
+    },
+    "desktop_veto_action": {
+        "description": "Cancel or veto a pending anticipatory desktop action by intent_id.",
+        "category": "desktop",
+        "parameters": _obj_schema({"intent_id": {"type": "string"}, "reason": {"type": "string", "default": "Operator override"}}, ["intent_id"]),
+    },
+    "desktop_anticipate_action": {
+        "description": "Emit a countdown anticipatory overlay for an upcoming desktop GUI action.",
+        "category": "desktop",
+        "parameters": _obj_schema(
+            {"action": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"}, "label": {"type": "string"}, "countdown_ms": {"type": "integer", "default": 2000}}, ["action", "x", "y"]
+        ),
+    },
     "get_clipboard": {"description": "Read current desktop clipboard text.", "category": "desktop", "parameters": _obj_schema({"device": {"type": "string"}})},
-    "set_clipboard": {"description": "Set desktop clipboard text and optionally trigger paste.", "category": "desktop", "parameters": _obj_schema({"text": {"type": "string"}, "paste": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["text"])},
-    "perform_approved_ui_action": {"description": "Run a named GUI input action (click, scroll, type_text, press_key, drag, list_windows, etc.).", "category": "desktop", "parameters": _obj_schema({"action": {"type": "string"}, "x": {"type": "integer"}, "y": {"type": "integer"}, "text": {"type": "string"}, "key": {"type": "string"}, "title": {"type": "string"}, "delta": {"type": "integer"}, "device": {"type": "string"}}, ["action"])},
-    "start_webrtc_stream": {"description": "Start a low-latency WebRTC desktop video stream session.", "category": "desktop", "parameters": _obj_schema({"session_id": {"type": "string"}, "scale": {"type": "number", "default": 0.75}, "fps": {"type": "integer", "default": 30}, "monitor_index": {"type": "integer"}, "bitrate_kbps": {"type": "integer", "default": 4500}, "device": {"type": "string"}}, ["session_id"])},
-    "stop_webrtc_stream": {"description": "Stop an active WebRTC desktop stream session.", "category": "desktop", "parameters": _obj_schema({"session_id": {"type": "string"}, "device": {"type": "string"}}, ["session_id"])},
+    "set_clipboard": {
+        "description": "Set desktop clipboard text and optionally trigger paste.",
+        "category": "desktop",
+        "parameters": _obj_schema({"text": {"type": "string"}, "paste": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["text"]),
+    },
+    "perform_approved_ui_action": {
+        "description": "Run a named GUI input action (click, scroll, type_text, press_key, drag, list_windows, etc.).",
+        "category": "desktop",
+        "parameters": _obj_schema(
+            {
+                "action": {"type": "string"},
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+                "text": {"type": "string"},
+                "key": {"type": "string"},
+                "title": {"type": "string"},
+                "delta": {"type": "integer"},
+                "device": {"type": "string"},
+            },
+            ["action"],
+        ),
+    },
+    "start_webrtc_stream": {
+        "description": "Start a low-latency WebRTC desktop video stream session.",
+        "category": "desktop",
+        "parameters": _obj_schema(
+            {
+                "session_id": {"type": "string"},
+                "scale": {"type": "number", "default": 0.75},
+                "fps": {"type": "integer", "default": 30},
+                "monitor_index": {"type": "integer"},
+                "bitrate_kbps": {"type": "integer", "default": 4500},
+                "device": {"type": "string"},
+            },
+            ["session_id"],
+        ),
+    },
+    "stop_webrtc_stream": {
+        "description": "Stop an active WebRTC desktop stream session.",
+        "category": "desktop",
+        "parameters": _obj_schema({"session_id": {"type": "string"}, "device": {"type": "string"}}, ["session_id"]),
+    },
     "update_fleet_agent": {"description": "Pull and stage updates on the remote fleet agent.", "category": "system", "parameters": _obj_schema({"device": {"type": "string"}})},
     # Browser (Playwright)
-    "browser_navigate": {"description": "Navigate Playwright browser to URL.", "category": "browser", "parameters": _obj_schema({"url": {"type": "string"}, "wait_until": {"type": "string", "default": "networkidle"}, "timeout": {"type": "integer", "default": 30}, "screenshot_after_nav": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["url"])},
-    "browser_screenshot": {"description": "Capture Playwright page screenshot.", "category": "browser", "parameters": _obj_schema({"full_page": {"type": "boolean", "default": False}, "device": {"type": "string"}})},
-    "browser_snapshot": {"description": "Capture current browser URL, extracted text, and interactive DOM elements.", "category": "browser", "parameters": _obj_schema({"selector": {"type": "string", "default": "body"}, "device": {"type": "string"}})},
-    "browser_click": {"description": "Click an element matching CSS/Playwright selector.", "category": "browser", "parameters": _obj_schema({"selector": {"type": "string"}, "button": {"type": "string", "default": "left"}, "clicks": {"type": "integer", "default": 1}, "device": {"type": "string"}}, ["selector"])},
-    "browser_type": {"description": "Type text into a browser input matched by selector.", "category": "browser", "parameters": _obj_schema({"selector": {"type": "string"}, "text": {"type": "string"}, "clear_first": {"type": "boolean", "default": True}, "submit": {"type": "boolean", "default": False}, "device": {"type": "string"}}, ["selector", "text"])},
-    "browser_get_text": {"description": "Read rendered text from the active browser page or selector.", "category": "browser", "parameters": _obj_schema({"selector": {"type": "string", "default": "body"}, "device": {"type": "string"}})},
-    "browser_evaluate": {"description": "Evaluate JavaScript expression inside the active browser page.", "category": "browser", "parameters": _obj_schema({"script": {"type": "string"}, "device": {"type": "string"}}, ["script"])},
+    "browser_navigate": {
+        "description": "Navigate Playwright browser to URL.",
+        "category": "browser",
+        "parameters": _obj_schema(
+            {
+                "url": {"type": "string"},
+                "wait_until": {"type": "string", "default": "networkidle"},
+                "timeout": {"type": "integer", "default": 30},
+                "screenshot_after_nav": {"type": "boolean", "default": False},
+                "device": {"type": "string"},
+            },
+            ["url"],
+        ),
+    },
+    "browser_screenshot": {
+        "description": "Capture Playwright page screenshot.",
+        "category": "browser",
+        "parameters": _obj_schema({"full_page": {"type": "boolean", "default": False}, "device": {"type": "string"}}),
+    },
+    "browser_snapshot": {
+        "description": "Capture current browser URL, extracted text, and interactive DOM elements.",
+        "category": "browser",
+        "parameters": _obj_schema({"selector": {"type": "string", "default": "body"}, "device": {"type": "string"}}),
+    },
+    "browser_click": {
+        "description": "Click an element matching CSS/Playwright selector.",
+        "category": "browser",
+        "parameters": _obj_schema(
+            {"selector": {"type": "string"}, "button": {"type": "string", "default": "left"}, "clicks": {"type": "integer", "default": 1}, "device": {"type": "string"}}, ["selector"]
+        ),
+    },
+    "browser_type": {
+        "description": "Type text into a browser input matched by selector.",
+        "category": "browser",
+        "parameters": _obj_schema(
+            {
+                "selector": {"type": "string"},
+                "text": {"type": "string"},
+                "clear_first": {"type": "boolean", "default": True},
+                "submit": {"type": "boolean", "default": False},
+                "device": {"type": "string"},
+            },
+            ["selector", "text"],
+        ),
+    },
+    "browser_get_text": {
+        "description": "Read rendered text from the active browser page or selector.",
+        "category": "browser",
+        "parameters": _obj_schema({"selector": {"type": "string", "default": "body"}, "device": {"type": "string"}}),
+    },
+    "browser_evaluate": {
+        "description": "Evaluate JavaScript expression inside the active browser page.",
+        "category": "browser",
+        "parameters": _obj_schema({"script": {"type": "string"}, "device": {"type": "string"}}, ["script"]),
+    },
     "browser_get_url": {"description": "Return current URL of active browser tab.", "category": "browser", "parameters": _obj_schema({"device": {"type": "string"}})},
     "browser_go_back": {"description": "Navigate browser history back.", "category": "browser", "parameters": _obj_schema({"device": {"type": "string"}})},
     "browser_go_forward": {"description": "Navigate browser history forward.", "category": "browser", "parameters": _obj_schema({"device": {"type": "string"}})},
-    "browser_scroll": {"description": "Scroll active browser page vertically or horizontally.", "category": "browser", "parameters": _obj_schema({"delta_y": {"type": "integer", "default": 0}, "delta_x": {"type": "integer", "default": 0}, "device": {"type": "string"}})},
+    "browser_scroll": {
+        "description": "Scroll active browser page vertically or horizontally.",
+        "category": "browser",
+        "parameters": _obj_schema({"delta_y": {"type": "integer", "default": 0}, "delta_x": {"type": "integer", "default": 0}, "device": {"type": "string"}}),
+    },
     "browser_close": {"description": "Close the Playwright browser session.", "category": "browser", "parameters": _obj_schema({"device": {"type": "string"}})},
     "browser_new_page": {"description": "Open a new browser page/tab.", "category": "browser", "parameters": _obj_schema({"url": {"type": "string"}, "device": {"type": "string"}})},
-    "browser_get_elements": {"description": "List DOM elements matching selector with text and bounding attributes.", "category": "browser", "parameters": _obj_schema({"selector": {"type": "string"}, "include_text": {"type": "boolean", "default": True}, "device": {"type": "string"}}, ["selector"])},
-    "browser_wait_for_selector": {"description": "Wait for a DOM selector to reach visible/hidden/attached state.", "category": "browser", "parameters": _obj_schema({"selector": {"type": "string"}, "timeout": {"type": "integer", "default": 10}, "state": {"type": "string", "default": "visible"}, "device": {"type": "string"}}, ["selector"])},
-    "browser_select_option": {"description": "Select option in a <select> dropdown by value or label.", "category": "browser", "parameters": _obj_schema({"selector": {"type": "string"}, "value": {"type": "string"}, "label": {"type": "string"}, "device": {"type": "string"}}, ["selector"])},
-    "browser_download_file": {"description": "Download a file from URL into workspace downloads.", "category": "browser", "parameters": _obj_schema({"url": {"type": "string"}, "filename": {"type": "string"}, "device": {"type": "string"}}, ["url"])},
-    "browser_set_viewport": {"description": "Switch browser viewport preset (desktop/tablet/mobile) or dimensions.", "category": "browser", "parameters": _obj_schema({"device": {"type": "string", "default": "desktop"}, "width": {"type": "integer"}, "height": {"type": "integer"}})},
-    "browser_expect": {"description": "Assert browser page text, URL substring, title, or selector visibility.", "category": "browser", "parameters": _obj_schema({"text": {"type": "string"}, "url_contains": {"type": "string"}, "title_contains": {"type": "string"}, "selector": {"type": "string"}, "visible": {"type": "boolean", "default": True}})},
-    "browser_wait_for_url": {"description": "Wait until current browser URL contains expected substring.", "category": "browser", "parameters": _obj_schema({"url_contains": {"type": "string"}, "timeout": {"type": "integer", "default": 15}}, ["url_contains"])},
-    "browser_diagnostics": {"description": "Collect console errors, page errors, and network diagnostics for active browser.", "category": "browser", "parameters": _obj_schema({"device": {"type": "string"}})},
-    "browser_compare_screenshot": {"description": "Compare active page screenshot against visual baseline image.", "category": "browser", "parameters": _obj_schema({"baseline_name": {"type": "string", "default": "default"}, "threshold": {"type": "number", "default": 0.08}, "full_page": {"type": "boolean", "default": False}, "update_baseline": {"type": "boolean", "default": False}})},
+    "browser_get_elements": {
+        "description": "List DOM elements matching selector with text and bounding attributes.",
+        "category": "browser",
+        "parameters": _obj_schema({"selector": {"type": "string"}, "include_text": {"type": "boolean", "default": True}, "device": {"type": "string"}}, ["selector"]),
+    },
+    "browser_wait_for_selector": {
+        "description": "Wait for a DOM selector to reach visible/hidden/attached state.",
+        "category": "browser",
+        "parameters": _obj_schema(
+            {"selector": {"type": "string"}, "timeout": {"type": "integer", "default": 10}, "state": {"type": "string", "default": "visible"}, "device": {"type": "string"}}, ["selector"]
+        ),
+    },
+    "browser_select_option": {
+        "description": "Select option in a <select> dropdown by value or label.",
+        "category": "browser",
+        "parameters": _obj_schema({"selector": {"type": "string"}, "value": {"type": "string"}, "label": {"type": "string"}, "device": {"type": "string"}}, ["selector"]),
+    },
+    "browser_download_file": {
+        "description": "Download a file from URL into workspace downloads.",
+        "category": "browser",
+        "parameters": _obj_schema({"url": {"type": "string"}, "filename": {"type": "string"}, "device": {"type": "string"}}, ["url"]),
+    },
+    "browser_set_viewport": {
+        "description": "Switch browser viewport preset (desktop/tablet/mobile) or dimensions.",
+        "category": "browser",
+        "parameters": _obj_schema({"device": {"type": "string", "default": "desktop"}, "width": {"type": "integer"}, "height": {"type": "integer"}}),
+    },
+    "browser_expect": {
+        "description": "Assert browser page text, URL substring, title, or selector visibility.",
+        "category": "browser",
+        "parameters": _obj_schema(
+            {"text": {"type": "string"}, "url_contains": {"type": "string"}, "title_contains": {"type": "string"}, "selector": {"type": "string"}, "visible": {"type": "boolean", "default": True}}
+        ),
+    },
+    "browser_wait_for_url": {
+        "description": "Wait until current browser URL contains expected substring.",
+        "category": "browser",
+        "parameters": _obj_schema({"url_contains": {"type": "string"}, "timeout": {"type": "integer", "default": 15}}, ["url_contains"]),
+    },
+    "browser_diagnostics": {
+        "description": "Collect console errors, page errors, and network diagnostics for active browser.",
+        "category": "browser",
+        "parameters": _obj_schema({"device": {"type": "string"}}),
+    },
+    "browser_compare_screenshot": {
+        "description": "Compare active page screenshot against visual baseline image.",
+        "category": "browser",
+        "parameters": _obj_schema(
+            {
+                "baseline_name": {"type": "string", "default": "default"},
+                "threshold": {"type": "number", "default": 0.08},
+                "full_page": {"type": "boolean", "default": False},
+                "update_baseline": {"type": "boolean", "default": False},
+            }
+        ),
+    },
     "browser_session_info": {"description": "Inspect browser runtime profile, isolation wrapper, and launch configuration.", "category": "browser", "parameters": _obj_schema({})},
     # Shell, task lifecycle & multi-agent orchestration
-    "terminal_exec": {"description": "Run a shell command in confined terminal session (alias of run_shell).", "category": "shell", "parameters": _obj_schema({"command": {"type": "string"}, "working_directory": {"type": "string", "default": ""}, "timeout": {"type": "integer", "default": 0}, "device": {"type": "string"}}, ["command"])},
-    "submit_task": {"description": "Submit a background diagnostic or project test task to TaskRunner.", "category": "system", "parameters": _obj_schema({"task_name": {"type": "string"}, "timeout": {"type": "integer", "default": 30}, "test_command": {"type": "string", "default": "pytest"}}, ["task_name"])},
+    "terminal_exec": {
+        "description": "Run a shell command in confined terminal session (alias of run_shell).",
+        "category": "shell",
+        "parameters": _obj_schema(
+            {"command": {"type": "string"}, "working_directory": {"type": "string", "default": ""}, "timeout": {"type": "integer", "default": 0}, "device": {"type": "string"}}, ["command"]
+        ),
+    },
+    "submit_task": {
+        "description": "Submit a background diagnostic or project test task to TaskRunner.",
+        "category": "system",
+        "parameters": _obj_schema({"task_name": {"type": "string"}, "timeout": {"type": "integer", "default": 30}, "test_command": {"type": "string", "default": "pytest"}}, ["task_name"]),
+    },
     "get_task_status": {"description": "Query status of a submitted TaskRunner task.", "category": "system", "parameters": _obj_schema({"task_id": {"type": "string"}}, ["task_id"])},
     "get_task_result": {"description": "Retrieve final output and returncode for a TaskRunner task.", "category": "system", "parameters": _obj_schema({"task_id": {"type": "string"}}, ["task_id"])},
     "cancel_task": {"description": "Cancel a running TaskRunner task.", "category": "system", "parameters": _obj_schema({"task_id": {"type": "string"}}, ["task_id"])},
-    "request_approval": {"description": "Request operator approval for a high-risk operation.", "category": "system", "parameters": _obj_schema({"tool_name": {"type": "string"}, "reason": {"type": "string"}}, ["tool_name", "reason"])},
+    "request_approval": {
+        "description": "Request operator approval for a high-risk operation.",
+        "category": "system",
+        "parameters": _obj_schema({"tool_name": {"type": "string"}, "reason": {"type": "string"}}, ["tool_name", "reason"]),
+    },
     "approve_task": {"description": "Approve a queued human-approval task (admin only).", "category": "system", "parameters": _obj_schema({"approval_id": {"type": "string"}}, ["approval_id"])},
-    "supervisor_delegate_role": {"description": "Resolve canonical role agent target for multi-agent delegation.", "category": "agents", "parameters": _obj_schema({"role": {"type": "string"}}, ["role"])},
-    "supervisor_enqueue_handoff": {"description": "Enqueue a staged Supervisor multi-role handoff pipeline.", "category": "agents", "parameters": _obj_schema({"goal": {"type": "string"}, "profile": {"type": "string", "default": "code"}, "device_id": {"type": "string"}}, ["goal"])},
-    "supervisor_recover_role_tasks": {"description": "Recover and re-queue failed role tasks on a target device.", "category": "agents", "parameters": _obj_schema({"role": {"type": "string"}, "device_id": {"type": "string"}}, ["role"])},
-    "agent_run_role": {"description": "Run a cataloged specialized AI agent role on the control plane.", "category": "agents", "parameters": _obj_schema({"role": {"type": "string"}, "prompt": {"type": "string"}, "target_agent": {"type": "string"}}, ["role", "prompt"])},
-    "agent_remember": {"description": "Persist a concise fact or rule into scoped long-term agent memory.", "category": "agents", "parameters": _obj_schema({"fact": {"type": "string"}, "project": {"type": "string"}, "task": {"type": "string"}}, ["fact"])},
-    "agent_notify": {"description": "Dispatch an alert to configured operator notification channels.", "category": "agents", "parameters": _obj_schema({"title": {"type": "string"}, "message": {"type": "string"}, "severity": {"type": "string", "enum": ["info", "warning", "critical"], "default": "info"}}, ["title", "message"])},
-    "agent_delegate": {"description": "Delegate a subtask to a specialized peer agent or catalog role.", "category": "agents", "parameters": _obj_schema({"prompt": {"type": "string"}, "role": {"type": "string"}, "target_agent": {"type": "string"}, "queue": {"type": "boolean"}, "device": {"type": "string"}}, ["prompt"])},
-    "agent_run_workflow": {"description": "Execute and record a deterministic multi-step workflow.", "category": "agents", "parameters": _obj_schema({"name": {"type": "string"}, "steps": {"type": "array", "items": {"type": "object"}}, "device": {"type": "string"}, "stop_on_failure": {"type": "boolean", "default": True}}, ["name", "steps"])},
+    "supervisor_delegate_role": {
+        "description": "Resolve canonical role agent target for multi-agent delegation.",
+        "category": "agents",
+        "parameters": _obj_schema({"role": {"type": "string"}}, ["role"]),
+    },
+    "supervisor_enqueue_handoff": {
+        "description": "Enqueue a staged Supervisor multi-role handoff pipeline.",
+        "category": "agents",
+        "parameters": _obj_schema({"goal": {"type": "string"}, "profile": {"type": "string", "default": "code"}, "device_id": {"type": "string"}}, ["goal"]),
+    },
+    "supervisor_recover_role_tasks": {
+        "description": "Recover and re-queue failed role tasks on a target device.",
+        "category": "agents",
+        "parameters": _obj_schema({"role": {"type": "string"}, "device_id": {"type": "string"}}, ["role"]),
+    },
+    "agent_run_role": {
+        "description": "Run a cataloged specialized AI agent role on the control plane.",
+        "category": "agents",
+        "parameters": _obj_schema({"role": {"type": "string"}, "prompt": {"type": "string"}, "target_agent": {"type": "string"}}, ["role", "prompt"]),
+    },
+    "agent_remember": {
+        "description": "Persist a concise fact or rule into scoped long-term agent memory.",
+        "category": "agents",
+        "parameters": _obj_schema({"fact": {"type": "string"}, "project": {"type": "string"}, "task": {"type": "string"}}, ["fact"]),
+    },
+    "agent_notify": {
+        "description": "Dispatch an alert to configured operator notification channels.",
+        "category": "agents",
+        "parameters": _obj_schema(
+            {"title": {"type": "string"}, "message": {"type": "string"}, "severity": {"type": "string", "enum": ["info", "warning", "critical"], "default": "info"}}, ["title", "message"]
+        ),
+    },
+    "agent_delegate": {
+        "description": "Delegate a subtask to a specialized peer agent or catalog role.",
+        "category": "agents",
+        "parameters": _obj_schema(
+            {"prompt": {"type": "string"}, "role": {"type": "string"}, "target_agent": {"type": "string"}, "queue": {"type": "boolean"}, "device": {"type": "string"}}, ["prompt"]
+        ),
+    },
+    "agent_run_workflow": {
+        "description": "Execute and record a deterministic multi-step workflow.",
+        "category": "agents",
+        "parameters": _obj_schema(
+            {"name": {"type": "string"}, "steps": {"type": "array", "items": {"type": "object"}}, "device": {"type": "string"}, "stop_on_failure": {"type": "boolean", "default": True}},
+            ["name", "steps"],
+        ),
+    },
 }
 
 for _t_name, _t_spec in _ADDITIONAL_TOOL_SPECS.items():
@@ -705,11 +1079,7 @@ def _extract_image(res: Any) -> tuple[str, str, int | None, int | None] | None:
 def _strip_image_fields(res: Any) -> Any:
     """Remove base64 image payloads so tool text stays small for the model."""
     if isinstance(res, dict):
-        return {
-            k: _strip_image_fields(v)
-            for k, v in res.items()
-            if k not in _IMAGE_FIELD_KEYS and k not in ("mime_type", "size_bytes")
-        }
+        return {k: _strip_image_fields(v) for k, v in res.items() if k not in _IMAGE_FIELD_KEYS and k not in ("mime_type", "size_bytes")}
     if isinstance(res, list):
         return [_strip_image_fields(v) for v in res]
     return res
@@ -730,9 +1100,7 @@ def _drop_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _has_image_parts(messages: list[dict[str, Any]]) -> bool:
     for msg in messages:
         content = msg.get("content")
-        if isinstance(content, list) and any(
-            isinstance(p, dict) and p.get("type") == "image_url" for p in content
-        ):
+        if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
             return True
     return False
 
@@ -770,11 +1138,17 @@ def _anthropic_request_body(
                 system_parts.append(str(msg["content"]))
             continue
         if role == "tool":
-            _anthropic_append(converted, "user", [{
-                "type": "tool_result",
-                "tool_use_id": msg.get("tool_call_id"),
-                "content": msg.get("content") or "",
-            }])
+            _anthropic_append(
+                converted,
+                "user",
+                [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": msg.get("tool_call_id"),
+                        "content": msg.get("content") or "",
+                    }
+                ],
+            )
             continue
         if role == "assistant":
             parts: list[dict[str, Any]] = []
@@ -786,12 +1160,14 @@ def _anthropic_request_body(
                     args = json.loads(fn.get("arguments") or "{}")
                 except Exception:
                     args = {}
-                parts.append({
-                    "type": "tool_use",
-                    "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:12]}",
-                    "name": fn.get("name") or "tool",
-                    "input": args if isinstance(args, dict) else {},
-                })
+                parts.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:12]}",
+                        "name": fn.get("name") or "tool",
+                        "input": args if isinstance(args, dict) else {},
+                    }
+                )
             if parts:
                 _anthropic_append(converted, "assistant", parts)
             continue
@@ -847,14 +1223,16 @@ def _anthropic_response_message(data: dict[str, Any]) -> dict[str, Any]:
         if block.get("type") == "text":
             texts.append(block.get("text") or "")
         elif block.get("type") == "tool_use":
-            tool_calls.append({
-                "id": block.get("id"),
-                "type": "function",
-                "function": {
-                    "name": block.get("name"),
-                    "arguments": json.dumps(block.get("input") or {}),
-                },
-            })
+            tool_calls.append(
+                {
+                    "id": block.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name"),
+                        "arguments": json.dumps(block.get("input") or {}),
+                    },
+                }
+            )
     message: dict[str, Any] = {"role": "assistant", "content": "\n".join(t for t in texts if t)}
     if tool_calls:
         message["tool_calls"] = tool_calls
@@ -890,10 +1268,7 @@ def _image_user_message(images: list[tuple[str, str, int | None, int | None, str
     parts: list[dict[str, Any]] = [
         {
             "type": "text",
-            "text": (
-                "The attached screenshot(s) show the current desktop. Coordinates are in "
-                "native screen pixels; describe what you see before acting."
-            ),
+            "text": ("The attached screenshot(s) show the current desktop. Coordinates are in native screen pixels; describe what you see before acting."),
         }
     ]
     for b64, mime, width, height, label in images:
@@ -901,10 +1276,12 @@ def _image_user_message(images: list[tuple[str, str, int | None, int | None, str
             parts.append({"type": "text", "text": f"{label}: {width}x{height} px"})
         else:
             parts.append({"type": "text", "text": f"{label}: screenshot"})
-        parts.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"},
-        })
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"},
+            }
+        )
     return {"role": "user", "content": parts}
 
 
@@ -935,35 +1312,43 @@ def build_tool_specs(
         tier = TOOL_TIERS.get(name, RiskTier.SENSITIVE).value
 
         if fmt == "openai":
-            results.append({
-                "type": "function",
-                "function": {
+            results.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": f"[Tier {tier}] {desc}",
+                        "parameters": params,
+                    },
+                }
+            )
+        elif fmt == "anthropic":
+            results.append(
+                {
+                    "name": name,
+                    "description": f"[Tier {tier}] {desc}",
+                    "input_schema": params,
+                }
+            )
+        elif fmt == "gemini":
+            results.append(
+                {
                     "name": name,
                     "description": f"[Tier {tier}] {desc}",
                     "parameters": params,
-                },
-            })
-        elif fmt == "anthropic":
-            results.append({
-                "name": name,
-                "description": f"[Tier {tier}] {desc}",
-                "input_schema": params,
-            })
-        elif fmt == "gemini":
-            results.append({
-                "name": name,
-                "description": f"[Tier {tier}] {desc}",
-                "parameters": params,
-            })
+                }
+            )
         else:
             # raw format
-            results.append({
-                "name": name,
-                "description": desc,
-                "category": meta.get("category", "general"),
-                "tier": tier,
-                "parameters": params,
-            })
+            results.append(
+                {
+                    "name": name,
+                    "description": desc,
+                    "category": meta.get("category", "general"),
+                    "tier": tier,
+                    "parameters": params,
+                }
+            )
 
     return results
 
@@ -1176,53 +1561,32 @@ def validate_llm_key(
 
     try:
         if p == "openai":
-            req = urllib.request.Request(
-                "https://api.openai.com/v1/models",
-                headers={"Authorization": f"Bearer {key}", "User-Agent": "AI-Bridge/0.3"}
-            )
+            req = urllib.request.Request("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}", "User-Agent": "AI-Bridge/0.3"})
             with urllib.request.urlopen(req, timeout=12) as resp:
                 if 200 <= resp.status < 300:
                     return True, "OpenAI connection verified successfully."
         elif p == "groq":
-            req = urllib.request.Request(
-                "https://api.groq.com/openai/v1/models",
-                headers={"Authorization": f"Bearer {key}", "User-Agent": "AI-Bridge/0.3"}
-            )
+            req = urllib.request.Request("https://api.groq.com/openai/v1/models", headers={"Authorization": f"Bearer {key}", "User-Agent": "AI-Bridge/0.3"})
             with urllib.request.urlopen(req, timeout=12) as resp:
                 if 200 <= resp.status < 300:
                     return True, "Groq connection verified successfully."
         elif p == "deepseek":
-            req = urllib.request.Request(
-                "https://api.deepseek.com/models",
-                headers={"Authorization": f"Bearer {key}", "User-Agent": "AI-Bridge/0.3"}
-            )
+            req = urllib.request.Request("https://api.deepseek.com/models", headers={"Authorization": f"Bearer {key}", "User-Agent": "AI-Bridge/0.3"})
             with urllib.request.urlopen(req, timeout=12) as resp:
                 if 200 <= resp.status < 300:
                     return True, "DeepSeek connection verified successfully."
         elif p == "gemini":
-            req = urllib.request.Request(
-                f"https://generativelanguage.googleapis.com/v1beta/models?key={key}",
-                headers={"User-Agent": "AI-Bridge/0.3"}
-            )
+            req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models?key={key}", headers={"User-Agent": "AI-Bridge/0.3"})
             with urllib.request.urlopen(req, timeout=12) as resp:
                 if 200 <= resp.status < 300:
                     return True, "Google Gemini connection verified successfully."
         elif p == "anthropic":
-            payload = {
-                "model": "claude-3-5-sonnet-20241022",
-                "max_tokens": 1,
-                "messages": [{"role": "user", "content": "ping"}]
-            }
+            payload = {"model": "claude-3-5-sonnet-20241022", "max_tokens": 1, "messages": [{"role": "user", "content": "ping"}]}
             req = urllib.request.Request(
                 "https://api.anthropic.com/v1/messages",
                 data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                    "User-Agent": "AI-Bridge/0.3"
-                },
-                method="POST"
+                headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json", "User-Agent": "AI-Bridge/0.3"},
+                method="POST",
             )
             with urllib.request.urlopen(req, timeout=12) as resp:
                 if 200 <= resp.status < 300:
@@ -1363,13 +1727,15 @@ def attach_ai_routes(
         # host execution and stay available to operators.
         if is_local:
             _needs_host = tool not in ("list_devices",) and not (
-                tool == "get_device_status"
-                and str((body.args or {}).get("device_id") or (body.args or {}).get("id") or "local").strip().lower() not in ("", "local", "host", "droplet")
+                tool == "get_device_status" and str((body.args or {}).get("device_id") or (body.args or {}).get("id") or "local").strip().lower() not in ("", "local", "host", "droplet")
             )
             if _needs_host:
                 if role != "admin" or os.environ.get("AI_BRIDGE_ALLOW_LOCAL_EXECUTION", "0") != "1":
                     audit(actor, "local", tool, body.args, "denied", tenant=body.tenant)
-                    return JSONResponse(status_code=403, content={"ok": False, "status": "denied", "tool": tool, "error": "Local execution is disabled by default (AI_BRIDGE_ALLOW_LOCAL_EXECUTION=1 + admin role required)."})
+                    return JSONResponse(
+                        status_code=403,
+                        content={"ok": False, "status": "denied", "tool": tool, "error": "Local execution is disabled by default (AI_BRIDGE_ALLOW_LOCAL_EXECUTION=1 + admin role required)."},
+                    )
                 if tier.value >= 3:
                     _ap = None
                     if body.approval_id:
@@ -1380,7 +1746,9 @@ def attach_ai_routes(
                             _ap = None
                     if body.approval_id and _ap is None:
                         audit(actor, "local", tool, body.args, "denied", tenant=body.tenant)
-                        return JSONResponse(status_code=409, content={"ok": False, "status": "denied", "tool": tool, "error": "Provided approval is not approved, has expired, or does not cover this tool."})
+                        return JSONResponse(
+                            status_code=409, content={"ok": False, "status": "denied", "tool": tool, "error": "Provided approval is not approved, has expired, or does not cover this tool."}
+                        )
                     if _ap is None:
                         _new_ap = uuid.uuid4().hex[:12]
                         _ttl = max(60, int(os.environ.get("AI_BRIDGE_APPROVAL_TTL_SECONDS", "3600")))
@@ -1392,11 +1760,23 @@ def attach_ai_routes(
                         )
                         conn.commit()
                         audit(actor, "local", tool, body.args, "needs_approval", tenant=body.tenant)
-                        return {"ok": False, "status": "needs_approval", "tool": tool, "device": "local", "device_id": "local", "approval_id": _new_ap, "tier": tier.value, "note": "Local execution requires human approval in the AI Bridge dashboard or via POST /api/approvals/{approval_id}."}
+                        return {
+                            "ok": False,
+                            "status": "needs_approval",
+                            "tool": tool,
+                            "device": "local",
+                            "device_id": "local",
+                            "approval_id": _new_ap,
+                            "tier": tier.value,
+                            "note": "Local execution requires human approval in the AI Bridge dashboard or via POST /api/approvals/{approval_id}.",
+                        }
             try:
                 if tool == "list_devices":
                     rows = conn.execute(
-                        "SELECT d.id, d.name, d.hostname, d.os, d.status, d.last_seen," " COALESCE(m.tags_json, '[]') AS tags_json FROM devices d" " LEFT JOIN device_metadata m ON m.device_id = d.id" " WHERE d.tenant=? AND d.revoked=0 ORDER BY d.last_seen DESC",
+                        "SELECT d.id, d.name, d.hostname, d.os, d.status, d.last_seen,"
+                        " COALESCE(m.tags_json, '[]') AS tags_json FROM devices d"
+                        " LEFT JOIN device_metadata m ON m.device_id = d.id"
+                        " WHERE d.tenant=? AND d.revoked=0 ORDER BY d.last_seen DESC",
                         (body.tenant,),
                     ).fetchall()
                     res = {"devices": [dict(r) for r in rows]}
@@ -1433,11 +1813,19 @@ def attach_ai_routes(
         # policy check, approval gate, tenant scoping, takeover + durable
         # e-stop — no second copy of the approval logic here.
         created = task_service_mod.create_task(
-            conn, actor=actor, role=role, tenant=body.tenant,
-            device_id=dev_rec["id"], tool=tool, args=body.args,
-            human_initiated=False, device_row=dev_rec,
+            conn,
+            actor=actor,
+            role=role,
+            tenant=body.tenant,
+            device_id=dev_rec["id"],
+            tool=tool,
+            args=body.args,
+            human_initiated=False,
+            device_row=dev_rec,
             get_effective_device_policy=get_effective_device_policy,
-            get_current_policy=None, notify=notify_tasks, audit_fn=audit,
+            get_current_policy=None,
+            notify=notify_tasks,
+            audit_fn=audit,
         )
         if created["status"] == "needs_approval":
             return {
@@ -1530,11 +1918,7 @@ def attach_ai_routes(
             def_p = conn.execute("SELECT value FROM settings WHERE key='ai_default_provider'").fetchone()
             provider = (def_p["value"] if def_p and def_p["value"] else "openai").lower().strip()
 
-        api_key = (
-            body.api_key
-            or req.headers.get("x-llm-api-key")
-            or req.headers.get("x-openai-api-key")
-        )
+        api_key = body.api_key or req.headers.get("x-llm-api-key") or req.headers.get("x-openai-api-key")
         if not api_key:
             row = conn.execute("SELECT value FROM settings WHERE key=?", (f"ai_{provider}_key",)).fetchone()
             if row and row["value"]:
@@ -1573,11 +1957,16 @@ def attach_ai_routes(
                     base_url = _normalize_custom_base_url(os.environ.get("AI_BRIDGE_CUSTOM_BASE_URL", ""))
             else:
                 base_url = (
-                    "https://api.groq.com/openai/v1" if provider == "groq"
-                    else "https://api.deepseek.com/v1" if provider == "deepseek"
-                    else "https://generativelanguage.googleapis.com/v1beta/openai" if provider == "gemini"
-                    else "https://api.anthropic.com/v1" if provider == "anthropic"
-                    else "http://localhost:11434/v1" if provider == "ollama"
+                    "https://api.groq.com/openai/v1"
+                    if provider == "groq"
+                    else "https://api.deepseek.com/v1"
+                    if provider == "deepseek"
+                    else "https://generativelanguage.googleapis.com/v1beta/openai"
+                    if provider == "gemini"
+                    else "https://api.anthropic.com/v1"
+                    if provider == "anthropic"
+                    else "http://localhost:11434/v1"
+                    if provider == "ollama"
                     else "https://api.openai.com/v1"
                 )
 
@@ -1591,7 +1980,8 @@ def attach_ai_routes(
             f"{dev_list_str if dev_list_str else '- local (the AI Bridge host)'}\n\n"
             f"Guidelines:\n"
             f"1. To run terminal commands on Linux servers or workstations, use 'run_shell' with the appropriate device.\n"
-            f"2. To control Windows workstations with GUI automation, first call 'take_screenshot' (or 'set_of_marks_screenshot'), inspect the returned image, then use 'mouse_click', 'keyboard_type', etc.\n"
+            f"2. To control Windows workstations with GUI automation, first call 'take_screenshot' (or 'set_of_marks_screenshot'), inspect the returned image, then use "
+            f"'mouse_click', 'keyboard_type', etc.\n"
             f"3. Screenshot coordinates are native screen pixels. Click what you see in the latest image; never guess.\n"
             f"4. When you need to inspect, edit, or create files, use the file tools.\n"
             f"5. Provide clear, concise summaries of your actions and results."
@@ -1656,11 +2046,7 @@ def attach_ai_routes(
         if not base_url:
             base_url = "https://api.anthropic.com/v1" if provider == "anthropic" else "https://api.openai.com/v1"
         if not model:
-            model = (
-                "gpt-4o" if provider == "openai"
-                else "claude-3-5-sonnet-20241022" if provider == "anthropic"
-                else "default"
-            )
+            model = "gpt-4o" if provider == "openai" else "claude-3-5-sonnet-20241022" if provider == "anthropic" else "default"
 
         is_anthropic = provider == "anthropic"
         tools_spec = build_tool_specs(tool_format="openai")
@@ -1808,27 +2194,33 @@ def attach_ai_routes(
                             exec_res = {"ok": False, "error": f"MCP execution error: {exc}"}
 
                     if on_event:
-                        on_event({
-                            "type": "tool_result",
+                        on_event(
+                            {
+                                "type": "tool_result",
+                                "step": step_idx + 1,
+                                "tool": t_name,
+                                "device": f"mcp:{srv['name']}",
+                                "ok": not (isinstance(exec_res, dict) and exec_res.get("ok") is False),
+                            }
+                        )
+
+                    steps_taken.append(
+                        {
                             "step": step_idx + 1,
                             "tool": t_name,
                             "device": f"mcp:{srv['name']}",
-                            "ok": not (isinstance(exec_res, dict) and exec_res.get("ok") is False),
-                        })
-
-                    steps_taken.append({
-                        "step": step_idx + 1,
-                        "tool": t_name,
-                        "device": f"mcp:{srv['name']}",
-                        "args": t_args,
-                        "result": exec_res,
-                    })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id"),
-                        "name": t_name,
-                        "content": json.dumps(_strip_image_fields(exec_res), default=str)[:20000],
-                    })
+                            "args": t_args,
+                            "result": exec_res,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "name": t_name,
+                            "content": json.dumps(_strip_image_fields(exec_res), default=str)[:20000],
+                        }
+                    )
                 else:
                     t_device = t_args.pop("device", None) or body.device
                     if on_event:
@@ -1844,33 +2236,39 @@ def attach_ai_routes(
                     except HTTPException as http_exc:
                         exec_res = {"ok": False, "status_code": http_exc.status_code, "error": http_exc.detail}
                     if on_event:
-                        on_event({
-                            "type": "tool_result",
+                        on_event(
+                            {
+                                "type": "tool_result",
+                                "step": step_idx + 1,
+                                "tool": t_name,
+                                "device": t_device or "local",
+                                "ok": not (isinstance(exec_res, dict) and exec_res.get("ok") is False),
+                            }
+                        )
+
+                    steps_taken.append(
+                        {
                             "step": step_idx + 1,
                             "tool": t_name,
                             "device": t_device or "local",
-                            "ok": not (isinstance(exec_res, dict) and exec_res.get("ok") is False),
-                        })
-
-                    steps_taken.append({
-                        "step": step_idx + 1,
-                        "tool": t_name,
-                        "device": t_device or "local",
-                        "args": t_args,
-                        "result": exec_res,
-                    })
+                            "args": t_args,
+                            "result": exec_res,
+                        }
+                    )
 
                     image = _extract_image(exec_res) if isinstance(exec_res, dict) else None
                     if image:
                         images.append((image[0], image[1], image[2], image[3], t_name))
 
                     # Text-only tool response: base64 stays out of the model context.
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id"),
-                        "name": t_name,
-                        "content": json.dumps(_strip_image_fields(exec_res), default=str)[:20000],
-                    })
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "name": t_name,
+                            "content": json.dumps(_strip_image_fields(exec_res), default=str)[:20000],
+                        }
+                    )
 
             if images and vision_enabled:
                 messages.append(_image_user_message(images))
@@ -1975,22 +2373,24 @@ def attach_ai_routes(
             is_win = "win" in os_str
             is_linux = "linux" in os_str
 
-            out.append({
-                "id": d["id"],
-                "name": d["name"],
-                "hostname": d["hostname"],
-                "os": d["os"],
-                "status": d["status"],
-                "capabilities": {
-                    "desktop_gui": is_win,
-                    "screenshot": is_win,
-                    "mouse_keyboard": is_win,
-                    "shell_execution": True,
-                    "docker": is_linux,
-                    "package_management": True,
-                },
-                "last_seen": d["last_seen"],
-            })
+            out.append(
+                {
+                    "id": d["id"],
+                    "name": d["name"],
+                    "hostname": d["hostname"],
+                    "os": d["os"],
+                    "status": d["status"],
+                    "capabilities": {
+                        "desktop_gui": is_win,
+                        "screenshot": is_win,
+                        "mouse_keyboard": is_win,
+                        "shell_execution": True,
+                        "docker": is_linux,
+                        "package_management": True,
+                    },
+                    "last_seen": d["last_seen"],
+                }
+            )
 
         return {"ok": True, "tenant": tenant, "count": len(out), "devices": out}
 
@@ -2032,11 +2432,7 @@ def attach_ai_routes(
         active_provider = (def_p["value"] if def_p and def_p["value"] else "openai").strip()
         active_model = (def_m["value"] if def_m and def_m["value"] else ("gpt-4o" if active_provider == "openai" else "claude-3-5-sonnet")).strip()
 
-        is_connected = bool(
-            configured.get(active_provider)
-            or active_provider == "ollama"
-            or (active_provider == "custom" and bool(custom_base_url))
-        )
+        is_connected = bool(configured.get(active_provider) or active_provider == "ollama" or (active_provider == "custom" and bool(custom_base_url)))
 
         return {
             "ok": True,
@@ -2065,8 +2461,7 @@ def attach_ai_routes(
 
         def _upsert_setting(k: str, v: str) -> None:
             conn.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?) "
-                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 (k, v),
             )
 
@@ -2243,9 +2638,7 @@ def attach_ai_routes(
 
         async def _worker() -> None:
             try:
-                agent_res = await run_autonomous_agent(
-                    agent_in, req, x_admin_token=x_admin_token, x_session_token=x_session_token, on_event=_emit
-                )
+                agent_res = await run_autonomous_agent(agent_in, req, x_admin_token=x_admin_token, x_session_token=x_session_token, on_event=_emit)
                 if isinstance(agent_res, Response):
                     try:
                         err_payload = json.loads(agent_res.body.decode("utf-8"))
@@ -2264,16 +2657,18 @@ def attach_ai_routes(
                             screenshot_b64, screenshot_mime = image[0], image[1]
                             break
                 resp_text = agent_res.get("response") or agent_res.get("error") or "Operation complete."
-                queue.put_nowait({
-                    "type": "done",
-                    "ok": True,
-                    "message": {"role": "assistant", "content": resp_text, "screenshot": screenshot_b64},
-                    "steps": steps,
-                    "screenshot": screenshot_b64,
-                    "screenshot_mime": screenshot_mime,
-                    "provider": agent_res.get("provider"),
-                    "model": agent_res.get("model"),
-                })
+                queue.put_nowait(
+                    {
+                        "type": "done",
+                        "ok": True,
+                        "message": {"role": "assistant", "content": resp_text, "screenshot": screenshot_b64},
+                        "steps": steps,
+                        "screenshot": screenshot_b64,
+                        "screenshot_mime": screenshot_mime,
+                        "provider": agent_res.get("provider"),
+                        "model": agent_res.get("model"),
+                    }
+                )
             except Exception as exc:
                 queue.put_nowait({"type": "error", "error": str(exc)})
             finally:

@@ -1,5 +1,4 @@
 """Tests for device-bound MCP routing helpers."""
-import json
 import urllib.error
 
 import httpx

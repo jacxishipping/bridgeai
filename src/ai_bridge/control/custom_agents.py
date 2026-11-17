@@ -6,6 +6,7 @@ devices. The runner executes every enabled agent on its own interval for as
 long as the control-plane process is alive, recording each run and its
 tool actions in the main audit log alongside the per-agent run history.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,6 +21,8 @@ from typing import Any, Callable
 from fastapi import Header, HTTPException
 from pydantic import BaseModel, Field
 
+from . import alerts as alertsmod
+from . import db as dbmod
 from .ai_api import (
     ANTHROPIC_VERSION,
     _drop_images,
@@ -33,8 +36,6 @@ from .ai_api import (
 )
 from .mcp_client import execute_mcp_tool, format_mcp_tool_for_llm
 from .mcp_oauth import enforce_mcp_tool_policy, ensure_valid_mcp_token
-from . import alerts as alertsmod
-from . import db as dbmod
 
 PROVIDERS = ("openai", "anthropic", "gemini", "groq", "deepseek", "ollama", "custom")
 DEFAULT_INTERVAL_S = 300
@@ -62,11 +63,7 @@ def _setting(conn: Any, key: str) -> str:
 def provider_key(conn: Any, provider: str) -> str:
     """API key already connected for a provider (settings, then environment)."""
     prefix = provider.upper()
-    return (
-        _setting(conn, f"ai_{provider}_key")
-        or os.environ.get(f"AI_BRIDGE_{prefix}_API_KEY", "")
-        or os.environ.get(f"{prefix}_API_KEY", "")
-    )
+    return _setting(conn, f"ai_{provider}_key") or os.environ.get(f"AI_BRIDGE_{prefix}_API_KEY", "") or os.environ.get(f"{prefix}_API_KEY", "")
 
 
 def resolve_llm(conn: Any, provider: str, model: str | None, base_url: str | None) -> tuple[str, str, str, str]:
@@ -75,11 +72,7 @@ def resolve_llm(conn: Any, provider: str, model: str | None, base_url: str | Non
     if p not in PROVIDERS:
         raise RuntimeError(f"Unsupported AI provider: {provider}")
     if p == "custom":
-        url = _normalize_custom_base_url(
-            base_url
-            or _setting(conn, "ai_custom_base_url")
-            or os.environ.get("AI_BRIDGE_CUSTOM_BASE_URL", "")
-        )
+        url = _normalize_custom_base_url(base_url or _setting(conn, "ai_custom_base_url") or os.environ.get("AI_BRIDGE_CUSTOM_BASE_URL", ""))
         if not url:
             raise RuntimeError("Custom AI provider needs a base URL.")
         resolved_model = (model or _setting(conn, "ai_custom_model") or "default").strip()
@@ -180,8 +173,7 @@ _AGENT_NATIVE_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "agent_remember",
             "description": (
-                "Persist an important fact, observation, or learned rule into long-term agent memory "
-                "so it survives future cycles. Optionally tag with project and task for scoped recall."
+                "Persist an important fact, observation, or learned rule into long-term agent memory so it survives future cycles. Optionally tag with project and task for scoped recall."
             ),
             "parameters": {
                 "type": "object",
@@ -231,10 +223,7 @@ _AGENT_NATIVE_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "agent_delegate",
-            "description": (
-                "Delegate a subtask to another specialized custom agent (by id, name, or role). "
-                "Use queue=true (default for Supervisor) to enqueue on the shared task system."
-            ),
+            "description": ("Delegate a subtask to another specialized custom agent (by id, name, or role). Use queue=true (default for Supervisor) to enqueue on the shared task system."),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -303,9 +292,7 @@ def _infer_memory_tags(conn: Any, agent: dict[str, Any]) -> tuple[str | None, st
     """Best-effort project/task tags from recent role-tagged tasks."""
     try:
         agent_id = str(agent.get("id") or "")
-        rows = conn.execute(
-            "SELECT args_json FROM tasks ORDER BY updated_at DESC LIMIT 40"
-        ).fetchall()
+        rows = conn.execute("SELECT args_json FROM tasks ORDER BY updated_at DESC LIMIT 40").fetchall()
         for row in rows:
             try:
                 args = json.loads(row["args_json"] or "{}")
@@ -317,9 +304,7 @@ def _infer_memory_tags(conn: Any, agent: dict[str, Any]) -> tuple[str | None, st
             if role_agent and agent_id and role_agent != agent_id:
                 continue
             project = str(args.get("_project") or args.get("project") or "").strip() or None
-            task = (
-                str(args.get("_task") or args.get("task") or args.get("_handoff_id") or "").strip() or None
-            )
+            task = str(args.get("_task") or args.get("task") or args.get("_handoff_id") or "").strip() or None
             if project or task:
                 return project, task
     except Exception:
@@ -337,10 +322,7 @@ def _system_prompt(
     project_tag: str | None = None,
     task_tag: str | None = None,
 ) -> str:
-    listing = "\n".join(
-        f"- {d.get('name')} (id {d['id']}, {d.get('os') or 'unknown OS'}, {d.get('status') or 'unknown'})"
-        for d in devices
-    ) or "- local (the control-plane host)"
+    listing = "\n".join(f"- {d.get('name')} (id {d['id']}, {d.get('os') or 'unknown OS'}, {d.get('status') or 'unknown'})" for d in devices) or "- local (the control-plane host)"
     memory = str(agent.get("memory") or "").strip()
     memory_block = f"\nMemory from previous cycles (most recent last):\n{memory}\n" if memory else ""
     chunk_block = ""
@@ -374,14 +356,11 @@ def _system_prompt(
             except Exception:
                 t_summary = ""
             srv_lines.append(f"- {s.get('name')} {t_summary}")
-        mcp_block = f"\nConnected MCP Services (use their mcp__* tools when relevant):\n" + "\n".join(srv_lines) + "\n"
+        mcp_block = "\nConnected MCP Services (use their mcp__* tools when relevant):\n" + "\n".join(srv_lines) + "\n"
 
     role_dev_hint = ""
     if str(agent.get("id") or "") == "agent-role-developer":
-        role_dev_hint = (
-            "\nDeveloper workflow: call dev_workspace_plan first, edit via workspace/git tools, "
-            "git_checkpoint before risky changes, then run_project_tests_structured.\n"
-        )
+        role_dev_hint = "\nDeveloper workflow: call dev_workspace_plan first, edit via workspace/git tools, git_checkpoint before risky changes, then run_project_tests_structured.\n"
 
     return (
         f"You are '{agent.get('name')}', an autonomous operator agent managed by AI Bridge.\n"
@@ -428,9 +407,7 @@ def execute_agent(
     _depth: int = 0,
 ) -> dict[str, Any]:
     """Run one reasoning cycle for an agent. Raises on provider/transport errors."""
-    provider, base_url, api_key, model = resolve_llm(
-        conn, agent.get("provider") or "openai", agent.get("model"), agent.get("base_url")
-    )
+    provider, base_url, api_key, model = resolve_llm(conn, agent.get("provider") or "openai", agent.get("model"), agent.get("base_url"))
     devices = _bound_devices(conn, agent)
     if not devices:
         raise RuntimeError("The agent has no bound devices. Assign at least one device.")
@@ -466,11 +443,7 @@ def execute_agent(
     fleet_ctx = _fleet_context_block(conn, devices)
     peer_ctx = _peer_agents_block(conn, agent) if _depth < 2 else ""
     project_tag, task_tag = _infer_memory_tags(conn, agent)
-    default_prompt = (
-        "Run one work cycle now "
-        f"({time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC). "
-        "Act on the objective, then summarise what you did."
-    )
+    default_prompt = f"Run one work cycle now ({time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC). Act on the objective, then summarise what you did."
     messages: list[dict[str, Any]] = [
         {
             "role": "system",
@@ -513,13 +486,15 @@ def execute_agent(
                 else:
                     request = urllib.request.Request(
                         f"{base_url}/chat/completions",
-                        data=json.dumps({
-                            "model": model,
-                            "messages": payload_messages,
-                            "tools": tools_spec,
-                            "tool_choice": "auto",
-                            "temperature": 0.2,
-                        }).encode("utf-8"),
+                        data=json.dumps(
+                            {
+                                "model": model,
+                                "messages": payload_messages,
+                                "tools": tools_spec,
+                                "tool_choice": "auto",
+                                "temperature": 0.2,
+                            }
+                        ).encode("utf-8"),
                         headers=headers,
                         method="POST",
                     )
@@ -619,15 +594,13 @@ def execute_agent(
                         if _depth >= 2:
                             result = {"ok": False, "error": "Maximum agent delegation depth (2) reached."}
                         else:
-                            from .role_catalog import ROLES
                             from . import supervisor as supervisormod
+                            from .role_catalog import ROLES
 
                             role_arg = str(tool_args.get("role") or "").strip().lower()
                             target_key = str(tool_args.get("target_agent") or role_arg or "").strip()
                             sub_prompt = str(tool_args.get("prompt") or tool_args.get("message") or "").strip()
-                            is_supervisor = str(agent.get("id") or "").startswith("agent-role-supervisor") or str(
-                                agent.get("name") or ""
-                            ).lower() == "supervisor"
+                            is_supervisor = str(agent.get("id") or "").startswith("agent-role-supervisor") or str(agent.get("name") or "").lower() == "supervisor"
                             queue_raw = tool_args.get("queue")
                             if queue_raw is None:
                                 use_queue = bool(is_supervisor)
@@ -661,9 +634,7 @@ def execute_agent(
                                             "error": "queue=true requires a role catalog id (role=planner|developer|...).",
                                         }
                                     else:
-                                        q_dev = _resolve_device(devices, tool_args.get("device")) or (
-                                            devices[0]["id"] if devices else "local"
-                                        )
+                                        q_dev = _resolve_device(devices, tool_args.get("device")) or (devices[0]["id"] if devices else "local")
                                         queued = supervisormod.enqueue_agent_run_role(
                                             conn,
                                             device_id=q_dev,
@@ -683,9 +654,7 @@ def execute_agent(
                                             "role": role_for_queue,
                                         }
                                 else:
-                                    sub_res = execute_agent(
-                                        conn, dict(t_row), tool_executor, user_prompt=sub_prompt, _depth=_depth + 1
-                                    )
+                                    sub_res = execute_agent(conn, dict(t_row), tool_executor, user_prompt=sub_prompt, _depth=_depth + 1)
                                     result = {
                                         "ok": True,
                                         "queued": False,
@@ -705,7 +674,8 @@ def execute_agent(
                             wf_id = uuid.uuid4().hex[:12]
                             now_ts = _now()
                             conn.execute(
-                                "INSERT INTO workflows (id, name, tenant, device_id, steps_json, status, current_step, total_steps, results_json, created_at, updated_at) VALUES (?,?,?,?,?,'running',0,?,'[]',?,?)",
+                                "INSERT INTO workflows (id, name, tenant, device_id, steps_json, status, "
+                                "current_step, total_steps, results_json, created_at, updated_at) VALUES (?,?,?,?,?,'running',0,?,'[]',?,?)",
                                 (wf_id, wf_name, tenant, wf_dev, json.dumps(wf_steps), len(wf_steps), now_ts, now_ts),
                             )
                             conn.commit()
@@ -721,11 +691,33 @@ def execute_agent(
                                 t0 = _now()
                                 try:
                                     st_res = tool_executor(st_action, st_args, wf_dev, tenant, actor)
-                                    wf_results.append({"index": s_idx + 1, "name": st_name, "action": st_action, "args": st_args, "status": "completed", "duration_seconds": round(_now() - t0, 2), "result": st_res, "error": None})
+                                    wf_results.append(
+                                        {
+                                            "index": s_idx + 1,
+                                            "name": st_name,
+                                            "action": st_action,
+                                            "args": st_args,
+                                            "status": "completed",
+                                            "duration_seconds": round(_now() - t0, 2),
+                                            "result": st_res,
+                                            "error": None,
+                                        }
+                                    )
                                 except Exception as st_exc:
                                     wf_ok = False
                                     wf_err = str(st_exc)
-                                    wf_results.append({"index": s_idx + 1, "name": st_name, "action": st_action, "args": st_args, "status": "failed", "duration_seconds": round(_now() - t0, 2), "result": None, "error": wf_err})
+                                    wf_results.append(
+                                        {
+                                            "index": s_idx + 1,
+                                            "name": st_name,
+                                            "action": st_action,
+                                            "args": st_args,
+                                            "status": "failed",
+                                            "duration_seconds": round(_now() - t0, 2),
+                                            "result": None,
+                                            "error": wf_err,
+                                        }
+                                    )
                                     if stop_on_fail:
                                         break
                             fin_status = "completed" if wf_ok else "failed"
@@ -756,17 +748,17 @@ def execute_agent(
                 except Exception as exc:
                     result = {"ok": False, "error": str(exc)}
                 steps.append({"tool": tool_name, "device": "control-plane", "args": tool_args, "result": result})
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.get("id"),
-                    "name": tool_name,
-                    "content": json.dumps(result, default=str)[:20000],
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "name": tool_name,
+                        "content": json.dumps(result, default=str)[:20000],
+                    }
+                )
             elif tool_name in mcp_dispatch_map:
                 srv, orig_tool = mcp_dispatch_map[tool_name]
-                policy_check = enforce_mcp_tool_policy(
-                    conn, srv, orig_tool, tool_args, actor=f"agent:{agent.get('name') or agent.get('id')}"
-                )
+                policy_check = enforce_mcp_tool_policy(conn, srv, orig_tool, tool_args, actor=f"agent:{agent.get('name') or agent.get('id')}")
                 if not policy_check.get("allowed", True):
                     result = {
                         "ok": False,
@@ -886,8 +878,7 @@ class AgentRunner:
                 self._claim_agent_run_role_tasks()
                 now = _now()
                 due = self._conn.execute(
-                    "SELECT * FROM custom_agents WHERE enabled=1 AND next_run_at<=? "
-                    "ORDER BY next_run_at ASC LIMIT 10",
+                    "SELECT * FROM custom_agents WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at ASC LIMIT 10",
                     (now,),
                 ).fetchall()
                 for row in due:
@@ -902,18 +893,13 @@ class AgentRunner:
                         (now + interval, now, agent["id"]),
                     )
                     self._conn.commit()
-                    threading.Thread(
-                        target=self._run_one, args=(agent,), name=f"agent-run-{agent['id']}", daemon=True
-                    ).start()
+                    threading.Thread(target=self._run_one, args=(agent,), name=f"agent-run-{agent['id']}", daemon=True).start()
             except Exception:  # noqa: BLE001 - the runner must survive transient DB errors
                 time.sleep(1)
 
     def _claim_agent_run_role_tasks(self) -> None:
         """Claim shared-queue agent_run_role tasks and execute the target role agent."""
-        rows = self._conn.execute(
-            "SELECT * FROM tasks WHERE tool='agent_run_role' AND status='queued' "
-            "ORDER BY created_at ASC LIMIT 3"
-        ).fetchall()
+        rows = self._conn.execute("SELECT * FROM tasks WHERE tool='agent_run_role' AND status='queued' ORDER BY created_at ASC LIMIT 3").fetchall()
         for row in rows:
             task = dict(row)
             task_id = task["id"]
@@ -1118,8 +1104,7 @@ class AgentRunner:
                 (finished, response_text[:4000], new_memory, finished, agent_id),
             )
             self._conn.execute(
-                "UPDATE agent_runs SET status='completed', finished_at=?, duration_ms=?, response=?, "
-                "steps_json=? WHERE id=?",
+                "UPDATE agent_runs SET status='completed', finished_at=?, duration_ms=?, response=?, steps_json=? WHERE id=?",
                 (finished, int((finished - started) * 1000), response_text[:20000], json.dumps(steps, default=str), run_id),
             )
             self._prune_runs(agent_id)
@@ -1139,9 +1124,7 @@ class AgentRunner:
 
             # Consecutive-failure tracking + auto-pause.
             try:
-                row = self._conn.execute(
-                    "SELECT consecutive_failures FROM custom_agents WHERE id=?", (agent_id,)
-                ).fetchone()
+                row = self._conn.execute("SELECT consecutive_failures FROM custom_agents WHERE id=?", (agent_id,)).fetchone()
                 prev = int((dict(row).get("consecutive_failures") if row else 0) or 0)
             except Exception:
                 prev = 0
@@ -1150,14 +1133,12 @@ class AgentRunner:
 
             if auto_paused:
                 self._conn.execute(
-                    "UPDATE custom_agents SET status='paused', enabled=0, last_run_at=?, last_error=?, "
-                    "consecutive_failures=?, updated_at=? WHERE id=?",
+                    "UPDATE custom_agents SET status='paused', enabled=0, last_run_at=?, last_error=?, consecutive_failures=?, updated_at=? WHERE id=?",
                     (finished, f"Auto-paused after {failures} consecutive failures: {str(exc)[:900]}", failures, finished, agent_id),
                 )
             else:
                 self._conn.execute(
-                    "UPDATE custom_agents SET status='error', last_run_at=?, last_error=?, "
-                    "consecutive_failures=?, updated_at=? WHERE id=?",
+                    "UPDATE custom_agents SET status='error', last_run_at=?, last_error=?, consecutive_failures=?, updated_at=? WHERE id=?",
                     (finished, str(exc)[:1000], failures, finished, agent_id),
                 )
 
@@ -1190,8 +1171,7 @@ class AgentRunner:
     def _prune_runs(self, agent_id: str) -> None:
         """Keep the newest 200 runs per agent so 24/7 schedules do not grow forever."""
         self._conn.execute(
-            "DELETE FROM agent_runs WHERE agent_id=? AND id NOT IN "
-            "(SELECT id FROM agent_runs WHERE agent_id=? ORDER BY started_at DESC LIMIT 200)",
+            "DELETE FROM agent_runs WHERE agent_id=? AND id NOT IN (SELECT id FROM agent_runs WHERE agent_id=? ORDER BY started_at DESC LIMIT 200)",
             (agent_id, agent_id),
         )
 
@@ -1227,9 +1207,7 @@ def install_custom_agent_routes(app: Any, conn: Any, require_role: Any, audit: A
         x_session_token: str | None = Header(default=None),
     ):
         require_role("viewer", x_admin_token, x_session_token)
-        rows = conn.execute(
-            "SELECT * FROM custom_agents WHERE tenant=? ORDER BY created_at DESC", (tenant,)
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM custom_agents WHERE tenant=? ORDER BY created_at DESC", (tenant,)).fetchall()
         return {"ok": True, "agents": [_serialize(conn, dict(r)) for r in rows]}
 
     @app.post("/api/agents")
@@ -1295,11 +1273,7 @@ def install_custom_agent_routes(app: Any, conn: Any, require_role: Any, audit: A
         device_ids = body.device_ids if body.device_ids is not None else json.loads(current.get("device_ids_json") or "[]")
         if body.provider is not None or body.base_url is not None or body.device_ids is not None:
             _validate(conn, provider, base_url, device_ids)
-        interval = (
-            min(MAX_INTERVAL_S, max(MIN_INTERVAL_S, int(body.interval_seconds)))
-            if body.interval_seconds is not None
-            else int(current["interval_seconds"])
-        )
+        interval = min(MAX_INTERVAL_S, max(MIN_INTERVAL_S, int(body.interval_seconds))) if body.interval_seconds is not None else int(current["interval_seconds"])
         enabled = current["enabled"] if body.enabled is None else (1 if body.enabled else 0)
         next_run = current["next_run_at"]
         if body.enabled is True and not current["enabled"]:
@@ -1378,9 +1352,7 @@ def install_custom_agent_routes(app: Any, conn: Any, require_role: Any, audit: A
             raise HTTPException(status_code=404, detail="Agent not found.")
         if not row["enabled"]:
             raise HTTPException(status_code=400, detail="Start the agent before running it.")
-        conn.execute(
-            "UPDATE custom_agents SET next_run_at=?, updated_at=? WHERE id=?", (_now(), _now(), agent_id)
-        )
+        conn.execute("UPDATE custom_agents SET next_run_at=?, updated_at=? WHERE id=?", (_now(), _now(), agent_id))
         conn.commit()
         audit(actor, "", "run_custom_agent", {"agent_id": agent_id}, "allowed")
         return {"ok": True, "agent_id": agent_id, "status": "queued"}
@@ -1423,9 +1395,7 @@ def install_custom_agent_routes(app: Any, conn: Any, require_role: Any, audit: A
             raise HTTPException(status_code=404, detail="Agent not found.")
         from . import agent_memory
 
-        chunks = agent_memory.query_agent_memory(
-            conn, agent_id, project_tag=project, task_tag=task, limit=limit
-        )
+        chunks = agent_memory.query_agent_memory(conn, agent_id, project_tag=project, task_tag=task, limit=limit)
         return {"ok": True, "agent_id": agent_id, "chunks": chunks, "project": project, "task": task}
 
     @app.post("/api/agents/{agent_id}/memory/chunks")
@@ -1486,9 +1456,7 @@ def install_custom_agent_routes(app: Any, conn: Any, require_role: Any, audit: A
             raise HTTPException(status_code=404, detail="Agent not found.")
         from . import agent_memory
 
-        cleared = agent_memory.clear_agent_memory(
-            conn, agent_id, project_tag=project, task_tag=task
-        )
+        cleared = agent_memory.clear_agent_memory(conn, agent_id, project_tag=project, task_tag=task)
         if not project and not task:
             conn.execute(
                 "UPDATE custom_agents SET memory='', updated_at=? WHERE id=?",
@@ -1530,8 +1498,7 @@ def install_custom_agent_routes(app: Any, conn: Any, require_role: Any, audit: A
                 "UPDATE agent_runs SET status='completed', finished_at=?, duration_ms=?, response=?, steps_json=? WHERE id=?",
                 (finished, int((finished - started) * 1000), str(res.get("response") or "")[:20000], json.dumps(res.get("steps") or [], default=str), run_id),
             )
-            conn.execute("UPDATE custom_agents SET run_count=run_count+1, last_run_at=?, last_result=?, updated_at=? WHERE id=?",
-                         (finished, str(res.get("response") or "")[:4000], finished, agent_id))
+            conn.execute("UPDATE custom_agents SET run_count=run_count+1, last_run_at=?, last_result=?, updated_at=? WHERE id=?", (finished, str(res.get("response") or "")[:4000], finished, agent_id))
             conn.commit()
             audit(actor, "", "ask_custom_agent", {"agent_id": agent_id, "prompt": body.prompt[:500]}, "allowed")
             return {"ok": True, "run_id": run_id, **res}
@@ -1592,9 +1559,7 @@ def _serialize(conn: Any, agent: dict[str, Any]) -> dict[str, Any]:
     out["enabled"] = bool(out.get("enabled"))
     devices = []
     for device_id in device_ids:
-        row = conn.execute(
-            "SELECT id, name, hostname, os, status FROM devices WHERE id=?", (device_id,)
-        ).fetchone()
+        row = conn.execute("SELECT id, name, hostname, os, status FROM devices WHERE id=?", (device_id,)).fetchone()
         devices.append(dict(row) if row else {"id": device_id, "name": device_id, "status": "missing"})
     out["devices"] = devices
 

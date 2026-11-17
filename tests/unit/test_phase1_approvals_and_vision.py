@@ -3,16 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import time
-from unittest.mock import MagicMock
 
-import pytest
 from fastapi.testclient import TestClient
 
 from ai_bridge import tools, vision
 from ai_bridge.control.app import create_app, make_quick_sig, send_webhook_notification
-from ai_bridge.control.dispatch import dispatch
-from ai_bridge.policy import Policy, decide
+from ai_bridge.policy import Policy
 
 
 def test_quick_sig_generation():
@@ -137,6 +133,7 @@ def test_send_webhook_notification_formatting():
 
     # Intercept httpx
     import json
+
     import httpx
     captured = []
     _orig_client = httpx.Client

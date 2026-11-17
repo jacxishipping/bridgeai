@@ -89,6 +89,12 @@ if(AIBRIDGE_WITH_LIBDATACHANNEL)
         libdatachannel
         GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
         GIT_TAG v0.22.6
+        # libdatachannel's CMakeLists does add_subdirectory(deps/plog),
+        # add_subdirectory(deps/usrsctp), add_subdirectory(deps/libsrtp)
+        # and add_subdirectory(deps/libjuice): those deps/ dirs are git
+        # submodules, so without this the clone leaves them empty and
+        # configure fails with "No CMakeLists.txt" in deps/*.
+        GIT_SUBMODULES_RECURSE ON
     )
     FetchContent_MakeAvailable(libdatachannel)
     list(APPEND AIBRIDGE_WEBRTC_LIBS datachannel-static)

@@ -5,6 +5,7 @@ over the shared state via the ControlContext passed to the factory
 (see routers/_context.py). Paths, methods and response shapes are
 unchanged (see tests/unit/test_architecture_phase4_routers.py).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,13 +13,28 @@ import json
 import threading
 import uuid
 
-from fastapi import APIRouter, HTTPException, Header, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from .. import db as dbmod, live_activity as live_activitymod, plane_state, role_catalog, supervisor as supervisormod, task_service as task_service_mod
 from ...policy import TOOL_TIERS, normalize_tool_name
-from ..app import FleetBroadcastIn, ScheduleIn, SupervisorHandoffIn, SupervisorRecoverIn, TriggerIn, WORKFLOW_TEMPLATES, WorkflowIn, WorkflowRetryIn, WorkflowScheduleIn, WorkflowTemplateIn, send_webhook_notification
-
+from .. import db as dbmod
+from .. import live_activity as live_activitymod
+from .. import plane_state, role_catalog
+from .. import supervisor as supervisormod
+from .. import task_service as task_service_mod
+from ..app import (
+    WORKFLOW_TEMPLATES,
+    FleetBroadcastIn,
+    ScheduleIn,
+    SupervisorHandoffIn,
+    SupervisorRecoverIn,
+    TriggerIn,
+    WorkflowIn,
+    WorkflowRetryIn,
+    WorkflowScheduleIn,
+    WorkflowTemplateIn,
+    send_webhook_notification,
+)
 from ._context import ControlContext
 
 
@@ -261,7 +277,9 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
             (wf_id, body.name, tenant, body.device_id, json.dumps(body.steps), len(body.steps), now_ts, now_ts),
         )
         conn.commit()
-        audit(actor, body.device_id or "local", "create_workflow", {"workflow_id": wf_id, "name": body.name, "steps": len(body.steps), "workflow_approved": workflow_approved}, "allowed", tenant=tenant)
+        audit(
+            actor, body.device_id or "local", "create_workflow", {"workflow_id": wf_id, "name": body.name, "steps": len(body.steps), "workflow_approved": workflow_approved}, "allowed", tenant=tenant
+        )
 
         threading.Thread(
             target=_run_workflow_worker,
@@ -378,9 +396,7 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
     ):
         actor = require_role("operator", x_admin_token, x_session_token)
         try:
-            res = supervisormod.recover_failed_role_tasks(
-                conn, role=body.role, device_id=body.device_id
-            )
+            res = supervisormod.recover_failed_role_tasks(conn, role=body.role, device_id=body.device_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if res.get("count"):
@@ -482,8 +498,6 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
             raise HTTPException(status_code=400, detail="No matching online devices found for broadcast.")
 
         batch_id = uuid.uuid4().hex[:12]
-        now_ts = dbmod.now()
-        t_val = tier.value
 
         tasks_out = []
         for dev in target_devs:
@@ -494,22 +508,32 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
                 continue
             try:
                 created = task_service_mod.create_task(
-                    conn, actor=actor, role=role, tenant=dev["tenant"],
-                    device_id=dev["id"], tool=tool_name, args=body.args,
+                    conn,
+                    actor=actor,
+                    role=role,
+                    tenant=dev["tenant"],
+                    device_id=dev["id"],
+                    tool=tool_name,
+                    args=body.args,
                     task_id=f"bcast-{batch_id}-{dev['id'][:6]}",
-                    human_initiated=False, device_row=dev,
+                    human_initiated=False,
+                    device_row=dev,
                     get_effective_device_policy=get_effective_device_policy,
-                    get_current_policy=get_current_policy, notify=notify_tasks, audit_fn=audit,
+                    get_current_policy=get_current_policy,
+                    notify=notify_tasks,
+                    audit_fn=audit,
                 )
             except HTTPException:
                 continue  # takeover / e-stop / denied: skip this device, keep the rest
-            tasks_out.append({
-                "device_id": dev["id"],
-                "device_name": dev["name"],
-                "os": dev["os"],
-                "task_id": created["task_id"],
-                "status": created["status"],
-            })
+            tasks_out.append(
+                {
+                    "device_id": dev["id"],
+                    "device_name": dev["name"],
+                    "os": dev["os"],
+                    "task_id": created["task_id"],
+                    "status": created["status"],
+                }
+            )
 
         if not tasks_out:
             raise HTTPException(status_code=403, detail=f"Tool '{tool_name}' is blocked by policy on all matching devices.")
@@ -552,16 +576,18 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
                     res_val = json.loads(r["result"])
                 except Exception:
                     res_val = {"raw": r["result"]}
-            results.append({
-                "task_id": r["id"],
-                "device_id": r["device_id"],
-                "device_name": d_name,
-                "os": d_os,
-                "status": status,
-                "result": res_val,
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
-            })
+            results.append(
+                {
+                    "task_id": r["id"],
+                    "device_id": r["device_id"],
+                    "device_name": d_name,
+                    "os": d_os,
+                    "status": status,
+                    "result": res_val,
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                }
+            )
 
         overall = "completed" if (completed_count + failed_count == len(task_rows)) else "running"
         return {
@@ -603,7 +629,8 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
         tid = uuid.uuid4().hex[:12]
         now_ts = dbmod.now()
         conn.execute(
-            "INSERT INTO triggers (id, name, tenant, device_id, metric, operator, threshold, action_type, action_target, action_args_json, cooldown_seconds, enabled, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO triggers (id, name, tenant, device_id, metric, operator, threshold, action_type, "
+            "action_target, action_args_json, cooldown_seconds, enabled, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 tid,
                 body.name,
@@ -684,7 +711,7 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
                 "trigger_name": row["name"],
                 "device_id": row["device_id"] or "fleet",
                 "metric": row["metric"],
-                "content": f"🧪 Test Trigger '{row['name']}' simulated by {actor}."
+                "content": f"🧪 Test Trigger '{row['name']}' simulated by {actor}.",
             }
             send_webhook_notification(wh_url, evt, admin_token, get_public_base_url())
             return {"trigger_id": trigger_id, "status": "webhook_sent"}
@@ -819,8 +846,12 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
     ):
         actor = require_role("admin", x_admin_token, x_session_token)
         from ... import updates as _updatesmod
+
         if not _updatesmod.signed_update_configured():
-            raise HTTPException(status_code=409, detail="Signed fleet updates are not configured (set AI_BRIDGE_UPDATE_MANIFEST_PATH, AI_BRIDGE_UPDATE_SIGNATURE_PATH and AI_BRIDGE_UPDATE_PUBLIC_KEY); refusing unsigned fleet update.")
+            raise HTTPException(
+                status_code=409,
+                detail="Signed fleet updates are not configured (set AI_BRIDGE_UPDATE_MANIFEST_PATH, AI_BRIDGE_UPDATE_SIGNATURE_PATH and AI_BRIDGE_UPDATE_PUBLIC_KEY); refusing unsigned fleet update.",
+            )
         b_res = broadcast_fleet_command(
             FleetBroadcastIn(tool="update_fleet_agent", args={}, target_os=target_os),
             x_admin_token=x_admin_token,

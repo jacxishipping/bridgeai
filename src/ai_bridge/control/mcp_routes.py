@@ -4,7 +4,6 @@ from __future__ import annotations
 import html
 import json
 import logging
-import os
 import secrets
 import time
 import urllib.parse
@@ -19,8 +18,8 @@ from ..errors import ErrorCode, error_detail
 from .mcp_client import execute_mcp_tool, fetch_mcp_tools
 from .mcp_oauth import (
     discover_oauth_metadata,
-    enforce_mcp_tool_policy,
     encrypt_token,
+    enforce_mcp_tool_policy,
     ensure_valid_mcp_token,
     exchange_authorization_code,
     fetch_client_credentials_token,

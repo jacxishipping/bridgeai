@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient
 
 from ai_bridge import server as mcp_server
 from ai_bridge import tools
-from ai_bridge.control import app as appmod
 from ai_bridge.control.app import create_app
 from ai_bridge.control.dispatch import dispatch
 from ai_bridge.policy import Policy

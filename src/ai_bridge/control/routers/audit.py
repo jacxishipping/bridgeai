@@ -7,10 +7,9 @@ unchanged (see tests/unit/test_architecture_phase4_routers.py).
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Header, HTTPException
 
 from .. import db as dbmod
-
 from ._context import ControlContext
 
 

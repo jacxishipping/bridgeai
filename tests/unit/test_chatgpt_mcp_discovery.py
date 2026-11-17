@@ -10,7 +10,6 @@ Verifies:
 4. OAuth gateway provides compliant /.well-known/openid-configuration
    and lowercase "bearer" token_type in /oauth/token.
 """
-import os
 import sys
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from starlette.testclient import TestClient as StarletteTestClient
 # Add deployment/oauth to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "deployment" / "oauth"))
 import gateway  # noqa: E402
+
 from ai_bridge.server import create_http_app  # noqa: E402
 
 ADMIN = "test-admin-secret"

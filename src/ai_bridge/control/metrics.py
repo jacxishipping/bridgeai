@@ -11,10 +11,10 @@ from typing import Any
 try:
     from prometheus_client import (
         CONTENT_TYPE_LATEST,
+        REGISTRY,
         Counter,
         Gauge,
         Histogram,
-        REGISTRY,
         generate_latest,
     )
     _PROMETHEUS_AVAILABLE = True
@@ -135,9 +135,8 @@ def update_fleet_gauges(conn: Any) -> None:
         q_depth = q_row["cnt"] if hasattr(q_row, "keys") else (q_row[0] if q_row else 0)
         QUEUE_DEPTH.set(q_depth)
 
-        from . import orchestration as orchmod
-
         from . import db as dbmod
+        from . import orchestration as orchmod
 
         cutoff = dbmod.now() - orchmod.DEFAULT_RUNNING_LEASE_SEC
         stale_row = conn.execute(

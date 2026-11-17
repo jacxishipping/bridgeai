@@ -5,6 +5,7 @@ over the shared state via the ControlContext passed to the factory
 (see routers/_context.py). Paths, methods and response shapes are
 unchanged (see tests/unit/test_architecture_phase4_routers.py).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,14 +14,15 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Body, HTTPException, Header
+from fastapi import APIRouter, Body, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
-from .. import agent_channel, alerts as alertsmod, db as dbmod, plane_state
 from ...policy import TOOL_TIERS
 from ...security import redact
+from .. import agent_channel, plane_state
+from .. import alerts as alertsmod
+from .. import db as dbmod
 from ..app import AlertConfigIn, OAuthClientUpdateIn, PolicyIn, WebhookIn, _valid_oauth_redirect_uri, _validate_webhook_url, send_webhook_notification
-
 from ._context import ControlContext
 
 
@@ -79,8 +81,7 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
         if url:
             _validate_webhook_url(url)
         conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('webhook_url', ?) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            "INSERT INTO settings (key, value) VALUES ('webhook_url', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
             (url,),
         )
         conn.commit()
@@ -117,8 +118,7 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
         row = conn.execute("SELECT MAX(version) AS v FROM policies").fetchone()
         version = (row["v"] or 0) + 1
         policy = body.model_dump()
-        conn.execute("INSERT INTO policies (version, policy_json, created_by, created_at, note) VALUES (?,?,?,?,?)",
-                     (version, json.dumps(policy), actor, dbmod.now(), body.note))
+        conn.execute("INSERT INTO policies (version, policy_json, created_by, created_at, note) VALUES (?,?,?,?,?)", (version, json.dumps(policy), actor, dbmod.now(), body.note))
         conn.commit()
         audit(actor, "", "create_policy", {"version": version}, "allowed")
         return {"version": version, "policy": policy}
@@ -144,8 +144,7 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
         scenarios = []
         for tool, tier in sorted(TOOL_TIERS.items()):
             requires_approval = tier.value >= 4 or (tier.value == 3 and not body.allow_tier3)
-            scenarios.append({"tool": tool, "tier": tier.value, "allowed_unattended": not requires_approval,
-                              "requires_approval": requires_approval})
+            scenarios.append({"tool": tool, "tier": tier.value, "allowed_unattended": not requires_approval, "requires_approval": requires_approval})
         return {"current_policy": current, "proposed_policy": body.model_dump(), "tools": scenarios}
 
     @router.post("/api/policy/simulate")
@@ -281,13 +280,15 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
             odb = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             odb.row_factory = sqlite3.Row
             for row in odb.execute("SELECT client_id, client_name, redirect_uris, created_at FROM clients ORDER BY created_at DESC"):
-                clients.append({
-                    "client_id": row["client_id"],
-                    "client_id_prefix": row["client_id"][:16],
-                    "client_name": row["client_name"],
-                    "redirect_uris": row["redirect_uris"],
-                    "created_at": row["created_at"],
-                })
+                clients.append(
+                    {
+                        "client_id": row["client_id"],
+                        "client_id_prefix": row["client_id"][:16],
+                        "client_name": row["client_name"],
+                        "redirect_uris": row["redirect_uris"],
+                        "created_at": row["created_at"],
+                    }
+                )
             now = dbmod.now()
             for row in odb.execute("SELECT kind, created_at, expires_at, revoked FROM tokens"):
                 total_tokens += 1
@@ -382,14 +383,14 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
         if service in units:
             journal = shutil.which("journalctl")
             if journal is not None:
-                proc = subprocess.run([journal, "-u", units[service], "-n", str(lines), "--no-pager"],
-                                      capture_output=True, text=True, timeout=15)
+                proc = subprocess.run([journal, "-u", units[service], "-n", str(lines), "--no-pager"], capture_output=True, text=True, timeout=15)
                 if proc.stdout and proc.stdout.strip():
                     return {"service": service, "lines": [redact(line) for line in proc.stdout.splitlines()[-lines:]]}
             # Fallback to structured audit log stream in containerized environments without journald
             rows = conn.execute("SELECT ts, actor, device_id, tool, decision, args_json FROM audit ORDER BY id DESC LIMIT ?", (lines,)).fetchall()
             formatted = [
-                f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(r['ts'] or 0))} [{service.upper()}] actor={r['actor']} device={r['device_id'] or 'gateway'} tool={r['tool']} decision={r['decision']} args={redact(str(r['args_json'] or '{}'))[:160]}"
+                f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(r['ts'] or 0))} [{service.upper()}] actor={r['actor']} device={r['device_id'] or 'gateway'} tool={r['tool']} "
+                f"decision={r['decision']} args={redact(str(r['args_json'] or '{}'))[:160]}"
                 for r in reversed(rows)
             ]
             return {"service": service, "lines": formatted or [f"[{service}] Service online; no audit events recorded yet."]}
@@ -504,6 +505,7 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         if getattr(conn, "dialect", "sqlite") != "postgres" and db_path and Path(str(db_path)).exists():
             from ai_bridge.control.backup import verified_backup
+
             dest = backup_dir / f"aibridge-backup-{stamp}.db"
             verified_backup(Path(str(db_path)), dest)
         else:
@@ -526,6 +528,7 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Backup file not found.")
         from fastapi.responses import FileResponse
+
         return FileResponse(target, filename=safe_name)
 
     @router.post("/api/admin/backups/{filename}/restore")
@@ -542,6 +545,7 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
         safety_tables = ("devices", "tasks", "approvals", "policies", "workflows", "workflow_templates", "schedules", "triggers", "custom_agents", "mcp_servers")
         if getattr(conn, "dialect", "sqlite") != "postgres" and db_path and Path(str(db_path)).exists():
             from ai_bridge.control.backup import verified_backup
+
             safety_dest = backup_dir / f"pre-restore-{stamp}.db"
             verified_backup(Path(str(db_path)), safety_dest)
         else:
@@ -585,6 +589,7 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
             if getattr(conn, "dialect", "sqlite") == "postgres" or not db_path:
                 raise HTTPException(status_code=400, detail="SQLite .db restore is only supported when running on SQLite.")
             import sqlite3
+
             src = sqlite3.connect(str(target))
             try:
                 with conn._lock:  # type: ignore[attr-defined]
@@ -603,12 +608,14 @@ def create_admin_router(ctx: ControlContext) -> APIRouter:
     def get_mcp_tool_policies_route(x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None)):
         require_role("viewer", x_admin_token, x_session_token)
         from ai_bridge.control.mcp_oauth import get_mcp_tool_policies
+
         return {"ok": True, "policies": get_mcp_tool_policies(conn)}
 
     @router.put("/api/mcp/tool-policies")
     def update_mcp_tool_policies_route(body: dict, x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None)):
         actor = require_admin(x_admin_token, x_session_token)
         from ai_bridge.control.mcp_oauth import save_mcp_tool_policies
+
         raw_policies = body.get("policies") if isinstance(body, dict) and isinstance(body.get("policies"), dict) else (body if isinstance(body, dict) else {})
         saved = save_mcp_tool_policies(conn, raw_policies)
         audit(actor, "", "update_mcp_tool_policies", {"count": len(saved)}, "allowed")

@@ -26,7 +26,6 @@ from agents.common.poller import (
 )
 from agents.common.spool import TaskSpooler
 
-
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
@@ -330,7 +329,6 @@ def test_run_forever_stops_on_revocation_no_infinite_retry(tmp_path: Path, monke
 
 
 def test_backoff_delay_bounds_and_growth():
-    rng = random.Random(0)
     assert backoff_delay(0, jitter=False) == 2.0
     assert backoff_delay(3, jitter=False) == 16.0
     assert backoff_delay(10, jitter=False) == 60.0  # capped

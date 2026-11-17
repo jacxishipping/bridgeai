@@ -12,11 +12,10 @@ import zipfile
 
 from ..execution import RUNNER
 from ..policy import Policy
-from ..security import confined_path
-from ..security import is_secret_name
-from ..security import workspace_root
-
+from ..security import confined_path, is_secret_name, workspace_root
 from ._common import _check, default_policy
+
+
 def _is_safe_workspace_file(p, root) -> bool:
     if ".ai-bridge-backups" in p.parts or p.is_symlink() or not p.is_file() or is_secret_name(p):
         return False

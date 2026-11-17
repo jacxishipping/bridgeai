@@ -52,7 +52,7 @@ from .device_routing import (
 from .errors import ErrorCode, code_of_message, error_detail
 from .execution import RUNNER
 from .policy import TOOL_TIERS, Decision, RiskTier, decide, normalize_tool_name
-from .security import is_secret_name, read_workspace_text, redact
+from .security import read_workspace_text
 
 try:
     # Wave 3B Track B: the tool registry is the single source of truth

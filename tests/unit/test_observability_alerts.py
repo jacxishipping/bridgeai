@@ -1,6 +1,5 @@
 """Unit tests for Phase 2: Observability, Health Probes, Metrics, and Alert Engine."""
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -51,7 +50,7 @@ def test_alert_engine_dispatch(monkeypatch):
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/00/XX")
     monkeypatch.setenv("ALERT_WEBHOOK_URL", "https://example.com/webhook/alerts")
 
-    res = alerts.dispatch_alert(
+    alerts.dispatch_alert(
         event_type="test_event",
         severity="warning",
         title="High Memory Usage",

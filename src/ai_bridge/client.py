@@ -43,7 +43,6 @@ from typing import Any
 
 from .policy_simulation import is_demo_mode as _is_demo_mode
 
-
 # ---------------------------------------------------------------------------
 # FR-03 — task result projection (list path returns metadata, not full text)
 # ---------------------------------------------------------------------------

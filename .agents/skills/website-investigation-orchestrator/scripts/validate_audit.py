@@ -56,7 +56,6 @@ def main():
     unique(tasks, "task_id", "task_id")
 
     evidence_ids = {x.get("evidence_id") for x in evidence if isinstance(x, dict)}
-    page_ids = {x.get("page_id") for x in pages if isinstance(x, dict)}
 
     for p in pages:
         if p.get("status") not in VALID_PAGE:

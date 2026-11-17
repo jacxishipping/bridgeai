@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 import base64
 import io
 import os
@@ -14,21 +13,22 @@ import shutil
 import subprocess
 import sys
 import time
+from typing import Any
 
 from .. import diagnostics
 from ..config import get_settings
 from ..policy import Policy
-
+from . import _common  # LAST_FRAME_SCALE lives here (shared mutable state)
 from ._common import _LAST_SOM_LOCK, _LAST_SOM_MARKS, _check, _require_no_human_takeover, default_policy, desktop_is_action_vetoed, get_last_som_marks
 
-from . import _common  # LAST_FRAME_SCALE lives here (shared mutable state)
+
 def _desktop_platform_capabilities() -> dict[str, Any]:
     """Honest per-OS desktop automation / stream / OCR capability matrix (Phase 3)."""
     sys_name = platform.system()
     settings = get_settings()
     desktop_enabled = bool(settings.desktop_enabled)
     if sys_name == "Windows":
-        from ..import screen_capture
+        from .. import screen_capture
 
         session = screen_capture.get_desktop_session_state()
         capture_ok = not bool(session.get("capture_blocked"))
@@ -810,7 +810,7 @@ def ocr_screen(*, approval_granted: bool = False, policy: Policy | None = None) 
     """Run native OCR on the current desktop screen and return recognized text with coordinates."""
     eff_policy = policy or default_policy()
     _check("ocr_screen", approval_granted=approval_granted, policy=eff_policy)
-    from ..import vision
+    from .. import vision
     shot_res = capture_desktop_screenshot(approval_granted=approval_granted, policy=eff_policy)
     if not shot_res.get("available") or not shot_res.get("path"):
         return {"ok": False, "error": "Unable to capture desktop screenshot for OCR."}
@@ -837,7 +837,7 @@ def click_text(
     """Find text on screen using native OCR + UI grounding and click its center (no pixel guessing)."""
     eff_policy = policy or default_policy()
     _check("click_text", approval_granted=approval_granted, policy=eff_policy)
-    from ..import vision
+    from .. import vision
     shot_res = capture_desktop_screenshot(approval_granted=approval_granted, policy=eff_policy)
     img_path = shot_res.get("path") if shot_res.get("available") else None
     res = vision.find_text_coordinates(text, image_path=img_path, occurrence=occurrence)
@@ -924,7 +924,7 @@ def list_ui_elements(*, approval_granted: bool = False, policy: Policy | None = 
     """List visible interactive Windows controls (menus, buttons, input fields, child controls) with labels and bounds."""
     eff_policy = policy or default_policy()
     _check("list_ui_elements", approval_granted=approval_granted, policy=eff_policy)
-    from ..import vision
+    from .. import vision
     ctrls = vision.list_win32_ui_controls()
     return {"ok": True, "count": len(ctrls), "elements": ctrls}
 
@@ -938,7 +938,7 @@ def set_of_marks_screenshot(
     """Capture a screenshot with numbered Set-of-Marks badges ([1], [2], [3]) overlaid over interactive elements."""
     eff_policy = policy or default_policy()
     _check("set_of_marks_screenshot", approval_granted=approval_granted, policy=eff_policy)
-    from ..import vision
+    from .. import vision
     try:
         from PIL import Image
     except ImportError:
@@ -1067,7 +1067,7 @@ def wait_for_text(
     """Poll screen with native OCR until specified text appears or timeout is reached."""
     eff_policy = policy or default_policy()
     _check("wait_for_text", approval_granted=approval_granted, policy=eff_policy)
-    from ..import vision
+    from .. import vision
 
     start_t = time.time()
     deadline = start_t + max(1.0, float(timeout_seconds))
@@ -1120,7 +1120,7 @@ def verify_screen_contains(
     """One-shot instant verification: check if text is currently displayed on screen."""
     eff_policy = policy or default_policy()
     _check("verify_screen_contains", approval_granted=approval_granted, policy=eff_policy)
-    from ..import vision
+    from .. import vision
 
     shot_res = capture_desktop_screenshot(approval_granted=approval_granted, policy=eff_policy)
     img_path = shot_res.get("path") if shot_res.get("available") else None

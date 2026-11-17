@@ -110,8 +110,7 @@ def stream_gate_for_os(os_value: str | None) -> dict[str, Any]:
 
 
 def build_capability_matrix(*, include_host: bool = True) -> dict[str, Any]:
-    from ai_bridge import tools
-    from ai_bridge import webrtc_stream
+    from ai_bridge import tools, webrtc_stream
 
     host_os = platform.system()
     host_status = tools.get_desktop_status() if include_host else {}

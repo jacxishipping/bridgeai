@@ -17,6 +17,7 @@ Rate limiting: 30 requests/minute per IP on auth endpoints; 1200/minute per
 authenticated token and 300/minute per unauthenticated IP otherwise
 (60-second windows; Redis/durable store when configured).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -31,10 +32,10 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, parse_qs
+from typing import Any
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -42,17 +43,16 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 
 from .. import tools
-from ..policy import Policy, TOOL_TIERS, normalize_tool_name
+from ..policy import TOOL_TIERS, Policy, normalize_tool_name
 from ..security import redact_obj
 from . import agent_channel
 from . import alerts as alertsmod
 from . import auth as authmod
-from . import metrics as metricsmod
 from . import db as dbmod
 from . import task_service as task_service_mod
+from .csrf import csrf_middleware
 from .dispatch import dispatch
 from .ratelimit import rate_limit
-from .csrf import csrf_middleware
 from .secrets_backend import get_secret
 
 MAX_RESULT_CHARS = 512_000
@@ -237,9 +237,7 @@ def make_quick_sig(admin_token: str | None, approval_id: str, decision: str) -> 
     secret = (admin_token or os.environ.get("AI_BRIDGE_ADMIN_TOKEN") or "").strip()
     if not secret:
         if prodready.is_production_profile():
-            raise ValueError(
-                "Quick approval signature requires AI_BRIDGE_ADMIN_TOKEN (or admin_token) in production."
-            )
+            raise ValueError("Quick approval signature requires AI_BRIDGE_ADMIN_TOKEN (or admin_token) in production.")
         secret = "ai-bridge-secret"
     msg = f"{approval_id}:{decision}".encode("utf-8")
     return hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:32]
@@ -279,9 +277,7 @@ def send_webhook_notification(
 
     from . import production_readiness as prodready
 
-    base_url = (
-        public_base_url or prodready.env_public_base_url() or "https://jxiptvplayer.app"
-    ).rstrip("/")
+    base_url = (public_base_url or prodready.env_public_base_url() or "https://jxiptvplayer.app").rstrip("/")
 
     approve_url = ""
     deny_url = ""
@@ -291,14 +287,7 @@ def send_webhook_notification(
         approve_url = f"{base_url}/api/approvals/quick/{app_id}?decision=approved&sig={app_sig}"
         deny_url = f"{base_url}/api/approvals/quick/{app_id}?decision=denied&sig={den_sig}"
 
-    text = (
-        f"[AI Bridge Approval Required]\n"
-        f"Tool: {tool} (Tier {tier})\n"
-        f"Device: {dev_name}\n"
-        f"Task ID: {task_id}\n"
-        f"Approval ID: {app_id}\n"
-        f"Args: {json.dumps(safe_args)[:300]}"
-    )
+    text = f"[AI Bridge Approval Required]\nTool: {tool} (Tier {tier})\nDevice: {dev_name}\nTask ID: {task_id}\nApproval ID: {app_id}\nArgs: {json.dumps(safe_args)[:300]}"
     payload = {
         "text": text,
         "content": text,
@@ -340,7 +329,7 @@ def send_webhook_notification(
         if chat_id:
             payload["chat_id"] = chat_id
         text_lines = [
-            f"🚨 *[AI Bridge] Approval Required*",
+            "🚨 *[AI Bridge] Approval Required*",
             f"*Tool:* `{tool}` (Tier {tier})",
             f"*Device:* `{dev_name}`",
             f"*Task ID:* `{task_id}`",
@@ -379,13 +368,15 @@ def send_webhook_notification(
             },
         ]
         if approve_url and deny_url:
-            blocks.append({
-                "type": "actions",
-                "elements": [
-                    {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve"}, "style": "primary", "url": approve_url},
-                    {"type": "button", "text": {"type": "plain_text", "text": "❌ Deny"}, "style": "danger", "url": deny_url},
-                ],
-            })
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {"type": "button", "text": {"type": "plain_text", "text": "✅ Approve"}, "style": "primary", "url": approve_url},
+                        {"type": "button", "text": {"type": "plain_text", "text": "❌ Deny"}, "style": "danger", "url": deny_url},
+                    ],
+                }
+            )
         payload["blocks"] = blocks
 
     # SEC-11: automatic redirect following is disabled; redirects are
@@ -444,28 +435,34 @@ class EnrollIn(BaseModel):
     unrestricted: bool | None = None
     policy: dict | None = None
 
+
 class TaskIn(BaseModel):
     device_id: str
     tool: str
     args: dict = {}
     tenant: str | None = None
 
+
 class ApprovalDecision(BaseModel):
     decision: str  # approved | denied
     reason: str = ""
+
 
 class TaskResultIn(BaseModel):
     status: str
     result: str = ""
     epoch: int | None = None  # execution epoch from next_task claim; stale results are rejected (DIST-05/F07-04)
 
+
 class LoginIn(BaseModel):
     username: str
     password: str
 
+
 class StreamTicketIn(BaseModel):
     device_id: str = ""
     session_id: str = ""
+
 
 class UserIn(BaseModel):
     username: str = Field(min_length=1, max_length=100)
@@ -473,12 +470,14 @@ class UserIn(BaseModel):
     role: str = "viewer"
     tenant: str | None = None
 
+
 class PolicyIn(BaseModel):
     allow_tier3: bool = False
     desktop_enabled: bool = False
     allowed_apps: list[str] = []
     allowed_services: list[str] = []
     note: str = ""
+
 
 class WebhookIn(BaseModel):
     webhook_url: str = ""
@@ -827,15 +826,10 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     # The AI_BRIDGE_ADMIN_TOKEN env var alone no longer enables it;
     # session-based admin users are the supported admin path. The env
     # token still feeds the quick-approval HMAC (make_quick_sig).
-    app.state.legacy_admin_enabled = bool(
-        admin_token is not None
-        or os.environ.get("AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN", "").strip().lower()
-        in ("1", "true", "yes")
-    )
+    app.state.legacy_admin_enabled = bool(admin_token is not None or os.environ.get("AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN", "").strip().lower() in ("1", "true", "yes"))
     if app.state.legacy_admin_enabled and admin_token is None:
         print(
-            "WARNING: legacy shared admin token enabled via "
-            "AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN=1; prefer session-based admin users.",
+            "WARNING: legacy shared admin token enabled via AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN=1; prefer session-based admin users.",
             flush=True,
         )
     # R-P0-06 wiring (Wave 2A): point the MCP audit writer at the
@@ -880,14 +874,13 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     for origin in os.environ.get("AI_BRIDGE_CORS_ORIGINS", "").split(","):
         allowed_origins.append(origin.strip())
     allowed_origins = [o for o in dict.fromkeys(allowed_origins) if o]
-    app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
-                       allow_credentials=True,
-                       allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-                       allow_headers=["Authorization", "Content-Type",
-                                      "X-Admin-Token", "X-Session-Token",
-                                      "X-Device-Token", "X-CSRF-Token",
-                                      "X-Client-Cert-Fingerprint",
-                                      "X-SSL-Client-Fingerprint"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-Session-Token", "X-Device-Token", "X-CSRF-Token", "X-Client-Cert-Fingerprint", "X-SSL-Client-Fingerprint"],
+    )
     app.state.conn = conn
     app.state.admin_token = token
     app.state.emergency_stop = False
@@ -906,11 +899,9 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
 
         _mig = _mcp_oauth_boot.migrate_plaintext_secrets(conn)
         if _mig["total"]:
-            logging.getLogger("ai_bridge.control.app").info(
-                "migrated %d plaintext MCP OAuth secret(s) to Fernet", _mig["total"])
+            logging.getLogger("ai_bridge.control.app").info("migrated %d plaintext MCP OAuth secret(s) to Fernet", _mig["total"])
     except Exception as _mig_exc:
-        logging.getLogger("ai_bridge.control.app").warning(
-            "plaintext MCP secret migration skipped: %s", _mig_exc)
+        logging.getLogger("ai_bridge.control.app").warning("plaintext MCP secret migration skipped: %s", _mig_exc)
     hydrate_human_takeover_from_db(conn)
     bind_control_connection(conn)
     role_catalog.seed_role_catalog(conn)
@@ -949,8 +940,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                 return f"{proto}://{host}".rstrip("/")
         return "https://jxiptvplayer.app"
 
-    def _auth_context_full(x_admin_token=None, x_session_token=None,
-                           authorization=None, admin_token=None):
+    def _auth_context_full(x_admin_token=None, x_session_token=None, authorization=None, admin_token=None):
         """Return (actor, role, tenant, is_legacy_admin).
 
         Session tokens outrank the legacy admin token. The tenant is the
@@ -976,32 +966,25 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
             return "admin-token", "admin", "default", True
         raise HTTPException(status_code=401, detail="Authentication required.")
 
-    def auth_context(x_admin_token=None, x_session_token=None,
-                     authorization=None, admin_token=None):
+    def auth_context(x_admin_token=None, x_session_token=None, authorization=None, admin_token=None):
         """Return (actor, role). Session tokens outrank the legacy admin token."""
-        actor, role, _tenant, _is_legacy = _auth_context_full(
-            x_admin_token, x_session_token, authorization, admin_token=admin_token)
+        actor, role, _tenant, _is_legacy = _auth_context_full(x_admin_token, x_session_token, authorization, admin_token=admin_token)
         return actor, role
 
-    def session_tenant_for_request(x_admin_token=None, x_session_token=None,
-                                   authorization=None, admin_token=None):
+    def session_tenant_for_request(x_admin_token=None, x_session_token=None, authorization=None, admin_token=None):
         """(session tenant, is_legacy_admin) for the caller of this request."""
-        _actor, _role, tenant, is_legacy = _auth_context_full(
-            x_admin_token, x_session_token, authorization, admin_token=admin_token)
+        _actor, _role, tenant, is_legacy = _auth_context_full(x_admin_token, x_session_token, authorization, admin_token=admin_token)
         return tenant, is_legacy
 
-    def resolve_request_tenant(requested, x_admin_token=None, x_session_token=None,
-                               authorization=None, admin_token=None):
+    def resolve_request_tenant(requested, x_admin_token=None, x_session_token=None, authorization=None, admin_token=None):
         """Effective tenant for a list/read/write (R-P0-12).
 
         Session users are strictly scoped to their own tenant; a
         caller-supplied tenant that differs is rejected (403). The legacy
         admin token may address any tenant explicitly.
         """
-        tenant, is_legacy = session_tenant_for_request(
-            x_admin_token, x_session_token, authorization, admin_token=admin_token)
-        return task_service_mod.resolve_tenant(
-            requested, session_tenant=tenant, is_legacy_admin=is_legacy)
+        tenant, is_legacy = session_tenant_for_request(x_admin_token, x_session_token, authorization, admin_token=admin_token)
+        return task_service_mod.resolve_tenant(requested, session_tenant=tenant, is_legacy_admin=is_legacy)
 
     def _row_tenant(row):
         """Tenant of a DB row, tolerating rows without a tenant column."""
@@ -1012,15 +995,13 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         except Exception:
             return "default"
 
-    def _require_row_tenant(row, x_admin_token=None, x_session_token=None,
-                            authorization=None, admin_token=None):
+    def _require_row_tenant(row, x_admin_token=None, x_session_token=None, authorization=None, admin_token=None):
         """404 unless the row's tenant is visible to the caller (R-P0-12).
 
         Cross-tenant single-resource reads return 404 so the endpoint does
         not oracle the existence of another tenant's rows.
         """
-        tenant, is_legacy = session_tenant_for_request(
-            x_admin_token, x_session_token, authorization, admin_token=admin_token)
+        tenant, is_legacy = session_tenant_for_request(x_admin_token, x_session_token, authorization, admin_token=admin_token)
         if is_legacy:
             return
         if _row_tenant(row) != tenant:
@@ -1041,25 +1022,27 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
             return
         _require_row_tenant(row, x_admin_token, x_session_token, authorization)
 
-    def require_role(min_role: str, x_admin_token: str | None = None, x_session_token: str | None = None,
-                     authorization: str | None = None, admin_token: str | None = None):
+    def require_role(min_role: str, x_admin_token: str | None = None, x_session_token: str | None = None, authorization: str | None = None, admin_token: str | None = None):
         actor, role = auth_context(x_admin_token, x_session_token, authorization, admin_token=admin_token)
         if authmod.ROLES.get(role, 0) < authmod.ROLES[min_role]:
             raise HTTPException(status_code=403, detail=f"Role '{role}' cannot perform this action (requires {min_role}).")
         return actor
 
-    def require_admin(x_admin_token: str | None = None, x_session_token: str | None = None,
-                      authorization: str | None = None, admin_token: str | None = None):
+    def require_admin(x_admin_token: str | None = None, x_session_token: str | None = None, authorization: str | None = None, admin_token: str | None = None):
         return require_role("admin", x_admin_token, x_session_token, authorization, admin_token=admin_token)
 
     def get_current_policy() -> dict:
         row = conn.execute("SELECT policy_json FROM policies ORDER BY version DESC LIMIT 1").fetchone()
         if row is not None:
             import json as _json
+
             return _json.loads(row["policy_json"])
-        return {"allow_tier3": os.environ.get("AI_BRIDGE_ALLOW_TIER3", "0") == "1",
-                "desktop_enabled": os.environ.get("AI_BRIDGE_DESKTOP_ENABLED", "0") == "1",
-                "allowed_apps": [], "allowed_services": []}
+        return {
+            "allow_tier3": os.environ.get("AI_BRIDGE_ALLOW_TIER3", "0") == "1",
+            "desktop_enabled": os.environ.get("AI_BRIDGE_DESKTOP_ENABLED", "0") == "1",
+            "allowed_apps": [],
+            "allowed_services": [],
+        }
 
     def get_effective_device_policy(device_row_or_id) -> dict:
         global_p = get_current_policy()
@@ -1106,15 +1089,19 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
             return {**global_p, "has_custom_policy": False, "_source": "global", "denied_tools": []}
 
         inherit = bool(custom.get("inherit_global", True))
-        merged = dict(global_p) if inherit else {
-            "allow_writes": True,
-            "allow_tier3": False,
-            "desktop_enabled": False,
-            "allowed_apps": [],
-            "allowed_services": [],
-            "allowed_test_commands": ["pytest", "npm test", "go test"],
-            "max_tier_unattended": 2,
-        }
+        merged = (
+            dict(global_p)
+            if inherit
+            else {
+                "allow_writes": True,
+                "allow_tier3": False,
+                "desktop_enabled": False,
+                "allowed_apps": [],
+                "allowed_services": [],
+                "allowed_test_commands": ["pytest", "npm test", "go test"],
+                "max_tier_unattended": 2,
+            }
+        )
         for k in ["allow_writes", "allow_tier3", "desktop_enabled", "max_tier_unattended", "allow_file_deletion", "allow_shell", "allow_package_install"]:
             if k in custom and custom[k] is not None:
                 merged[k] = custom[k]
@@ -1132,12 +1119,23 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         if custom.get("allow_file_deletion") is False:
             denied.add("delete_workspace_file")
         if custom.get("desktop_enabled") is False:
-            denied.update([
-                "capture_desktop_screenshot", "take_screenshot", "launch_approved_application",
-                "perform_approved_ui_action", "mouse_click", "mouse_move", "mouse_scroll",
-                "mouse_drag", "keyboard_type", "keyboard_press", "list_desktop_windows",
-                "focus_window", "get_screen_size",
-            ])
+            denied.update(
+                [
+                    "capture_desktop_screenshot",
+                    "take_screenshot",
+                    "launch_approved_application",
+                    "perform_approved_ui_action",
+                    "mouse_click",
+                    "mouse_move",
+                    "mouse_scroll",
+                    "mouse_drag",
+                    "keyboard_type",
+                    "keyboard_press",
+                    "list_desktop_windows",
+                    "focus_window",
+                    "get_screen_size",
+                ]
+            )
         if custom.get("allow_writes") is False:
             denied.update(["create_workspace_file", "edit_workspace_file", "move_workspace_file", "delete_workspace_file"])
 
@@ -1151,8 +1149,13 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         return merged
 
     _POLICY_ESCALATION_FLAGS = (
-        "unrestricted", "allow_writes", "allow_tier3", "desktop_enabled",
-        "allow_shell", "allow_package_install", "allow_file_deletion",
+        "unrestricted",
+        "allow_writes",
+        "allow_tier3",
+        "desktop_enabled",
+        "allow_shell",
+        "allow_package_install",
+        "allow_file_deletion",
     )
 
     def reject_policy_widening(effective: dict, proposed: dict) -> None:
@@ -1216,7 +1219,8 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         from . import device_mtls
 
         device_mtls.require_device_mtls(
-            conn, device_id,
+            conn,
+            device_id,
             device_mtls.extract_request_fingerprint(
                 request,
                 x_client_cert_fingerprint=x_client_cert_fingerprint,
@@ -1235,6 +1239,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     dispatch_auditmod.set_dispatch_audit_callback(_record_dispatch_audit)
 
     from .workspace import install_workspace_routes
+
     install_workspace_routes(app, conn, require_role, audit)
 
     def _install_asset(relative: str) -> Path:
@@ -1250,7 +1255,6 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                 return path
         raise HTTPException(status_code=404, detail=f"Installer not found: {relative}")
 
-
     app.state.device_live_meta = {}
 
     def _get_device_live_meta(dev_id: str) -> dict:
@@ -1265,9 +1269,9 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                     rp = json.loads(r_row["result"])
                     if isinstance(rp, dict):
                         if rp.get("memory_total_bytes") and not meta.get("memory_total_gb"):
-                            meta["memory_total_gb"] = round(float(rp["memory_total_bytes"]) / (1024 ** 3), 1)
+                            meta["memory_total_gb"] = round(float(rp["memory_total_bytes"]) / (1024**3), 1)
                         if rp.get("disk_total_bytes") and not meta.get("disk_total_gb"):
-                            meta["disk_total_gb"] = round(float(rp["disk_total_bytes"]) / (1024 ** 3), 1)
+                            meta["disk_total_gb"] = round(float(rp["disk_total_bytes"]) / (1024**3), 1)
                         if rp.get("uptime_seconds") and not meta.get("uptime_hours"):
                             meta["uptime_hours"] = round(float(rp["uptime_seconds"]) / 3600.0, 1)
             except Exception:
@@ -1290,7 +1294,6 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                 pass
         return meta
 
-
     def expire_pending_approvals() -> None:
         now = dbmod.now()
         rows = conn.execute("SELECT id, task_id FROM approvals WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?", (now,)).fetchall()
@@ -1307,15 +1310,12 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         if data.get("task_id"):
             task = conn.execute("SELECT device_id, tenant, tool, args_json, tier FROM tasks WHERE id=?", (data["task_id"],)).fetchone()
             if task:
-                data.update({"device_id": task["device_id"], "tenant": task["tenant"], "tool": task["tool"],
-                             "args": json.loads(task["args_json"] or "{}"), "tier": task["tier"]})
+                data.update({"device_id": task["device_id"], "tenant": task["tenant"], "tool": task["tool"], "args": json.loads(task["args_json"] or "{}"), "tier": task["tier"]})
                 device = conn.execute("SELECT name FROM devices WHERE id=?", (task["device_id"],)).fetchone()
                 data["device_name"] = device["name"] if device else None
         return data
 
-
     # --- Autonomous Workflows & Multi-Turn Plan Execution -----------------
-
 
     _PLANE_SUPERVISOR_TOOLS = frozenset(
         {
@@ -1326,7 +1326,18 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         }
     )
 
-    def _execute_workflow_step_sync(action: str, args: dict, target_device_id: str | None, tenant: str, actor: str, *, workflow_approved: bool = False, step_approved: bool = False, workflow_approval_id: str | None = None, step_approval_id: str | None = None) -> dict:
+    def _execute_workflow_step_sync(
+        action: str,
+        args: dict,
+        target_device_id: str | None,
+        tenant: str,
+        actor: str,
+        *,
+        workflow_approved: bool = False,
+        step_approved: bool = False,
+        workflow_approval_id: str | None = None,
+        step_approval_id: str | None = None,
+    ) -> dict:
         # R-P0-11: steps run with the WORKFLOW OWNER's policy, never admin.
         # Tier >=3 steps need a recorded approval (per-step, or a whole-
         # workflow approval by an admin) unless the owner's policy itself
@@ -1376,11 +1387,20 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                 # recorded step/workflow approval is presented, not re-asked.
                 approval_id = step_approval_id if step_approved else (workflow_approval_id if workflow_approved else None)
                 created = task_service_mod.create_task(
-                    conn, actor=actor, role="operator", tenant=tenant,
-                    device_id=target_device_id, tool=action, args=args,
-                    approval_id=approval_id, human_initiated=False, device_row=dev_row,
+                    conn,
+                    actor=actor,
+                    role="operator",
+                    tenant=tenant,
+                    device_id=target_device_id,
+                    tool=action,
+                    args=args,
+                    approval_id=approval_id,
+                    human_initiated=False,
+                    device_row=dev_row,
                     get_effective_device_policy=get_effective_device_policy,
-                    get_current_policy=get_current_policy, notify=notify_tasks, audit_fn=audit,
+                    get_current_policy=get_current_policy,
+                    notify=notify_tasks,
+                    audit_fn=audit,
                 )
                 if created["status"] == "needs_approval":
                     raise PermissionError(f"Workflow step '{action}' requires human approval (approval {created['approval_id']}); step not executed.")
@@ -1486,8 +1506,10 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                         "error": f"Step {idx + 1} approval denied or expired.",
                     }
                     results.append(step_entry)
-                    conn.execute("UPDATE workflows SET status='failed', error=?, results_json=?, completed_at=?, updated_at=? WHERE id=?",
-                                 (step_entry["error"], json.dumps(results), dbmod.now(), dbmod.now(), wf_id))
+                    conn.execute(
+                        "UPDATE workflows SET status='failed', error=?, results_json=?, completed_at=?, updated_at=? WHERE id=?",
+                        (step_entry["error"], json.dumps(results), dbmod.now(), dbmod.now(), wf_id),
+                    )
                     conn.commit()
                     return
                 conn.execute("UPDATE workflows SET status='running', updated_at=? WHERE id=?", (dbmod.now(), wf_id))
@@ -1513,7 +1535,11 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
             while retries_left >= 0 and not success:
                 try:
                     res = _execute_workflow_step_sync(
-                        action, args, target_dev, tenant, actor,
+                        action,
+                        args,
+                        target_dev,
+                        tenant,
+                        actor,
                         workflow_approved=workflow_approved,
                         step_approved=approved,
                         workflow_approval_id=workflow_approval_id,
@@ -1548,10 +1574,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                             )
                             step_entry["verification"] = v_res
                             if not v_res.get("matched", v_res.get("ok")):
-                                raise RuntimeError(
-                                    f"Step visual verification failed for baseline '{baseline}' "
-                                    f"(rmse={v_res.get('rmse')})."
-                                )
+                                raise RuntimeError(f"Step visual verification failed for baseline '{baseline}' (rmse={v_res.get('rmse')}).")
                         elif v_text or v_window:
                             if v_mode in {"wait", "poll", "wait_for_text"}:
                                 if not v_text:
@@ -1569,9 +1592,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                                 )
                                 step_entry["verification"] = v_res
                                 if not v_res.get("found"):
-                                    raise RuntimeError(
-                                        f"Step verification failed: text '{v_text}' not found after {v_timeout}s."
-                                    )
+                                    raise RuntimeError(f"Step verification failed: text '{v_text}' not found after {v_timeout}s.")
                             else:
                                 # Closed-loop default: desktop_verify_action (+ post screenshot evidence).
                                 v_res = _execute_workflow_step_sync(
@@ -1593,9 +1614,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                                 step_entry["verification"] = v_res
                                 if not v_res.get("verified", v_res.get("ok")):
                                     detail = v_text or v_window or "expected UI state"
-                                    raise RuntimeError(
-                                        f"Step verification failed via desktop_verify_action for '{detail}'."
-                                    )
+                                    raise RuntimeError(f"Step verification failed via desktop_verify_action for '{detail}'.")
 
                     step_entry["status"] = "completed"
                     success = True
@@ -1619,11 +1638,9 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                 break
 
         final_status = "completed" if overall_ok else "failed"
-        conn.execute("UPDATE workflows SET status=?, error=?, results_json=?, completed_at=?, updated_at=? WHERE id=?",
-                     (final_status, err_msg, json.dumps(results), dbmod.now(), dbmod.now(), wf_id))
+        conn.execute("UPDATE workflows SET status=?, error=?, results_json=?, completed_at=?, updated_at=? WHERE id=?", (final_status, err_msg, json.dumps(results), dbmod.now(), dbmod.now(), wf_id))
         conn.commit()
         audit(actor, target_dev or "local", "execute_workflow", {"workflow_id": wf_id, "status": final_status, "steps_count": len(steps)}, "allowed", tenant=tenant)
-
 
     # --- Phase 3: Fleet Telemetry, Broadcast, Triggers & Schedules ---
     app.state._running = True
@@ -1669,16 +1686,26 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                         if act_type == "tool":
                             try:
                                 created = task_service_mod.create_task(
-                                    conn, actor="trigger", role="operator", tenant=dev_row["tenant"],
-                                    device_id=dev_row["id"], tool=act_target, args=act_args,
-                                    human_initiated=False, device_row=dev_row,
+                                    conn,
+                                    actor="trigger",
+                                    role="operator",
+                                    tenant=dev_row["tenant"],
+                                    device_id=dev_row["id"],
+                                    tool=act_target,
+                                    args=act_args,
+                                    human_initiated=False,
+                                    device_row=dev_row,
                                     get_effective_device_policy=get_effective_device_policy,
-                                    get_current_policy=get_current_policy, notify=notify_tasks, audit_fn=audit,
+                                    get_current_policy=get_current_policy,
+                                    notify=notify_tasks,
+                                    audit_fn=audit,
                                 )
                             except HTTPException:
                                 continue  # takeover / e-stop / denied: skip this trigger action
                             task_id = created["task_id"]
-                            audit("trigger", dev_row["id"], f"trigger:{trig['name']}", {"metric": metric_key, "value": val, "task_id": task_id, "tool": act_target}, "executed", tenant=dev_row["tenant"])
+                            audit(
+                                "trigger", dev_row["id"], f"trigger:{trig['name']}", {"metric": metric_key, "value": val, "task_id": task_id, "tool": act_target}, "executed", tenant=dev_row["tenant"]
+                            )
                         elif act_type == "webhook":
                             wh_url = act_target if act_target.startswith("http") else get_webhook_url()
                             if wh_url:
@@ -1691,7 +1718,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                                     "value": val,
                                     "threshold": thresh,
                                     "timestamp": now_ts,
-                                    "content": f"🚨 Alert: Trigger '{trig['name']}' fired on {dev_row['name']}: {metric_key}={val} (threshold {op} {thresh})"
+                                    "content": f"🚨 Alert: Trigger '{trig['name']}' fired on {dev_row['name']}: {metric_key}={val} (threshold {op} {thresh})",
                                 }
                                 asyncio.run(send_webhook_notification_async(wh_url, evt, admin_token, get_public_base_url()))
                                 audit("trigger", dev_row["id"], f"trigger:{trig['name']}", {"metric": metric_key, "value": val, "webhook": bool(wh_url)}, "executed", tenant=dev_row["tenant"])
@@ -1725,9 +1752,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                     except Exception:
                         pass
                 now_ts = dbmod.now()
-                due_jobs = conn.execute(
-                    "SELECT * FROM schedules WHERE enabled=1 AND next_run_at <= ?", (now_ts,)
-                ).fetchall()
+                due_jobs = conn.execute("SELECT * FROM schedules WHERE enabled=1 AND next_run_at <= ?", (now_ts,)).fetchall()
                 for job in due_jobs:
                     interval = max(10, int(job["interval_seconds"]))
                     next_run = now_ts + interval
@@ -1758,7 +1783,20 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                                 conn.commit()
                                 threading.Thread(
                                     target=_run_workflow_worker,
-                                    args=(wf_id, target or None, job["tenant"], wf_steps, bool(args.get("stop_on_failure", True)), int(args.get("max_retries", 1)), f"scheduler:{job['name']}", False, None, 0, False, None),
+                                    args=(
+                                        wf_id,
+                                        target or None,
+                                        job["tenant"],
+                                        wf_steps,
+                                        bool(args.get("stop_on_failure", True)),
+                                        int(args.get("max_retries", 1)),
+                                        f"scheduler:{job['name']}",
+                                        False,
+                                        None,
+                                        0,
+                                        False,
+                                        None,
+                                    ),
                                     daemon=True,
                                 ).start()
                         else:
@@ -1773,7 +1811,6 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     # --- Phase 4: Visual Streaming, Dual Control & Fleet Auto-Updater ---
     app.state.latest_frames = {}
     app.state.webrtc_sessions = {}
-
 
     def _fetch_desktop_frame(device_id: str, scale: float, quality: int) -> dict:
         """Capture (or return a fresh cached) desktop frame. Caller must authorize."""
@@ -1812,17 +1849,18 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
                 return cached
             return {"available": False, "error": str(exc)}
 
-
     # --- WebRTC desktop streaming (signaling only; media is peer-to-peer) ---
     def _webrtc_sessions() -> dict:
         return app.state.__dict__.setdefault("webrtc_sessions", {})
 
     def _load_sess(session_id: str) -> dict | None:
         from . import v1_routes
+
         return v1_routes.load_webrtc_session_db(conn, app.state, session_id)
 
     def _save_sess(sess: dict) -> dict:
         from . import v1_routes
+
         return v1_routes.save_webrtc_session_db(conn, app.state, sess)
 
     def _get_webrtc_session(device_id: str, session_id: str) -> dict:
@@ -1861,12 +1899,10 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
             args["bitrate_kbps"] = int(bitrate_kbps)
         conn.execute(
             "INSERT INTO tasks (id, device_id, tenant, tool, args_json, tier, status, created_at, updated_at) VALUES (?,?,?,?,?,?,'queued',?,?)",
-            (task_id, device_id, dev_row["tenant"], tool,
-             json.dumps(args), t_val, now_ts, now_ts),
+            (task_id, device_id, dev_row["tenant"], tool, json.dumps(args), t_val, now_ts, now_ts),
         )
         conn.commit()
         notify_tasks()
-
 
     # --- Option C: Interactive Live Terminal Endpoints ---
 
@@ -1879,11 +1915,19 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         # other Tier-3 tool. human_initiated=True stamps the task so it may
         # still be claimed while human takeover is active (it IS the human).
         created = task_service_mod.create_task(
-            conn, actor="terminal-relay", role="admin", tenant=_row_tenant(dev_row),
-            device_id=target_dev_id, tool="terminal_exec", args=args,
-            human_initiated=True, device_row=dev_row,
+            conn,
+            actor="terminal-relay",
+            role="admin",
+            tenant=_row_tenant(dev_row),
+            device_id=target_dev_id,
+            tool="terminal_exec",
+            args=args,
+            human_initiated=True,
+            device_row=dev_row,
             get_effective_device_policy=get_effective_device_policy,
-            get_current_policy=get_current_policy, notify=notify_tasks, audit_fn=audit,
+            get_current_policy=get_current_policy,
+            notify=notify_tasks,
+            audit_fn=audit,
         )
         task_id = created["task_id"]
         deadline = time.time() + 40.0
@@ -1907,12 +1951,9 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
             return {"stdout": "", "stderr": "Terminal execution requires human approval; approve it in the dashboard and retry.", "returncode": 1}
         raise TimeoutError(f"Remote device '{dev_row['name']}' did not respond within 40s.")
 
-
     # --- Settings: Webhook notifications ----------------------------------
 
-
     # --- Auth: local users / sessions ------------------------------------
-
 
     # --- Stream tickets (D-08) ------------------------------------------------
     # Browsers cannot set headers on a WebSocket handshake, so the dashboard
@@ -1924,18 +1965,13 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
 
     # --- Auth: OIDC (dormant unless AI_BRIDGE_OIDC_* are set) ------------
 
-
     # --- Connector: Microsoft 365 (dormant unless AI_BRIDGE_M365_* are set) ---
-
 
     # --- Policy versioning -------------------------------------------------
 
-
     # --- Connections + logs (dashboard insight views) ---------------------
 
-
     # --- Agent polling (outbound only) -----------------------------------
-
 
     @app.middleware("http")
     async def bearer_auth_normalization(request: Request, call_next):
@@ -1955,9 +1991,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     async def rate_limit_middleware(request: Request, call_next):
         client_ip = request.client.host if request.client else "anon"
         path = request.url.path
-        if path in ("/api/auth/login", "/api/auth/oidc/login", "/api/auth/oidc/callback",
-                    "/api/auth/oidc/exchange",
-                    "/api/connectors/m365/callback", "/api/mcp/oauth/callback"):
+        if path in ("/api/auth/login", "/api/auth/oidc/login", "/api/auth/oidc/callback", "/api/auth/oidc/exchange", "/api/connectors/m365/callback", "/api/mcp/oauth/callback"):
             key = f"auth:{client_ip}"
             limit = 30
         else:
@@ -1989,8 +2023,9 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
             pass
         return response
 
-    from . import ai_api, v1_routes, mcp_routes
+    from . import ai_api, mcp_routes, v1_routes
     from .custom_agents import AgentRunner, install_custom_agent_routes
+
     ai_api.attach_ai_routes(
         app,
         conn,
@@ -2077,9 +2112,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         )
         conn.commit()
 
-
     backup_dir = Path(os.environ.get("AI_BRIDGE_BACKUP_DIR", "") or (Path.home() / ".ai-bridge" / "backups"))
-
 
     # BEGIN WAVE3B ROUTERS (Track A) -------------------------------------
     # Domain routers live in ai_bridge/control/routers/; each factory
@@ -2087,15 +2120,15 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     # returns an APIRouter. Mounted in original registration order so
     # route matching is unchanged (route snapshot in
     # tests/unit/test_architecture_phase4_routers.py).
-    from .routers import health as _health_router
-    from .routers import devices as _devices_router
-    from .routers import tasks as _tasks_router
-    from .routers import audit as _audit_router
     from .routers import admin as _admin_router
-    from .routers import workflows as _workflows_router
-    from .routers import webrtc as _webrtc_router
-    from .routers import auth as _auth_router
     from .routers import agent as _agent_router
+    from .routers import audit as _audit_router
+    from .routers import auth as _auth_router
+    from .routers import devices as _devices_router
+    from .routers import health as _health_router
+    from .routers import tasks as _tasks_router
+    from .routers import webrtc as _webrtc_router
+    from .routers import workflows as _workflows_router
     from .routers._context import ControlContext
 
     _router_ctx = ControlContext(
@@ -2157,8 +2190,8 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     if not dist_dir.exists():
         dist_dir = Path(__file__).resolve().parent.parent.parent.parent / "apps" / "dashboard" / "dist"
     if dist_dir.exists():
-        from fastapi.staticfiles import StaticFiles
         from fastapi.responses import FileResponse
+        from fastapi.staticfiles import StaticFiles
 
         assets_dir = dist_dir / "assets"
         if assets_dir.exists():

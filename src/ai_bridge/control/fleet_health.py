@@ -1,7 +1,6 @@
 """Fleet device health summary (Phase 7): heartbeats, telemetry, stream health."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from .. import webrtc_stream

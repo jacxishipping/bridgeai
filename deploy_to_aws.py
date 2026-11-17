@@ -40,7 +40,7 @@ APP_DIR = os.environ.get("AI_BRIDGE_APP_DIR", "/opt/ai-bridge")
 AWS_REGION = os.environ.get("AI_BRIDGE_AWS_REGION", "us-east-2")
 DOMAIN = os.environ.get("AI_BRIDGE_DOMAIN", "")
 BOOTSTRAP = os.environ.get("AI_BRIDGE_BOOTSTRAP", "")
-COMPOSE = f"sudo docker compose --env-file .env.production -f docker-compose.prod.yml"
+COMPOSE = "sudo docker compose --env-file .env.production -f docker-compose.prod.yml"
 
 
 def run_remote(step: str, cmd: str) -> None:

@@ -1,6 +1,3 @@
-import json
-import time
-import pytest
 from fastapi.testclient import TestClient
 
 from ai_bridge import tools
@@ -62,7 +59,7 @@ def test_fleet_broadcast_command_execution(tmp_path):
 
     # Register 2 devices (1 Linux, 1 Windows)
     dev1 = client.post("/api/devices/enroll", json={"name": "web-01", "os": "Linux Debian 12"}, headers={"X-Admin-Token": admin_token}).json()
-    dev2 = client.post("/api/devices/enroll", json={"name": "win-01", "os": "Windows Server 2022"}, headers={"X-Admin-Token": admin_token}).json()
+    client.post("/api/devices/enroll", json={"name": "win-01", "os": "Windows Server 2022"}, headers={"X-Admin-Token": admin_token}).json()
 
     # Broadcast to all devices
     bcast_res = client.post(
@@ -119,7 +116,6 @@ def test_event_driven_trigger_and_self_healing(tmp_path):
     }
     c_res = client.post("/api/triggers", json=trig_payload, headers={"X-Admin-Token": admin_token})
     assert c_res.status_code == 200
-    trig_id = c_res.json()["trigger_id"]
 
     # Heartbeat below threshold (75%) -> trigger should NOT fire
     client.post("/api/agent/heartbeat", json={"metrics": {"memory_percent": 75.0}}, headers={"X-Device-Token": dev_tok})

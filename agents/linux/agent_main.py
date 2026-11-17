@@ -18,6 +18,7 @@ Usage:
   # Or use the all-in-one runner:
   deployment/linux/run-agent.sh [command] [options]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,10 +26,8 @@ import datetime
 import json
 import os
 import platform
-import re
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -41,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.poller import Poller  # noqa: E402
+
 from ai_bridge.policy import Policy  # noqa: E402
 
 # Configuration Paths
@@ -608,11 +608,7 @@ def run_doctor(control_url: str, token: str) -> bool:
                 eff = pdata.get("effective_policy") or {}
                 is_unrest = eff.get("unrestricted") is True or eff.get("max_tier_unattended", 1) >= 4
                 pol_ok = is_unrest
-                pol_details = (
-                    "⚡ Active Mode: UNRESTRICTED SERVER (Tier 4 / Full Autonomy - No Policy Blocks)"
-                    if is_unrest
-                    else f"Restricted Mode (Ceiling: Tier {eff.get('max_tier_unattended', 2)})"
-                )
+                pol_details = "⚡ Active Mode: UNRESTRICTED SERVER (Tier 4 / Full Autonomy - No Policy Blocks)" if is_unrest else f"Restricted Mode (Ceiling: Tier {eff.get('max_tier_unattended', 2)})"
         except Exception as exc:
             pol_details = f"Policy lookup failed: {exc}"
     check_item("Execution Policy Guardrails", pol_ok, pol_details, warn=not pol_ok)
@@ -627,8 +623,7 @@ def run_doctor(control_url: str, token: str) -> bool:
     check_item(
         "System Resource Headroom",
         telem["disk_free_gb"] > 1.0 and telem["memory_free_gb"] > 0.2,
-        f"RAM Free: {telem['memory_free_gb']} GB ({telem['memory_percent']}% used) | "
-        f"Disk Free: {telem['disk_free_gb']} GB ({telem['disk_percent']}% used) | Load: {telem['load_avg']}",
+        f"RAM Free: {telem['memory_free_gb']} GB ({telem['memory_percent']}% used) | Disk Free: {telem['disk_free_gb']} GB ({telem['disk_percent']}% used) | Load: {telem['load_avg']}",
     )
 
     print()
@@ -657,7 +652,9 @@ def show_status(control_url: str, token: str) -> None:
     print(f"  {CLR_BOLD}Host Platform:{CLR_RESET}        {telem['hostname']} ({telem['os']})")
     print(f"  {CLR_BOLD}Kernel & Arch:{CLR_RESET}        {telem['kernel']} ({telem['arch']})")
     print(f"  {CLR_BOLD}System Uptime:{CLR_RESET}        {telem['uptime_hours']} hours | Load: {telem['load_avg']}")
-    print(f"  {CLR_BOLD}CPU & Memory:{CLR_RESET}         {telem['cpu_count']} Cores ({telem['cpu_percent']}%) | RAM: {telem['memory_used_gb']}/{telem['memory_total_gb']} GB ({telem['memory_percent']}%)")
+    print(
+        f"  {CLR_BOLD}CPU & Memory:{CLR_RESET}         {telem['cpu_count']} Cores ({telem['cpu_percent']}%) | RAM: {telem['memory_used_gb']}/{telem['memory_total_gb']} GB ({telem['memory_percent']}%)"
+    )
     print(f"  {CLR_BOLD}Storage Space:{CLR_RESET}        {telem['disk_free_gb']} GB Free / {telem['disk_total_gb']} GB Total ({telem['disk_percent']}%)")
     print()
 
@@ -755,7 +752,7 @@ LimitNOFILE=65536
 TasksMax=infinity
 
 [Install]
-WantedBy={'multi-user.target' if is_root else 'default.target'}
+WantedBy={"multi-user.target" if is_root else "default.target"}
 """
         unit_path.write_text(content, encoding="utf-8")
         subprocess.run(systemctl_cmd + ["daemon-reload"], check=True)
@@ -1042,6 +1039,7 @@ def main() -> None:
         if not (args.manifest_url and args.signature_url and args.public_key):
             parser.error("--check-update requires --manifest-url, --signature-url and --public-key.")
         from ai_bridge.updates import verify_manifest
+
         with urllib.request.urlopen(args.manifest_url, timeout=15) as r:
             manifest = json.loads(r.read())
         with urllib.request.urlopen(args.signature_url, timeout=15) as r:

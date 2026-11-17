@@ -5,15 +5,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import os
+from pathlib import Path
 
 from ..policy import Policy
-from ..security import is_secret_name
-from ..security import redact
-from ..security import workspace_root
-
+from ..security import is_secret_name, redact, workspace_root
 from ._common import _check
+
+
 def _host_file_access_allowed(is_admin: bool, policy: Policy | None) -> bool:
     if is_admin or (policy and policy.unrestricted):
         return True
@@ -40,7 +39,6 @@ def _confine_file_path(path: str, *, is_admin: bool = False, policy: Policy | No
 
 def read_file(path: str, max_chars: int = 100000, *, is_admin: bool = False, policy: Policy | None = None) -> str:
     """Read a UTF-8 text file, confined to the workspace unless host access is enabled."""
-    from pathlib import Path
 
     _check("read_file", policy=policy)
     target = _confine_file_path(path, is_admin=is_admin, policy=policy)
@@ -58,7 +56,6 @@ def read_file(path: str, max_chars: int = 100000, *, is_admin: bool = False, pol
 
 def write_file(path: str, content: str, overwrite: bool = False, *, approval_granted: bool = False, is_admin: bool = False, policy: Policy | None = None) -> dict:
     """Write content to an absolute path."""
-    from pathlib import Path
 
     _check("write_file", approval_granted=approval_granted, is_admin=is_admin, policy=policy)
     target = _confine_file_path(path, is_admin=is_admin, policy=policy)

@@ -5,33 +5,35 @@
 
 from __future__ import annotations
 
-from typing import Any
 import os
 import sys
 import time
 import uuid
+from typing import Any
 
 from ..config import get_settings
 from ..policy import Policy
-
 from ._common import _check, _require_no_human_takeover, default_policy, desktop_is_action_vetoed
-
-from .desktop import _encode_image_base64
-from .desktop import capture_desktop_screenshot
-from .desktop import get_clipboard
-from .desktop import get_desktop_status
-from .desktop import keyboard_press
-from .desktop import keyboard_type
-from .desktop import launch_approved_application
-from .desktop import list_desktop_windows
-from .desktop import mouse_click
-from .desktop import mouse_move
-from .desktop import mouse_scroll
-from .desktop import press_hotkey
+from .desktop import (
+    _encode_image_base64,
+    capture_desktop_screenshot,
+    get_clipboard,
+    get_desktop_status,
+    keyboard_press,
+    keyboard_type,
+    launch_approved_application,
+    list_desktop_windows,
+    mouse_click,
+    mouse_move,
+    mouse_scroll,
+    press_hotkey,
+    set_clipboard,
+    verify_screen_contains,
+    wait_for_text,
+)
 from .shell import run_shell
-from .desktop import set_clipboard
-from .desktop import verify_screen_contains
-from .desktop import wait_for_text
+
+
 def desktop_get_screenshot(*, approval_granted: bool = False, policy: Policy | None = None) -> dict:
     """Return a current desktop screenshot."""
     eff_policy = policy or default_policy()
@@ -405,7 +407,7 @@ def _som_element_from_rect(
     hwnd: int = 0,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from ..import screen_capture
+    from .. import screen_capture
 
     norm = screen_capture.normalize_bounds_for_monitor(left, top, width, height, mons)
     row: dict[str, Any] = {
@@ -540,7 +542,7 @@ def desktop_get_ui_elements(
     eff_policy = policy or default_policy()
     _check("desktop_get_windows", approval_granted=approval_granted, policy=eff_policy)
 
-    from ..import screen_capture
+    from .. import screen_capture
 
     mons = screen_capture.get_monitors()
     vdesk = screen_capture.get_virtual_desktop_bounds(mons)

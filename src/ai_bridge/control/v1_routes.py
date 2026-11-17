@@ -10,9 +10,9 @@ Autonomous Agent Architecture v1.0:
 - Task Orchestrator: /api/v1/tasks, /api/v1/tasks/{task_id}
 - Audit Service: /api/v1/audit
 """
+
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import os
@@ -33,6 +33,7 @@ except ImportError:
 
     def Field(default: Any = None, **_kwargs: Any) -> Any:  # type: ignore[no-redef]
         return default
+
 
 from .. import webrtc_stream
 from ..policy import TOOL_TIERS, normalize_tool_name
@@ -129,9 +130,7 @@ def derive_session_permissions(mode: str, effective_policy: dict[str, Any]) -> d
     # Clipboard is an explicit session permission — not implied by desktop_enabled alone.
     # Opt in with policy allow_clipboard / unrestricted, or AI_BRIDGE_ALLOW_CLIPBOARD=1.
     clipboard_ok = bool(
-        effective_policy.get("allow_clipboard", False)
-        or effective_policy.get("unrestricted", False)
-        or os.environ.get("AI_BRIDGE_ALLOW_CLIPBOARD", "").strip().lower() in ("1", "true", "yes")
+        effective_policy.get("allow_clipboard", False) or effective_policy.get("unrestricted", False) or os.environ.get("AI_BRIDGE_ALLOW_CLIPBOARD", "").strip().lower() in ("1", "true", "yes")
     )
 
     if norm_mode == "view_only":
@@ -215,7 +214,8 @@ def format_session_v1(sess: dict[str, Any]) -> dict[str, Any]:
         "user_id": str(sess.get("user_id") or "admin"),
         "mode": str(sess.get("mode") or "ai_assisted"),
         "video": video,
-        "permissions": sess.get("permissions") or {
+        "permissions": sess.get("permissions")
+        or {
             "view_screen": True,
             "control_mouse": True,
             "control_keyboard": True,
@@ -400,6 +400,7 @@ def attach_v1_routes(
         require_role("viewer", x_admin_token, x_session_token, authorization)
         if device_id == "local":
             from ..screen_capture import get_monitors
+
             mons = get_monitors()
             return {"device_id": "local", "monitors": mons, "count": len(mons)}
         row = conn.execute("SELECT id FROM devices WHERE id=? AND revoked=0", (device_id,)).fetchone()
@@ -431,6 +432,7 @@ def attach_v1_routes(
         require_role("viewer", x_admin_token, x_session_token, authorization)
         _ensure_v1_device_exists(device_id)
         from .. import tools
+
         return tools.desktop_get_ui_elements(include_controls=include_controls, max_elements=max_elements)
 
     @app.get("/api/v1/devices/{device_id}/files")
@@ -443,6 +445,7 @@ def attach_v1_routes(
         require_role("viewer", x_admin_token, x_session_token, authorization)
         _ensure_v1_device_exists(device_id)
         from .. import tools
+
         files = tools.desktop_list_transfers()
         return {"device_id": device_id, "files": files, "count": len(files)}
 
@@ -464,6 +467,7 @@ def attach_v1_routes(
         target_dir = str(body.get("target_dir") or "")
 
         from .. import tools
+
         tid = f"rest_{uuid.uuid4().hex[:8]}"
         try:
             raw_data = base64.b64decode(content_b64)
@@ -494,6 +498,7 @@ def attach_v1_routes(
         require_role("viewer", x_admin_token, x_session_token, authorization)
         _ensure_v1_device_exists(device_id)
         from .. import tools
+
         meta = tools.desktop_prepare_file_download(path)
         if not meta.get("ok"):
             raise HTTPException(status_code=404, detail=meta.get("error", "File not found"))
@@ -506,7 +511,6 @@ def attach_v1_routes(
             "sha256": meta["sha256"],
             "content_b64": b64,
         }
-
 
     # ------------------------------------------------------------------
     # 2. Agent Gateway (/api/v1/agents/{device_id}/heartbeat)
@@ -597,17 +601,16 @@ def attach_v1_routes(
         fps = max(1, min(60, int(body.fps)))
         bitrate_kbps = max(250, min(50000, int(body.bitrate_kbps)))
 
-        from . import desktop_capabilities as desktop_capabilitiesmod
         import platform as _platform
+
+        from . import desktop_capabilities as desktop_capabilitiesmod
 
         # Reject non-Windows hosts before creating a session or queueing start_webrtc_stream.
         dev_row = None
         if body.device_id == "local":
             device_os = _platform.system()
         else:
-            dev_row = conn.execute(
-                "SELECT * FROM devices WHERE id=? AND revoked=0", (body.device_id,)
-            ).fetchone()
+            dev_row = conn.execute("SELECT * FROM devices WHERE id=? AND revoked=0", (body.device_id,)).fetchone()
             if dev_row is None:
                 raise HTTPException(status_code=404, detail="Device not found.")
             try:
@@ -637,7 +640,7 @@ def attach_v1_routes(
             eff_policy = {**eff_policy, "desktop_enabled": True}
         permissions = derive_session_permissions(mode, eff_policy)
 
-        takeover = (mode == "human_control")
+        takeover = mode == "human_control"
         set_device_human_takeover(body.device_id, takeover, actor=actor, conn=conn)
 
         session_id = f"session_{uuid.uuid4().hex[:10]}"
@@ -883,7 +886,9 @@ def attach_v1_routes(
             row = device_row(x_device_token)
             from . import device_mtls as _dmtls
 
-            _dmtls.require_device_mtls(conn, row["id"], _dmtls.extract_request_fingerprint(request, x_client_cert_fingerprint=x_client_cert_fingerprint, x_ssl_client_fingerprint=x_ssl_client_fingerprint))
+            _dmtls.require_device_mtls(
+                conn, row["id"], _dmtls.extract_request_fingerprint(request, x_client_cert_fingerprint=x_client_cert_fingerprint, x_ssl_client_fingerprint=x_ssl_client_fingerprint)
+            )
         else:
             require_role("viewer", x_admin_token, x_session_token, authorization)
         sess = load_webrtc_session_db(conn, app.state, session_id)
@@ -930,7 +935,9 @@ def attach_v1_routes(
             row = device_row(x_device_token)
             from . import device_mtls as _dmtls
 
-            _dmtls.require_device_mtls(conn, row["id"], _dmtls.extract_request_fingerprint(request, x_client_cert_fingerprint=x_client_cert_fingerprint, x_ssl_client_fingerprint=x_ssl_client_fingerprint))
+            _dmtls.require_device_mtls(
+                conn, row["id"], _dmtls.extract_request_fingerprint(request, x_client_cert_fingerprint=x_client_cert_fingerprint, x_ssl_client_fingerprint=x_ssl_client_fingerprint)
+            )
         else:
             require_role("viewer", x_admin_token, x_session_token, authorization)
         sess = load_webrtc_session_db(conn, app.state, session_id)
@@ -955,6 +962,7 @@ def attach_v1_routes(
     ):
         require_role("viewer", x_admin_token, x_session_token, authorization)
         from .. import tools
+
         return tools.desktop_get_session_recording(session_id)
 
     @app.post("/api/v1/sessions/{session_id}/recording/seal")
@@ -966,6 +974,7 @@ def attach_v1_routes(
     ):
         actor, _role = auth_context(x_admin_token, x_session_token, authorization)
         from .. import tools
+
         res = tools.desktop_seal_session_recording(session_id)
         if res.get("ok"):
             audit(
@@ -1008,7 +1017,8 @@ def attach_v1_routes(
                 if _sess is None:
                     raise HTTPException(status_code=4401, detail="Session not found.")
                 _redeemed = _dbmod.redeem_stream_ticket(
-                    conn, ticket,
+                    conn,
+                    ticket,
                     device_id=str(_sess.get("device_id") or "local"),
                     session_id=session_id,
                 )
@@ -1018,7 +1028,13 @@ def attach_v1_routes(
                 _dev_row = device_row(dev_tok)
                 from . import device_mtls as _dmtls
 
-                _dmtls.require_device_mtls(conn, _dev_row["id"], _dmtls.extract_request_fingerprint(None, x_client_cert_fingerprint=websocket.headers.get("x-client-cert-fingerprint"), x_ssl_client_fingerprint=websocket.headers.get("x-ssl-client-fingerprint")))
+                _dmtls.require_device_mtls(
+                    conn,
+                    _dev_row["id"],
+                    _dmtls.extract_request_fingerprint(
+                        None, x_client_cert_fingerprint=websocket.headers.get("x-client-cert-fingerprint"), x_ssl_client_fingerprint=websocket.headers.get("x-ssl-client-fingerprint")
+                    ),
+                )
             else:
                 require_role("viewer", adm_tok, sess_tok, auth_hdr)
         except HTTPException:
@@ -1057,12 +1073,14 @@ def attach_v1_routes(
                     save_webrtc_session_db(conn, app.state, sess)
                     await _broadcast_ws(session_id, {"type": "ice", "from": side, "candidate": msg["candidate"]})
                 elif mtype == "ping":
-                    await websocket.send_json({
-                        "type": "pong",
-                        "client_ts_ms": msg.get("client_ts_ms"),
-                        "server_ts_ms": round(time.time() * 1000, 2),
-                        "session": format_session_v1(sess),
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "pong",
+                            "client_ts_ms": msg.get("client_ts_ms"),
+                            "server_ts_ms": round(time.time() * 1000, 2),
+                            "session": format_session_v1(sess),
+                        }
+                    )
         except WebSocketDisconnect:
             pass
         except Exception:
@@ -1118,11 +1136,18 @@ def attach_v1_routes(
         # A Tier-3/4 tool without an approval now returns needs_approval
         # instead of silently queueing for execution.
         created = task_service_mod.create_task(
-            conn, actor=actor, role="operator", tenant=tenant,
-            device_id=device_id, tool=tool_name, args=args,
+            conn,
+            actor=actor,
+            role="operator",
+            tenant=tenant,
+            device_id=device_id,
+            tool=tool_name,
+            args=args,
             human_initiated=bool(body.get("human_initiated", False)),
             get_effective_device_policy=get_effective_device_policy,
-            get_current_policy=get_current_policy, notify=notify_tasks, audit_fn=audit,
+            get_current_policy=get_current_policy,
+            notify=notify_tasks,
+            audit_fn=audit,
         )
         return {"task_id": created["task_id"], "device_id": device_id, "tool": tool_name, "status": created["status"], "tier": created["tier"], "approval_id": created["approval_id"]}
 

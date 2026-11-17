@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
-import signal
 import stat
 import subprocess
 import sys
@@ -36,7 +34,6 @@ from ai_bridge.policy_simulation import (
     simulate_batch,
     simulate_policy_decision,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

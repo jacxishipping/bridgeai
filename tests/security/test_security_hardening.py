@@ -1,4 +1,5 @@
 import sys
+
 import pytest
 
 from ai_bridge import diagnostics, execution, tools

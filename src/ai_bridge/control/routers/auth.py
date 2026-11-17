@@ -11,12 +11,12 @@ import os
 import secrets
 import uuid
 
-from fastapi import APIRouter, Body, HTTPException, Header
+from fastapi import APIRouter, Body, Header, HTTPException
 
-from .. import auth as authmod, db as dbmod
-from ..app import LoginIn, StreamTicketIn, UserIn, _DUMMY_HASH, _DUMMY_SALT
+from .. import auth as authmod
+from .. import db as dbmod
+from ..app import _DUMMY_HASH, _DUMMY_SALT, LoginIn, StreamTicketIn, UserIn
 from ..csrf import generate_csrf_token
-
 from ._context import ControlContext
 
 

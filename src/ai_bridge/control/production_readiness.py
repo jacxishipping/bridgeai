@@ -1,4 +1,5 @@
 """Production profile checklist for deploy gates and /health/ready."""
+
 from __future__ import annotations
 
 import json
@@ -86,7 +87,8 @@ def assess_production_readiness(conn: Any) -> dict[str, Any]:
             {
                 "code": "admin_access_unset",
                 "severity": "critical",
-                "message": "No admin access is configured in production: create an admin user, or set AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN=1 with AI_BRIDGE_ADMIN_TOKEN (legacy token; the token alone also feeds the quick-approval HMAC).",
+                "message": "No admin access is configured in production: "
+                "create an admin user, or set AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN=1 with AI_BRIDGE_ADMIN_TOKEN (legacy token; the token alone also feeds the quick-approval HMAC).",
             }
         )
 
@@ -108,10 +110,7 @@ def assess_production_readiness(conn: Any) -> dict[str, Any]:
             {
                 "code": "public_base_url_http",
                 "severity": "critical",
-                "message": (
-                    "Public base URL must use https:// in production "
-                    "(AI_BRIDGE_PUBLIC_BASE_URL or alias AI_BRIDGE_PUBLIC_URL)."
-                ),
+                "message": ("Public base URL must use https:// in production (AI_BRIDGE_PUBLIC_BASE_URL or alias AI_BRIDGE_PUBLIC_URL)."),
             }
         )
     elif prod and not public_base:
@@ -119,10 +118,7 @@ def assess_production_readiness(conn: Any) -> dict[str, Any]:
             {
                 "code": "tls_termination_documented",
                 "severity": "warning",
-                "message": (
-                    "Set AI_BRIDGE_PUBLIC_BASE_URL (or AI_BRIDGE_PUBLIC_URL) to your "
-                    "https:// public origin; TLS terminates at the reverse proxy."
-                ),
+                "message": ("Set AI_BRIDGE_PUBLIC_BASE_URL (or AI_BRIDGE_PUBLIC_URL) to your https:// public origin; TLS terminates at the reverse proxy."),
             }
         )
 
@@ -142,10 +138,7 @@ def assess_production_readiness(conn: Any) -> dict[str, Any]:
             {
                 "code": "browser_sandbox_disabled",
                 "severity": "critical",
-                "message": (
-                    "Chromium sandbox is disabled (AI_BRIDGE_ALLOW_BROWSER_NO_SANDBOX). "
-                    "Unset it, or set AI_BRIDGE_ALLOW_UNSAFE_BROWSER=1 to acknowledge risk."
-                ),
+                "message": ("Chromium sandbox is disabled (AI_BRIDGE_ALLOW_BROWSER_NO_SANDBOX). Unset it, or set AI_BRIDGE_ALLOW_UNSAFE_BROWSER=1 to acknowledge risk."),
             }
         )
 
@@ -191,10 +184,7 @@ def assess_production_readiness(conn: Any) -> dict[str, Any]:
             {
                 "code": "redis_required_for_multi_host",
                 "severity": "critical",
-                "message": (
-                    "AI_BRIDGE_REQUIRE_REDIS / AI_BRIDGE_MULTI_HOST requires Redis "
-                    "(REDIS_URL or AI_BRIDGE_REDIS_URL) for shared WebRTC/HTTP throttles."
-                ),
+                "message": ("AI_BRIDGE_REQUIRE_REDIS / AI_BRIDGE_MULTI_HOST requires Redis (REDIS_URL or AI_BRIDGE_REDIS_URL) for shared WebRTC/HTTP throttles."),
             }
         )
     elif prod and backend_l in ("memory", "mem", "inmemory", "local"):
@@ -206,8 +196,9 @@ def assess_production_readiness(conn: Any) -> dict[str, Any]:
             }
         )
 
-    from . import secrets_backend, worm_siem, device_mtls
     from ai_bridge import browser_isolation_os
+
+    from . import device_mtls, secrets_backend, worm_siem
 
     secrets_info = secrets_backend.describe_secrets_backend()
     worm_info = worm_siem.describe_worm_siem()

@@ -8,9 +8,9 @@ import uuid
 from contextvars import ContextVar
 from typing import Any
 
+from ..policy import TOOL_TIERS
 from . import db as dbmod
 from .role_catalog import ROLES
-from ..policy import TOOL_TIERS
 
 # Control-plane connection for dispatch-side supervisor tools (handoff / recover).
 _PLANE_CONN: ContextVar[Any | None] = ContextVar("ai_bridge_plane_conn", default=None)

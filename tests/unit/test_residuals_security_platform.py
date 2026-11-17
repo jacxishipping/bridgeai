@@ -1,13 +1,14 @@
 """Residuals: vault/env secrets, mTLS, WORM SIEM, netns helpers, F13 honesty."""
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from ai_bridge import browser_isolation_os, native_encode
-from ai_bridge.control import device_mtls, production_readiness, secrets_backend, worm_siem
+from ai_bridge.control import production_readiness, secrets_backend, worm_siem
 from ai_bridge.control.app import create_app
 
 
@@ -70,8 +71,14 @@ def test_browser_netns_wrapper_argv(monkeypatch):
     monkeypatch.setenv("AI_BRIDGE_BROWSER_NETNS", "1")
     info = browser_isolation_os.describe_os_browser_isolation()
     assert "mode" in info
-    wrapped = browser_isolation_os.chromium_launch_wrapper_argv(["chromium", "--headless"])
-    assert wrapped[-1] == "--headless" or wrapped == ["chromium", "--headless"]
+    if sys.platform.startswith("linux"):
+        wrapped = browser_isolation_os.chromium_launch_wrapper_argv(["chromium", "--headless"])
+        assert wrapped[-1] == "--headless" or wrapped == ["chromium", "--headless"]
+    else:
+        # Fail-closed (F-04-14): netns is Linux-only. On macOS/Windows the
+        # request must raise instead of silently running Chromium unwrapped.
+        with pytest.raises(browser_isolation_os.BrowserIsolationError):
+            browser_isolation_os.chromium_launch_wrapper_argv(["chromium", "--headless"])
 
 
 def test_native_encode_libwebrtc_honesty():

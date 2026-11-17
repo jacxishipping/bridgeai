@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from ai_bridge import policy, screen_capture, tools, webrtc_stream

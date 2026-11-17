@@ -8,7 +8,6 @@ from typing import Any
 from . import db as dbmod
 from .plane_state import is_emergency_stop
 
-
 DEFAULT_RUNNING_LEASE_SEC = int(os.environ.get("AI_BRIDGE_TASK_RUNNING_LEASE_SEC", "900"))
 DEFAULT_SWEEP_INTERVAL_SEC = int(os.environ.get("AI_BRIDGE_TASK_SWEEP_INTERVAL_SEC", "30"))
 

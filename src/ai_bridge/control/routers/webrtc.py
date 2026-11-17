@@ -5,19 +5,19 @@ over the shared state via the ControlContext passed to the factory
 (see routers/_context.py). Paths, methods and response shapes are
 unchanged (see tests/unit/test_architecture_phase4_routers.py).
 """
+
 from __future__ import annotations
 
 import json
 import time
 import uuid
 
-from fastapi import APIRouter, Body, HTTPException, Header
+from fastapi import APIRouter, Body, Header, HTTPException
 from fastapi.responses import Response, StreamingResponse
 
-from .. import plane_state
 from ... import terminal_manager
+from .. import plane_state
 from ..app import DesktopInputIn
-
 from ._context import ControlContext
 
 
@@ -66,6 +66,7 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
     ):
         """Return the latest live desktop frame directly as an image/jpeg binary response."""
         import base64
+
         admin_tok = x_admin_token or token
         sess_tok = x_session_token or session_token
         require_role("viewer", admin_tok, sess_tok, authorization)
@@ -95,16 +96,18 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
             dev_id = r["id"]
             frame = app.state.latest_frames.get(dev_id)
             is_recent = bool(frame and (now_ts - frame.get("timestamp", 0)) < 25.0)
-            result.append({
-                "device_id": dev_id,
-                "name": r["name"],
-                "hostname": r["hostname"],
-                "os": r["os"],
-                "status": r["status"],
-                "last_seen": r["last_seen"],
-                "frame": frame if is_recent else None,
-                "frame_age_s": round(now_ts - frame.get("timestamp", 0), 1) if (frame and "timestamp" in frame) else None,
-            })
+            result.append(
+                {
+                    "device_id": dev_id,
+                    "name": r["name"],
+                    "hostname": r["hostname"],
+                    "os": r["os"],
+                    "status": r["status"],
+                    "last_seen": r["last_seen"],
+                    "frame": frame if is_recent else None,
+                    "frame_age_s": round(now_ts - frame.get("timestamp", 0), 1) if (frame and "timestamp" in frame) else None,
+                }
+            )
         return {"devices": result, "count": len(result), "timestamp": now_ts}
 
     @router.post("/api/devices/{device_id}/desktop/input")
@@ -188,10 +191,12 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
         _require_device_tenant(device_id, x_admin_token, x_session_token)
         if device_id == "local":
             from ai_bridge.screen_capture import get_monitors
+
             return {"monitors": get_monitors()}
         dev_row = conn.execute("SELECT * FROM devices WHERE id=? AND revoked=0", (device_id,)).fetchone()
         if dev_row is None:
             from ai_bridge.screen_capture import get_monitors
+
             return {"monitors": get_monitors()}
         caps = json.loads(dev_row["capabilities_json"] or "{}")
         if not isinstance(caps, dict):
@@ -227,15 +232,14 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
             raise HTTPException(status_code=503, detail="Emergency stop active.")
         actor = require_role("viewer", x_admin_token, x_session_token)
         _require_device_tenant(device_id, x_admin_token, x_session_token)
-        from .. import desktop_capabilities as desktop_capabilitiesmod
         import platform as _platform
+
+        from .. import desktop_capabilities as desktop_capabilitiesmod
 
         if device_id == "local":
             device_os = _platform.system()
         else:
-            gate_row = conn.execute(
-                "SELECT os FROM devices WHERE id=? AND revoked=0", (device_id,)
-            ).fetchone()
+            gate_row = conn.execute("SELECT os FROM devices WHERE id=? AND revoked=0", (device_id,)).fetchone()
             if gate_row is None:
                 raise HTTPException(status_code=404, detail="Device not found.")
             try:
@@ -268,12 +272,23 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
                 monitor_index = None
         session_id = uuid.uuid4().hex[:12]
         sess = {
-            "id": session_id, "session_id": session_id, "device_id": device_id,
-            "user_id": actor, "mode": mode, "status": "waiting",
+            "id": session_id,
+            "session_id": session_id,
+            "device_id": device_id,
+            "user_id": actor,
+            "mode": mode,
+            "status": "waiting",
             "video": {"codec": "H264", "width": int(1920 * scale) & ~1, "height": int(1080 * scale) & ~1, "fps": fps},
             "permissions": {"view_screen": True, "control_mouse": mode != "view_only", "control_keyboard": mode != "view_only", "execute_commands": False},
-            "offer": None, "answer": None, "agent_candidates": [], "viewer_candidates": [],
-            "created_at": time.time(), "scale": scale, "fps": fps, "monitor_index": monitor_index, "error": None,
+            "offer": None,
+            "answer": None,
+            "agent_candidates": [],
+            "viewer_candidates": [],
+            "created_at": time.time(),
+            "scale": scale,
+            "fps": fps,
+            "monitor_index": monitor_index,
+            "error": None,
         }
         _save_sess(sess)
         audit(actor, device_id, "start_webrtc_stream", {"session_id": session_id, "monitor_index": monitor_index}, "allowed")
@@ -309,7 +324,8 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
 
     @router.get("/api/devices/{device_id}/desktop/webrtc/{session_id}")
     def get_webrtc_session(
-        device_id: str, session_id: str,
+        device_id: str,
+        session_id: str,
         x_admin_token: str | None = Header(default=None),
         x_session_token: str | None = Header(default=None),
     ):
@@ -317,14 +333,37 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
         _require_device_tenant(device_id, x_admin_token, x_session_token)
         sess = _get_webrtc_session(device_id, session_id)
         from ai_bridge import webrtc_stream
-        out = {k: sess.get(k) for k in ("id", "session_id", "device_id", "user_id", "mode", "video", "permissions", "status", "offer", "answer", "agent_candidates", "viewer_candidates", "error", "scale", "fps", "monitor_index")}
+
+        out = {
+            k: sess.get(k)
+            for k in (
+                "id",
+                "session_id",
+                "device_id",
+                "user_id",
+                "mode",
+                "video",
+                "permissions",
+                "status",
+                "offer",
+                "answer",
+                "agent_candidates",
+                "viewer_candidates",
+                "error",
+                "scale",
+                "fps",
+                "monitor_index",
+            )
+        }
         out["telemetry"] = webrtc_stream.get_session_telemetry(session_id)
         out["ice_servers"] = webrtc_stream.get_configured_ice_servers()
         return out
 
     @router.post("/api/devices/{device_id}/desktop/webrtc/{session_id}/answer")
     def post_webrtc_answer(
-        device_id: str, session_id: str, body: dict = Body(default={}),
+        device_id: str,
+        session_id: str,
+        body: dict = Body(default={}),
         x_admin_token: str | None = Header(default=None),
         x_session_token: str | None = Header(default=None),
     ):
@@ -338,7 +377,9 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
 
     @router.post("/api/devices/{device_id}/desktop/webrtc/{session_id}/candidates")
     def post_webrtc_viewer_candidate(
-        device_id: str, session_id: str, body: dict = Body(default={}),
+        device_id: str,
+        session_id: str,
+        body: dict = Body(default={}),
         x_admin_token: str | None = Header(default=None),
         x_session_token: str | None = Header(default=None),
     ):
@@ -352,7 +393,8 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
 
     @router.delete("/api/devices/{device_id}/desktop/webrtc/{session_id}")
     def end_webrtc_session(
-        device_id: str, session_id: str,
+        device_id: str,
+        session_id: str,
         x_admin_token: str | None = Header(default=None),
         x_session_token: str | None = Header(default=None),
     ):
@@ -376,7 +418,9 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
         return {"ok": True, "status": "ended"}
 
     @router.get("/api/agent/webrtc/{session_id}")
-    def agent_get_webrtc_session(session_id: str, x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def agent_get_webrtc_session(
+        session_id: str, x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)
+    ):
         row = device_row(x_device_token)
         _require_agent_mtls(None, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         sess = _load_sess(session_id)
@@ -393,7 +437,13 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
         return out
 
     @router.post("/api/agent/webrtc/{session_id}/offer")
-    def agent_post_webrtc_offer(session_id: str, body: dict = Body(default={}), x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def agent_post_webrtc_offer(
+        session_id: str,
+        body: dict = Body(default={}),
+        x_device_token: str | None = Header(default=None),
+        x_client_cert_fingerprint: str | None = Header(default=None),
+        x_ssl_client_fingerprint: str | None = Header(default=None),
+    ):
         row = device_row(x_device_token)
         _require_agent_mtls(None, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         sess = _load_sess(session_id)
@@ -405,7 +455,13 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
         return {"ok": True}
 
     @router.post("/api/agent/webrtc/{session_id}/candidates")
-    def agent_post_webrtc_candidate(session_id: str, body: dict = Body(default={}), x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def agent_post_webrtc_candidate(
+        session_id: str,
+        body: dict = Body(default={}),
+        x_device_token: str | None = Header(default=None),
+        x_client_cert_fingerprint: str | None = Header(default=None),
+        x_ssl_client_fingerprint: str | None = Header(default=None),
+    ):
         row = device_row(x_device_token)
         _require_agent_mtls(None, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         sess = _load_sess(session_id)
@@ -417,7 +473,13 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
         return {"ok": True}
 
     @router.post("/api/agent/webrtc/{session_id}/error")
-    def agent_post_webrtc_error(session_id: str, body: dict = Body(default={}), x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def agent_post_webrtc_error(
+        session_id: str,
+        body: dict = Body(default={}),
+        x_device_token: str | None = Header(default=None),
+        x_client_cert_fingerprint: str | None = Header(default=None),
+        x_ssl_client_fingerprint: str | None = Header(default=None),
+    ):
         row = device_row(x_device_token)
         _require_agent_mtls(None, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         sess = _load_sess(session_id)

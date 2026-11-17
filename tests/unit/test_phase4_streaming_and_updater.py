@@ -1,8 +1,9 @@
+import importlib.util
 import json
 import os
 import platform
 import time
-import pytest
+
 from fastapi.testclient import TestClient
 
 from ai_bridge import tools
@@ -12,11 +13,7 @@ from ai_bridge.policy import Policy
 
 
 def test_capture_desktop_frame_primitives(monkeypatch):
-    try:
-        import PIL
-        has_pil = True
-    except ImportError:
-        has_pil = False
+    has_pil = importlib.util.find_spec("PIL") is not None
 
     if not has_pil or (platform.system() != "Windows" and "DISPLAY" not in os.environ):
         monkeypatch.setattr(tools, "capture_desktop_frame", lambda **kw: {
@@ -43,11 +40,7 @@ def test_capture_desktop_frame_primitives(monkeypatch):
 
 
 def test_desktop_streaming_endpoint(tmp_path, monkeypatch):
-    try:
-        import PIL
-        has_pil = True
-    except ImportError:
-        has_pil = False
+    has_pil = importlib.util.find_spec("PIL") is not None
 
     if not has_pil or (platform.system() != "Windows" and "DISPLAY" not in os.environ):
         monkeypatch.setattr(tools, "capture_desktop_frame", lambda **kw: {

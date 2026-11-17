@@ -12,7 +12,6 @@ from ai_bridge import screen_capture, updates
 from ai_bridge.control.v1_routes import derive_session_permissions
 from ai_bridge.webrtc_stream import AgentStreamer, DictSignaling
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 

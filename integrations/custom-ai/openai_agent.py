@@ -20,8 +20,9 @@ import sys
 # Ensure local package can be imported if running from repo
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src")))
 
-from ai_bridge import AIBridgeClient
 from _bridge_config import describe_result, require_bridge_url
+
+from ai_bridge import AIBridgeClient
 
 
 def run_agent_loop(user_instruction: str, max_turns: int = 8):

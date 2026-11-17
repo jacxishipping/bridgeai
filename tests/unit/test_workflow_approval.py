@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 from fastapi.testclient import TestClient
 
 from ai_bridge.control.app import create_app

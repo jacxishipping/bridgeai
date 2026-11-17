@@ -1,8 +1,6 @@
 """Embedded control+MCP+OAuth dispatcher used on Render."""
 from __future__ import annotations
 
-import os
-
 import pytest
 from starlette.testclient import TestClient
 

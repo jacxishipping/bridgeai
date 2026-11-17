@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import time
-import pytest
+
 from fastapi.testclient import TestClient
 
 from ai_bridge import tools, vision
 from ai_bridge.control.app import create_app
-from ai_bridge.policy import Policy, decide
+from ai_bridge.policy import Policy
 
 
 def test_wait_for_text_found_and_timeout(monkeypatch):

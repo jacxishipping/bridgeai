@@ -1,7 +1,7 @@
 """Browser Intelligence: viewport, visual compare, Browserbase durable, crawl registration."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

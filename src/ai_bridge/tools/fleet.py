@@ -5,20 +5,19 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import base64
 import io
 import os
 import platform
 import time
+from pathlib import Path
 
 from ..policy import Policy
-
+from . import _common  # LAST_FRAME_SCALE lives here (shared mutable state)
 from ._common import _check, default_policy
-
 from .desktop import _grab_windows_desktop_fallback
 
-from . import _common  # LAST_FRAME_SCALE lives here (shared mutable state)
+
 def broadcast_fleet_command(
     tool: str,
     args: dict | None = None,
@@ -51,7 +50,6 @@ def capture_desktop_frame(
     """Capture a lightweight scaled desktop frame optimized for real-time visual streaming."""
     eff_policy = policy or default_policy()
     _check("capture_desktop_frame", approval_granted=approval_granted, policy=eff_policy)
-    import io, base64
 
     try:
         from PIL import Image, ImageGrab
@@ -145,7 +143,7 @@ def update_fleet_agent(
     """
     eff_policy = policy or default_policy()
     _check("update_fleet_agent", approval_granted=approval_granted, policy=eff_policy)
-    from ..import updates
+    from .. import updates
 
     if not updates.signed_update_configured():
         raise PermissionError(

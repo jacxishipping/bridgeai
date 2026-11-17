@@ -12,17 +12,15 @@
 from __future__ import annotations
 
 import hashlib
-import os
-import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 
-from ai_bridge import server as mcp_server
 from ai_bridge import screen_capture
-from ai_bridge.control import approval_store, db as dbmod, mcp_oauth
-
+from ai_bridge import server as mcp_server
+from ai_bridge.control import approval_store, mcp_oauth
+from ai_bridge.control import db as dbmod
 
 # ---------------------------------------------------------------- F-04-15
 

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from ai_bridge.control import dispatch, role_catalog, supervisor
 from ai_bridge.control.app import create_app
-from ai_bridge.policy import Policy, TOOL_TIERS
+from ai_bridge.policy import TOOL_TIERS, Policy
 
 
 def _open_policy() -> Policy:

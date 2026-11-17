@@ -1,10 +1,6 @@
 """ACI slices 1–4: WASAPI audio, UIA grounding, multi-monitor capture, workflow verify."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
-import pytest
-
 from ai_bridge import desktop_audio, screen_capture, tools, webrtc_stream
 from ai_bridge.control import desktop_capabilities
 from ai_bridge.policy import Policy

@@ -1,8 +1,8 @@
 """Unit and API tests for per-device policy configuration and enforcement."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 

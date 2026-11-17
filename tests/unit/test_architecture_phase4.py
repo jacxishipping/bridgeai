@@ -30,12 +30,12 @@ from test_architecture_phase4_tools import EXPECTED_TOOLS_PUBLIC_NAMES  # noqa: 
 
 import ai_bridge.tools as tools  # noqa: E402
 from ai_bridge import tool_registry  # noqa: E402
-from ai_bridge.config import get_settings, reset_for_tests as reset_settings  # noqa: E402
+from ai_bridge.config import get_settings  # noqa: E402
+from ai_bridge.config import reset_for_tests as reset_settings
 from ai_bridge.control.app import create_app  # noqa: E402
 from ai_bridge.errors import BridgeError, ErrorCode, error_info, error_response  # noqa: E402
 from ai_bridge.policy import TOOL_TIERS, normalize_tool_name  # noqa: E402
 from ai_bridge.security import is_secret_name, redact, redact_obj, validate_outbound_url  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Track A: route snapshot identical after the APIRouter split

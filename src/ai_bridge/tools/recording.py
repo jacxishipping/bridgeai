@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
-from typing import Any
 import hashlib
 import json
 import threading
 import time
+from typing import Any
+
 _SESSION_RECORDINGS: dict[str, dict[str, Any]] = {}
 _RECORDINGS_LOCK = threading.Lock()
 

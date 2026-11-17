@@ -14,7 +14,6 @@ from fastapi.responses import Response
 
 from .. import metrics as metricsmod
 from .. import plane_state
-
 from ._context import ControlContext
 
 

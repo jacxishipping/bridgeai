@@ -13,7 +13,6 @@ import inspect
 import json
 import re
 import socket
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +21,7 @@ from fastapi.testclient import TestClient
 from ai_bridge import errors as errors_mod
 from ai_bridge import server as mcp_server
 from ai_bridge.config import get_settings, reset_for_tests
+from ai_bridge.control import alerts, worm_siem
 from ai_bridge.errors import BridgeError, ErrorCode, error_detail, error_response
 from ai_bridge.policy import RiskTier
 from ai_bridge.security import (
@@ -31,7 +31,6 @@ from ai_bridge.security import (
     redact_obj,
     validate_outbound_url,
 )
-from ai_bridge.control import alerts, worm_siem
 
 ADMIN = "test-admin-token-track-c"
 

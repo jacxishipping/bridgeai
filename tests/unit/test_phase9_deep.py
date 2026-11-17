@@ -4,12 +4,11 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
-from ai_bridge import browser_tools, native_encode, webrtc_stream
-from ai_bridge import tools
-from ai_bridge.control import dispatch, durable_ratelimit, metrics as metricsmod, plane_state
+from ai_bridge import browser_tools, native_encode, tools, webrtc_stream
+from ai_bridge.control import dispatch, durable_ratelimit, plane_state
+from ai_bridge.control import metrics as metricsmod
 from ai_bridge.control.app import create_app
 from ai_bridge.control.desktop_capabilities import (
     build_capability_matrix,
@@ -21,7 +20,7 @@ from ai_bridge.control.v1_routes import (
     is_device_human_takeover_active,
     set_device_human_takeover,
 )
-from ai_bridge.plane_control_flags import is_emergency_stop, set_emergency_stop
+from ai_bridge.plane_control_flags import set_emergency_stop
 from ai_bridge.webrtc_stream import AgentStreamer, DictSignaling
 
 

@@ -37,7 +37,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from ai_bridge.control import agent_channel, db as dbmod, fleet_health, supervisor  # noqa: E402
+from ai_bridge.control import agent_channel, fleet_health, supervisor  # noqa: E402
+from ai_bridge.control import db as dbmod  # noqa: E402
 
 RESULT_BLOB = "x" * 20_000  # 20 KB result payload, like a real tool result
 

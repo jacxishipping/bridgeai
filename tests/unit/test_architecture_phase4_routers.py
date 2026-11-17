@@ -10,9 +10,9 @@ the expectation only when the dashboard build exists (exactly as
 ``apps/dashboard/dist`` exists) and the ``/assets`` static mount (when
 ``apps/dashboard/dist/assets`` exists).
 """
+
 from __future__ import annotations
 
-import json
 import socket
 from pathlib import Path
 
@@ -32,7 +32,235 @@ ADMIN_TOKEN = "wave3b-router-snapshot-token"
 
 # Literal (method, path) route set of commit 19747b2 (220 entries, no
 # dashboard dist in the worktree it was captured from).
-EXPECTED_ROUTES = set([('DELETE', '/api/agents/{agent_id}'), ('DELETE', '/api/agents/{agent_id}/memory/chunks'), ('DELETE', '/api/approvals/{approval_id}'), ('DELETE', '/api/audit/{audit_id}'), ('DELETE', '/api/connections/clients/{client_id}'), ('DELETE', '/api/connectors/m365'), ('DELETE', '/api/devices/{device_id}'), ('DELETE', '/api/devices/{device_id}/desktop/webrtc/{session_id}'), ('DELETE', '/api/devices/{device_id}/policy'), ('DELETE', '/api/devices/{device_id}/terminal/{session_id}'), ('DELETE', '/api/mcp/servers/{server_id}'), ('DELETE', '/api/policies/{version}'), ('DELETE', '/api/schedules/{schedule_id}'), ('DELETE', '/api/tasks'), ('DELETE', '/api/tasks/{task_id}'), ('DELETE', '/api/triggers/{trigger_id}'), ('DELETE', '/api/workflows/templates/{template_id}'), ('DELETE', '/api/workflows/{workflow_id}'), ('GET', '/api/activity/live'), ('GET', '/api/activity/stream'), ('GET', '/api/admin/backups'), ('GET', '/api/admin/backups/{filename}'), ('GET', '/api/agent/policy'), ('GET', '/api/agent/tasks/next'), ('GET', '/api/agent/tasks/{task_id}/execution-state'), ('GET', '/api/agent/webrtc/{session_id}'), ('GET', '/api/agent/whoami'), ('GET', '/api/agents'), ('GET', '/api/agents/{agent_id}/memory/chunks'), ('GET', '/api/agents/{agent_id}/runs'), ('GET', '/api/ai/devices'), ('GET', '/api/ai/tools'), ('GET', '/api/alerts/config'), ('GET', '/api/alerts/deliveries'), ('GET', '/api/approvals'), ('GET', '/api/approvals/quick/{approval_id}'), ('GET', '/api/audit'), ('GET', '/api/audit/export'), ('GET', '/api/audit/verify'), ('GET', '/api/auth/csrf-token'), ('GET', '/api/auth/me'), ('GET', '/api/auth/oidc/callback'), ('GET', '/api/auth/oidc/configured'), ('GET', '/api/auth/oidc/login'), ('GET', '/api/auth/users'), ('GET', '/api/connections'), ('GET', '/api/connectors/m365/callback'), ('GET', '/api/connectors/m365/status'), ('GET', '/api/devices'), ('GET', '/api/devices/{device_id}/desktop/frame'), ('GET', '/api/devices/{device_id}/desktop/live.jpg'), ('GET', '/api/devices/{device_id}/desktop/monitors'), ('GET', '/api/devices/{device_id}/desktop/webrtc/{session_id}'), ('GET', '/api/devices/{device_id}/overview'), ('GET', '/api/devices/{device_id}/policy'), ('GET', '/api/devices/{device_id}/telemetry'), ('GET', '/api/devices/{device_id}/terminal/sessions'), ('GET', '/api/devices/{device_id}/terminal/{session_id}/stream'), ('GET', '/api/events/stream'), ('GET', '/api/fleet/broadcast/{batch_id}'), ('GET', '/api/fleet/desktop-capabilities'), ('GET', '/api/fleet/desktop/frames'), ('GET', '/api/fleet/health'), ('GET', '/api/fleet/inventory'), ('GET', '/api/fleet/notifications'), ('GET', '/api/fleet/telemetry'), ('GET', '/api/fleet/version'), ('GET', '/api/logs'), ('GET', '/api/mcp/oauth/callback'), ('GET', '/api/mcp/servers'), ('GET', '/api/mcp/templates'), ('GET', '/api/mcp/tool-policies'), ('GET', '/api/metrics/summary'), ('GET', '/api/policies'), ('GET', '/api/policies/history'), ('GET', '/api/roles'), ('GET', '/api/schedules'), ('GET', '/api/settings/ai'), ('GET', '/api/settings/webhook'), ('GET', '/api/supervisor/handoffs/{handoff_id}'), ('GET', '/api/tasks'), ('GET', '/api/tasks/history'), ('GET', '/api/tasks/{task_id}'), ('GET', '/api/tasks/{task_id}/events'), ('GET', '/api/tasks/{task_id}/result'), ('GET', '/api/tenants'), ('GET', '/api/triggers'), ('GET', '/api/v1/audit'), ('GET', '/api/v1/devices'), ('GET', '/api/v1/devices/{device_id}'), ('GET', '/api/v1/devices/{device_id}/files'), ('GET', '/api/v1/devices/{device_id}/files/download'), ('GET', '/api/v1/devices/{device_id}/monitors'), ('GET', '/api/v1/devices/{device_id}/status'), ('GET', '/api/v1/devices/{device_id}/ui-elements'), ('GET', '/api/v1/models'), ('GET', '/api/v1/policies'), ('GET', '/api/v1/sessions'), ('GET', '/api/v1/sessions/ice-servers'), ('GET', '/api/v1/sessions/{session_id}'), ('GET', '/api/v1/sessions/{session_id}/recording'), ('GET', '/api/v1/tasks'), ('GET', '/api/v1/tasks/{task_id}'), ('GET', '/api/workflows'), ('GET', '/api/workflows/templates'), ('GET', '/api/workflows/{workflow_id}'), ('GET', '/api/workflows/{workflow_id}/stream'), ('GET', '/docs'), ('GET', '/docs/oauth2-redirect'), ('GET', '/health'), ('GET', '/health/live'), ('GET', '/health/production-checklist'), ('GET', '/health/ready'), ('GET', '/install.ps1'), ('GET', '/install.sh'), ('GET', '/metrics'), ('GET', '/openapi.json'), ('GET', '/redoc'), ('GET', '/v1/models'), ('HEAD', '/docs'), ('HEAD', '/docs/oauth2-redirect'), ('HEAD', '/openapi.json'), ('HEAD', '/redoc'), ('PATCH', '/api/agents/{agent_id}'), ('PATCH', '/api/auth/users/{username}'), ('PATCH', '/api/mcp/servers/{server_id}'), ('PATCH', '/api/v1/sessions/{session_id}/mode'), ('PATCH', '/api/v1/sessions/{session_id}/quality'), ('POST', '/api/admin/backups'), ('POST', '/api/admin/backups/{filename}/restore'), ('POST', '/api/agent/heartbeat'), ('POST', '/api/agent/rotate'), ('POST', '/api/agent/tasks/{task_id}/progress'), ('POST', '/api/agent/tasks/{task_id}/result'), ('POST', '/api/agent/webrtc/{session_id}/candidates'), ('POST', '/api/agent/webrtc/{session_id}/error'), ('POST', '/api/agent/webrtc/{session_id}/offer'), ('POST', '/api/agents'), ('POST', '/api/agents/{agent_id}/ask'), ('POST', '/api/agents/{agent_id}/memory/chunks'), ('POST', '/api/agents/{agent_id}/run'), ('POST', '/api/ai/agent'), ('POST', '/api/ai/chat'), ('POST', '/api/ai/chat/stream'), ('POST', '/api/ai/execute'), ('POST', '/api/alerts/test'), ('POST', '/api/approvals/{approval_id}/decide'), ('POST', '/api/approvals/{approval_id}/replan'), ('POST', '/api/audit/retention'), ('POST', '/api/auth/login'), ('POST', '/api/auth/logout'), ('POST', '/api/auth/oidc/exchange'), ('POST', '/api/auth/users'), ('POST', '/api/connectors/m365/login'), ('POST', '/api/devices/enroll'), ('POST', '/api/devices/{device_id}/desktop/input'), ('POST', '/api/devices/{device_id}/desktop/webrtc/session'), ('POST', '/api/devices/{device_id}/desktop/webrtc/{session_id}/answer'), ('POST', '/api/devices/{device_id}/desktop/webrtc/{session_id}/candidates'), ('POST', '/api/devices/{device_id}/mtls-fingerprint'), ('POST', '/api/devices/{device_id}/refresh'), ('POST', '/api/devices/{device_id}/revoke'), ('POST', '/api/devices/{device_id}/terminal/sessions'), ('POST', '/api/devices/{device_id}/terminal/{session_id}/input'), ('POST', '/api/devices/{device_id}/terminal/{session_id}/resize'), ('POST', '/api/devices/{device_id}/update'), ('POST', '/api/emergency-stop'), ('POST', '/api/emergency-stop/clear'), ('POST', '/api/fleet/broadcast'), ('POST', '/api/fleet/update'), ('POST', '/api/mcp/oauth/discover'), ('POST', '/api/mcp/servers'), ('POST', '/api/mcp/servers/{server_id}/execute'), ('POST', '/api/mcp/servers/{server_id}/oauth/start'), ('POST', '/api/mcp/servers/{server_id}/sync'), ('POST', '/api/policies'), ('POST', '/api/policies/simulate'), ('POST', '/api/policy/simulate'), ('POST', '/api/roles/{role_id}/enable'), ('POST', '/api/schedules'), ('POST', '/api/schedules/{schedule_id}/run-now'), ('POST', '/api/schedules/{schedule_id}/toggle'), ('POST', '/api/settings/ai'), ('POST', '/api/settings/webhook'), ('POST', '/api/settings/webhook/test'), ('POST', '/api/stream-ticket'), ('POST', '/api/supervisor/handoff'), ('POST', '/api/supervisor/recover'), ('POST', '/api/tasks'), ('POST', '/api/tasks/{task_id}/cancel'), ('POST', '/api/tasks/{task_id}/progress'), ('POST', '/api/triggers'), ('POST', '/api/triggers/{trigger_id}/test'), ('POST', '/api/triggers/{trigger_id}/toggle'), ('POST', '/api/v1/agents/{device_id}/heartbeat'), ('POST', '/api/v1/chat/completions'), ('POST', '/api/v1/devices/{device_id}/files/upload'), ('POST', '/api/v1/sessions'), ('POST', '/api/v1/sessions/{session_id}/answer'), ('POST', '/api/v1/sessions/{session_id}/clipboard'), ('POST', '/api/v1/sessions/{session_id}/ice'), ('POST', '/api/v1/sessions/{session_id}/mode'), ('POST', '/api/v1/sessions/{session_id}/offer'), ('POST', '/api/v1/sessions/{session_id}/recording/seal'), ('POST', '/api/v1/sessions/{session_id}/terminate'), ('POST', '/api/v1/tasks'), ('POST', '/api/workflows'), ('POST', '/api/workflows/templates'), ('POST', '/api/workflows/{workflow_id}/cancel'), ('POST', '/api/workflows/{workflow_id}/retry'), ('POST', '/api/workflows/{workflow_id}/schedule'), ('POST', '/v1/chat/completions'), ('PUT', '/api/agent/policy'), ('PUT', '/api/alerts/config'), ('PUT', '/api/approvals/{approval_id}'), ('PUT', '/api/audit/{audit_id}'), ('PUT', '/api/connections/clients/{client_id}'), ('PUT', '/api/devices/{device_id}'), ('PUT', '/api/devices/{device_id}/metadata'), ('PUT', '/api/devices/{device_id}/policy'), ('PUT', '/api/mcp/tool-policies'), ('PUT', '/api/policies/{version}'), ('PUT', '/api/tasks/{task_id}'), ('WS', '/api/agent/ws'), ('WS', '/api/v1/ws/sessions/{session_id}')])
+EXPECTED_ROUTES = set(
+    [
+        ("DELETE", "/api/agents/{agent_id}"),
+        ("DELETE", "/api/agents/{agent_id}/memory/chunks"),
+        ("DELETE", "/api/approvals/{approval_id}"),
+        ("DELETE", "/api/audit/{audit_id}"),
+        ("DELETE", "/api/connections/clients/{client_id}"),
+        ("DELETE", "/api/connectors/m365"),
+        ("DELETE", "/api/devices/{device_id}"),
+        ("DELETE", "/api/devices/{device_id}/desktop/webrtc/{session_id}"),
+        ("DELETE", "/api/devices/{device_id}/policy"),
+        ("DELETE", "/api/devices/{device_id}/terminal/{session_id}"),
+        ("DELETE", "/api/mcp/servers/{server_id}"),
+        ("DELETE", "/api/policies/{version}"),
+        ("DELETE", "/api/schedules/{schedule_id}"),
+        ("DELETE", "/api/tasks"),
+        ("DELETE", "/api/tasks/{task_id}"),
+        ("DELETE", "/api/triggers/{trigger_id}"),
+        ("DELETE", "/api/workflows/templates/{template_id}"),
+        ("DELETE", "/api/workflows/{workflow_id}"),
+        ("GET", "/api/activity/live"),
+        ("GET", "/api/activity/stream"),
+        ("GET", "/api/admin/backups"),
+        ("GET", "/api/admin/backups/{filename}"),
+        ("GET", "/api/agent/policy"),
+        ("GET", "/api/agent/tasks/next"),
+        ("GET", "/api/agent/tasks/{task_id}/execution-state"),
+        ("GET", "/api/agent/webrtc/{session_id}"),
+        ("GET", "/api/agent/whoami"),
+        ("GET", "/api/agents"),
+        ("GET", "/api/agents/{agent_id}/memory/chunks"),
+        ("GET", "/api/agents/{agent_id}/runs"),
+        ("GET", "/api/ai/devices"),
+        ("GET", "/api/ai/tools"),
+        ("GET", "/api/alerts/config"),
+        ("GET", "/api/alerts/deliveries"),
+        ("GET", "/api/approvals"),
+        ("GET", "/api/approvals/quick/{approval_id}"),
+        ("GET", "/api/audit"),
+        ("GET", "/api/audit/export"),
+        ("GET", "/api/audit/verify"),
+        ("GET", "/api/auth/csrf-token"),
+        ("GET", "/api/auth/me"),
+        ("GET", "/api/auth/oidc/callback"),
+        ("GET", "/api/auth/oidc/configured"),
+        ("GET", "/api/auth/oidc/login"),
+        ("GET", "/api/auth/users"),
+        ("GET", "/api/connections"),
+        ("GET", "/api/connectors/m365/callback"),
+        ("GET", "/api/connectors/m365/status"),
+        ("GET", "/api/devices"),
+        ("GET", "/api/devices/{device_id}/desktop/frame"),
+        ("GET", "/api/devices/{device_id}/desktop/live.jpg"),
+        ("GET", "/api/devices/{device_id}/desktop/monitors"),
+        ("GET", "/api/devices/{device_id}/desktop/webrtc/{session_id}"),
+        ("GET", "/api/devices/{device_id}/overview"),
+        ("GET", "/api/devices/{device_id}/policy"),
+        ("GET", "/api/devices/{device_id}/telemetry"),
+        ("GET", "/api/devices/{device_id}/terminal/sessions"),
+        ("GET", "/api/devices/{device_id}/terminal/{session_id}/stream"),
+        ("GET", "/api/events/stream"),
+        ("GET", "/api/fleet/broadcast/{batch_id}"),
+        ("GET", "/api/fleet/desktop-capabilities"),
+        ("GET", "/api/fleet/desktop/frames"),
+        ("GET", "/api/fleet/health"),
+        ("GET", "/api/fleet/inventory"),
+        ("GET", "/api/fleet/notifications"),
+        ("GET", "/api/fleet/telemetry"),
+        ("GET", "/api/fleet/version"),
+        ("GET", "/api/logs"),
+        ("GET", "/api/mcp/oauth/callback"),
+        ("GET", "/api/mcp/servers"),
+        ("GET", "/api/mcp/templates"),
+        ("GET", "/api/mcp/tool-policies"),
+        ("GET", "/api/metrics/summary"),
+        ("GET", "/api/policies"),
+        ("GET", "/api/policies/history"),
+        ("GET", "/api/roles"),
+        ("GET", "/api/schedules"),
+        ("GET", "/api/settings/ai"),
+        ("GET", "/api/settings/webhook"),
+        ("GET", "/api/supervisor/handoffs/{handoff_id}"),
+        ("GET", "/api/tasks"),
+        ("GET", "/api/tasks/history"),
+        ("GET", "/api/tasks/{task_id}"),
+        ("GET", "/api/tasks/{task_id}/events"),
+        ("GET", "/api/tasks/{task_id}/result"),
+        ("GET", "/api/tenants"),
+        ("GET", "/api/triggers"),
+        ("GET", "/api/v1/audit"),
+        ("GET", "/api/v1/devices"),
+        ("GET", "/api/v1/devices/{device_id}"),
+        ("GET", "/api/v1/devices/{device_id}/files"),
+        ("GET", "/api/v1/devices/{device_id}/files/download"),
+        ("GET", "/api/v1/devices/{device_id}/monitors"),
+        ("GET", "/api/v1/devices/{device_id}/status"),
+        ("GET", "/api/v1/devices/{device_id}/ui-elements"),
+        ("GET", "/api/v1/models"),
+        ("GET", "/api/v1/policies"),
+        ("GET", "/api/v1/sessions"),
+        ("GET", "/api/v1/sessions/ice-servers"),
+        ("GET", "/api/v1/sessions/{session_id}"),
+        ("GET", "/api/v1/sessions/{session_id}/recording"),
+        ("GET", "/api/v1/tasks"),
+        ("GET", "/api/v1/tasks/{task_id}"),
+        ("GET", "/api/workflows"),
+        ("GET", "/api/workflows/templates"),
+        ("GET", "/api/workflows/{workflow_id}"),
+        ("GET", "/api/workflows/{workflow_id}/stream"),
+        ("GET", "/docs"),
+        ("GET", "/docs/oauth2-redirect"),
+        ("GET", "/health"),
+        ("GET", "/health/live"),
+        ("GET", "/health/production-checklist"),
+        ("GET", "/health/ready"),
+        ("GET", "/install.ps1"),
+        ("GET", "/install.sh"),
+        ("GET", "/metrics"),
+        ("GET", "/openapi.json"),
+        ("GET", "/redoc"),
+        ("GET", "/v1/models"),
+        ("HEAD", "/docs"),
+        ("HEAD", "/docs/oauth2-redirect"),
+        ("HEAD", "/openapi.json"),
+        ("HEAD", "/redoc"),
+        ("PATCH", "/api/agents/{agent_id}"),
+        ("PATCH", "/api/auth/users/{username}"),
+        ("PATCH", "/api/mcp/servers/{server_id}"),
+        ("PATCH", "/api/v1/sessions/{session_id}/mode"),
+        ("PATCH", "/api/v1/sessions/{session_id}/quality"),
+        ("POST", "/api/admin/backups"),
+        ("POST", "/api/admin/backups/{filename}/restore"),
+        ("POST", "/api/agent/heartbeat"),
+        ("POST", "/api/agent/rotate"),
+        ("POST", "/api/agent/tasks/{task_id}/progress"),
+        ("POST", "/api/agent/tasks/{task_id}/result"),
+        ("POST", "/api/agent/webrtc/{session_id}/candidates"),
+        ("POST", "/api/agent/webrtc/{session_id}/error"),
+        ("POST", "/api/agent/webrtc/{session_id}/offer"),
+        ("POST", "/api/agents"),
+        ("POST", "/api/agents/{agent_id}/ask"),
+        ("POST", "/api/agents/{agent_id}/memory/chunks"),
+        ("POST", "/api/agents/{agent_id}/run"),
+        ("POST", "/api/ai/agent"),
+        ("POST", "/api/ai/chat"),
+        ("POST", "/api/ai/chat/stream"),
+        ("POST", "/api/ai/execute"),
+        ("POST", "/api/alerts/test"),
+        ("POST", "/api/approvals/{approval_id}/decide"),
+        ("POST", "/api/approvals/{approval_id}/replan"),
+        ("POST", "/api/audit/retention"),
+        ("POST", "/api/auth/login"),
+        ("POST", "/api/auth/logout"),
+        ("POST", "/api/auth/oidc/exchange"),
+        ("POST", "/api/auth/users"),
+        ("POST", "/api/connectors/m365/login"),
+        ("POST", "/api/devices/enroll"),
+        ("POST", "/api/devices/{device_id}/desktop/input"),
+        ("POST", "/api/devices/{device_id}/desktop/webrtc/session"),
+        ("POST", "/api/devices/{device_id}/desktop/webrtc/{session_id}/answer"),
+        ("POST", "/api/devices/{device_id}/desktop/webrtc/{session_id}/candidates"),
+        ("POST", "/api/devices/{device_id}/mtls-fingerprint"),
+        ("POST", "/api/devices/{device_id}/refresh"),
+        ("POST", "/api/devices/{device_id}/revoke"),
+        ("POST", "/api/devices/{device_id}/terminal/sessions"),
+        ("POST", "/api/devices/{device_id}/terminal/{session_id}/input"),
+        ("POST", "/api/devices/{device_id}/terminal/{session_id}/resize"),
+        ("POST", "/api/devices/{device_id}/update"),
+        ("POST", "/api/emergency-stop"),
+        ("POST", "/api/emergency-stop/clear"),
+        ("POST", "/api/fleet/broadcast"),
+        ("POST", "/api/fleet/update"),
+        ("POST", "/api/mcp/oauth/discover"),
+        ("POST", "/api/mcp/servers"),
+        ("POST", "/api/mcp/servers/{server_id}/execute"),
+        ("POST", "/api/mcp/servers/{server_id}/oauth/start"),
+        ("POST", "/api/mcp/servers/{server_id}/sync"),
+        ("POST", "/api/policies"),
+        ("POST", "/api/policies/simulate"),
+        ("POST", "/api/policy/simulate"),
+        ("POST", "/api/roles/{role_id}/enable"),
+        ("POST", "/api/schedules"),
+        ("POST", "/api/schedules/{schedule_id}/run-now"),
+        ("POST", "/api/schedules/{schedule_id}/toggle"),
+        ("POST", "/api/settings/ai"),
+        ("POST", "/api/settings/webhook"),
+        ("POST", "/api/settings/webhook/test"),
+        ("POST", "/api/stream-ticket"),
+        ("POST", "/api/supervisor/handoff"),
+        ("POST", "/api/supervisor/recover"),
+        ("POST", "/api/tasks"),
+        ("POST", "/api/tasks/{task_id}/cancel"),
+        ("POST", "/api/tasks/{task_id}/progress"),
+        ("POST", "/api/triggers"),
+        ("POST", "/api/triggers/{trigger_id}/test"),
+        ("POST", "/api/triggers/{trigger_id}/toggle"),
+        ("POST", "/api/v1/agents/{device_id}/heartbeat"),
+        ("POST", "/api/v1/chat/completions"),
+        ("POST", "/api/v1/devices/{device_id}/files/upload"),
+        ("POST", "/api/v1/sessions"),
+        ("POST", "/api/v1/sessions/{session_id}/answer"),
+        ("POST", "/api/v1/sessions/{session_id}/clipboard"),
+        ("POST", "/api/v1/sessions/{session_id}/ice"),
+        ("POST", "/api/v1/sessions/{session_id}/mode"),
+        ("POST", "/api/v1/sessions/{session_id}/offer"),
+        ("POST", "/api/v1/sessions/{session_id}/recording/seal"),
+        ("POST", "/api/v1/sessions/{session_id}/terminate"),
+        ("POST", "/api/v1/tasks"),
+        ("POST", "/api/workflows"),
+        ("POST", "/api/workflows/templates"),
+        ("POST", "/api/workflows/{workflow_id}/cancel"),
+        ("POST", "/api/workflows/{workflow_id}/retry"),
+        ("POST", "/api/workflows/{workflow_id}/schedule"),
+        ("POST", "/v1/chat/completions"),
+        ("PUT", "/api/agent/policy"),
+        ("PUT", "/api/alerts/config"),
+        ("PUT", "/api/approvals/{approval_id}"),
+        ("PUT", "/api/audit/{audit_id}"),
+        ("PUT", "/api/connections/clients/{client_id}"),
+        ("PUT", "/api/devices/{device_id}"),
+        ("PUT", "/api/devices/{device_id}/metadata"),
+        ("PUT", "/api/devices/{device_id}/policy"),
+        ("PUT", "/api/mcp/tool-policies"),
+        ("PUT", "/api/policies/{version}"),
+        ("PUT", "/api/tasks/{task_id}"),
+        ("WS", "/api/agent/ws"),
+        ("WS", "/api/v1/ws/sessions/{session_id}"),
+    ]
+)
 
 
 def _route_set(app):
@@ -97,11 +325,7 @@ def _admin():
 def test_route_set_identical_to_committed_snapshot(app_obj):
     actual = _route_set(app_obj)
     expected = _expected_routes()
-    assert actual == expected, (
-        "route set changed by the router split;\n"
-        f"missing (in 19747b2, gone now): {sorted(expected - actual)}\n"
-        f"added (not in 19747b2): {sorted(actual - expected)}"
-    )
+    assert actual == expected, f"route set changed by the router split;\nmissing (in 19747b2, gone now): {sorted(expected - actual)}\nadded (not in 19747b2): {sorted(actual - expected)}"
 
 
 def test_route_count_matches_committed_snapshot(app_obj):
@@ -227,9 +451,7 @@ def _fake_getaddrinfo(mapping):
 def _mock_client(monkeypatch, handler):
     orig_client = httpx.Client
     transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        httpx, "Client", lambda *a, **kw: orig_client(transport=transport, **kw)
-    )
+    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: orig_client(transport=transport, **kw))
 
 
 def _ok_handler(request: httpx.Request) -> httpx.Response:
@@ -238,13 +460,13 @@ def _ok_handler(request: httpx.Request) -> httpx.Response:
 
 def test_ssrf_webhook_url_resolving_to_private_ip_rejected(monkeypatch):
     """A hostname that resolves to a private IP must never be contacted."""
-    monkeypatch.setattr(
-        socket, "getaddrinfo", _fake_getaddrinfo({"evil.example": _PRIVATE_ADDR})
-    )
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo({"evil.example": _PRIVATE_ADDR}))
     seen = []
     _mock_client(monkeypatch, lambda req: seen.append(str(req.url)) or _ok_handler(req))
     res = send_webhook_notification(
-        "https://evil.example/hook", _EVENT, admin_token=ADMIN_TOKEN,
+        "https://evil.example/hook",
+        _EVENT,
+        admin_token=ADMIN_TOKEN,
         public_base_url="https://jxiptvplayer.app",
     )
     assert res["ok"] is False
@@ -253,13 +475,13 @@ def test_ssrf_webhook_url_resolving_to_private_ip_rejected(monkeypatch):
 
 
 def test_ssrf_webhook_url_resolving_to_metadata_ip_rejected(monkeypatch):
-    monkeypatch.setattr(
-        socket, "getaddrinfo", _fake_getaddrinfo({"evil.example": _METADATA_ADDR})
-    )
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo({"evil.example": _METADATA_ADDR}))
     seen = []
     _mock_client(monkeypatch, lambda req: seen.append(str(req.url)) or _ok_handler(req))
     res = send_webhook_notification(
-        "https://evil.example/hook", _EVENT, admin_token=ADMIN_TOKEN,
+        "https://evil.example/hook",
+        _EVENT,
+        admin_token=ADMIN_TOKEN,
         public_base_url="https://jxiptvplayer.app",
     )
     assert res["ok"] is False
@@ -271,7 +493,9 @@ def test_ssrf_webhook_literal_private_ip_rejected(monkeypatch):
     seen = []
     _mock_client(monkeypatch, lambda req: seen.append(str(req.url)) or _ok_handler(req))
     res = send_webhook_notification(
-        "http://192.168.1.10/hook", _EVENT, admin_token=ADMIN_TOKEN,
+        "http://192.168.1.10/hook",
+        _EVENT,
+        admin_token=ADMIN_TOKEN,
         public_base_url="https://jxiptvplayer.app",
     )
     assert res["ok"] is False
@@ -279,13 +503,13 @@ def test_ssrf_webhook_literal_private_ip_rejected(monkeypatch):
 
 
 def test_ssrf_webhook_dns_failure_rejected_by_sender(monkeypatch):
-    monkeypatch.setattr(
-        socket, "getaddrinfo", _fake_getaddrinfo(socket.gaierror("Name or service not known"))
-    )
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo(socket.gaierror("Name or service not known")))
     seen = []
     _mock_client(monkeypatch, lambda req: seen.append(str(req.url)) or _ok_handler(req))
     res = send_webhook_notification(
-        "https://unresolvable.example/hook", _EVENT, admin_token=ADMIN_TOKEN,
+        "https://unresolvable.example/hook",
+        _EVENT,
+        admin_token=ADMIN_TOKEN,
         public_base_url="https://jxiptvplayer.app",
     )
     assert res["ok"] is False
@@ -300,14 +524,14 @@ def test_ssrf_webhook_redirect_to_private_ip_not_followed(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(str(request.url))
         if len(seen) == 1:
-            return httpx.Response(
-                status_code=302, headers={"location": "http://169.254.169.254/latest/meta-data/"}
-            )
+            return httpx.Response(status_code=302, headers={"location": "http://169.254.169.254/latest/meta-data/"})
         return _ok_handler(request)
 
     _mock_client(monkeypatch, handler)
     res = send_webhook_notification(
-        "https://webhook.example.com/hook", _EVENT, admin_token=ADMIN_TOKEN,
+        "https://webhook.example.com/hook",
+        _EVENT,
+        admin_token=ADMIN_TOKEN,
         public_base_url="https://jxiptvplayer.app",
     )
     assert res["ok"] is False
@@ -327,14 +551,14 @@ def test_ssrf_webhook_redirect_to_dns_rebinding_host_not_followed(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(str(request.url))
         if len(seen) == 1:
-            return httpx.Response(
-                status_code=302, headers={"location": "https://evil.example/steal"}
-            )
+            return httpx.Response(status_code=302, headers={"location": "https://evil.example/steal"})
         return _ok_handler(request)
 
     _mock_client(monkeypatch, handler)
     res = send_webhook_notification(
-        "https://webhook.example.com/hook", _EVENT, admin_token=ADMIN_TOKEN,
+        "https://webhook.example.com/hook",
+        _EVENT,
+        admin_token=ADMIN_TOKEN,
         public_base_url="https://jxiptvplayer.app",
     )
     assert res["ok"] is False
@@ -349,14 +573,14 @@ def test_ssrf_webhook_redirect_to_public_ip_followed(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(str(request.url))
         if len(seen) == 1:
-            return httpx.Response(
-                status_code=302, headers={"location": "https://api.example.com/other"}
-            )
+            return httpx.Response(status_code=302, headers={"location": "https://api.example.com/other"})
         return _ok_handler(request)
 
     _mock_client(monkeypatch, handler)
     res = send_webhook_notification(
-        "https://webhook.example.com/hook", _EVENT, admin_token=ADMIN_TOKEN,
+        "https://webhook.example.com/hook",
+        _EVENT,
+        admin_token=ADMIN_TOKEN,
         public_base_url="https://jxiptvplayer.app",
     )
     assert res["ok"] is True
@@ -369,13 +593,13 @@ def test_ssrf_webhook_redirect_limit(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(str(request.url))
-        return httpx.Response(
-            status_code=302, headers={"location": "https://webhook.example.com/again"}
-        )
+        return httpx.Response(status_code=302, headers={"location": "https://webhook.example.com/again"})
 
     _mock_client(monkeypatch, handler)
     res = send_webhook_notification(
-        "https://webhook.example.com/hook", _EVENT, admin_token=ADMIN_TOKEN,
+        "https://webhook.example.com/hook",
+        _EVENT,
+        admin_token=ADMIN_TOKEN,
         public_base_url="https://jxiptvplayer.app",
     )
     assert res["ok"] is False
@@ -384,9 +608,7 @@ def test_ssrf_webhook_redirect_limit(monkeypatch):
 
 
 def test_ssrf_webhook_config_rejects_resolved_private_ip(client, monkeypatch):
-    monkeypatch.setattr(
-        socket, "getaddrinfo", _fake_getaddrinfo({"evil.example": _PRIVATE_ADDR})
-    )
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo({"evil.example": _PRIVATE_ADDR}))
     resp = client.post(
         "/api/settings/webhook",
         json={"webhook_url": "https://evil.example/hook"},

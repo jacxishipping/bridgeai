@@ -8,8 +8,9 @@ from __future__ import annotations
 from .. import diagnostics
 from ..policy import Policy
 from ..security import workspace_root
-
 from ._common import _check, default_policy
+
+
 def get_system_info() -> dict:
     _check("get_system_info")
     info = diagnostics.system_info(); info["workspace"] = str(workspace_root())

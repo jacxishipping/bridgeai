@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 
 from fastapi.testclient import TestClient
 
 from ai_bridge.control import alerts as alertsmod
 from ai_bridge.control import custom_agents
 from ai_bridge.control.app import create_app
-
 
 ADMIN = "test-admin-enhancements"
 HEADERS = {"x-admin-token": ADMIN}

@@ -6,7 +6,6 @@ import logging
 import os
 import platform
 import subprocess
-import time
 from pathlib import Path
 from typing import Any
 
@@ -309,13 +308,13 @@ def find_text_coordinates(
         ocr_res = run_ocr(image_path)
         if ocr_res.get("ok"):
             # Check lines first (handles multi-word queries like "Sign In" or "Admin Settings")
-            for l in ocr_res.get("lines", []):
-                lt = (l.get("text") or "").lower()
+            for line in ocr_res.get("lines", []):
+                lt = (line.get("text") or "").lower()
                 if q in lt:
                     ocr_matches.append({
-                        "text": l.get("text"),
-                        "bounds": l.get("bounds"),
-                        "center": l.get("center"),
+                        "text": line.get("text"),
+                        "bounds": line.get("bounds"),
+                        "center": line.get("center"),
                         "source": "ocr_line",
                     })
 
@@ -389,13 +388,13 @@ def generate_set_of_marks(
     if image_path:
         ocr_res = run_ocr(image_path)
         if ocr_res.get("ok"):
-            for l in ocr_res.get("lines", []):
-                t = (l.get("text") or "").strip()
-                if len(t) >= 2 and l.get("bounds"):
+            for line in ocr_res.get("lines", []):
+                t = (line.get("text") or "").strip()
+                if len(t) >= 2 and line.get("bounds"):
                     elements.append({
                         "text": t,
-                        "bounds": l["bounds"],
-                        "center": l["center"],
+                        "bounds": line["bounds"],
+                        "center": line["center"],
                         "type": "text",
                     })
 

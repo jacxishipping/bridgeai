@@ -5,15 +5,16 @@ name and validated arguments. Unknown tools, Tier-4 tools without an
 approved approval record, and desktop tools when disabled are rejected
 here — this is the server-side enforcement point, not the prompt.
 """
+
 from __future__ import annotations
 
 import os
 from dataclasses import asdict
 
-from .. import browser_tools, dev_tools, diagnostics, execution, git_ops, tasks, tools, workspace, webrtc_stream
+from .. import browser_tools, dev_tools, diagnostics, execution, git_ops, tasks, tools, webrtc_stream, workspace
 from ..policy import TOOL_TIERS, Policy, RiskTier, decide, normalize_tool_name
 from . import dispatch_audit, supervisor
-from .task_runtime import TaskCancelled, current_device_id, raise_if_cancelled
+from .task_runtime import current_device_id, raise_if_cancelled
 
 
 def _start_webrtc_from_task(a: dict) -> dict:
@@ -57,10 +58,7 @@ def _supervisor_recover_role_tasks(a: dict) -> dict:
 
 def _agent_run_role(a: dict) -> dict:
     """Device pollers cannot run role agents; AgentRunner claims these tasks on the plane."""
-    raise RuntimeError(
-        "agent_run_role is claimed by the control-plane AgentRunner; "
-        "do not execute it on a device poller."
-    )
+    raise RuntimeError("agent_run_role is claimed by the control-plane AgentRunner; do not execute it on a device poller.")
 
 
 def _dispatch_list_devices() -> dict:
@@ -68,7 +66,10 @@ def _dispatch_list_devices() -> dict:
     if conn is None:
         return {"devices": [{"id": "local", "name": "local", "status": "online", **tools.get_system_info()}]}
     rows = conn.execute(
-        "SELECT d.id, d.name, d.hostname, d.os, d.status, d.last_seen," " COALESCE(m.tags_json, '[]') AS tags_json FROM devices d" " LEFT JOIN device_metadata m ON m.device_id = d.id" " WHERE d.revoked=0 ORDER BY d.last_seen DESC"
+        "SELECT d.id, d.name, d.hostname, d.os, d.status, d.last_seen,"
+        " COALESCE(m.tags_json, '[]') AS tags_json FROM devices d"
+        " LEFT JOIN device_metadata m ON m.device_id = d.id"
+        " WHERE d.revoked=0 ORDER BY d.last_seen DESC"
     ).fetchall()
     return {"devices": [dict(r) for r in rows]}
 
@@ -272,8 +273,7 @@ def _dispatch_browser(tool: str, a: dict, *, approval_granted: bool, policy: Pol
     raise ValueError(f"Browser tool not implemented: {tool}")
 
 
-def dispatch(tool: str, args: dict, *, policy: Policy | None = None,
-             approval_granted: bool = False, is_admin: bool = False):
+def dispatch(tool: str, args: dict, *, policy: Policy | None = None, approval_granted: bool = False, is_admin: bool = False):
     raw_tool = tool
     tool = normalize_tool_name(tool)
     explicit_policy = policy
@@ -301,7 +301,9 @@ def dispatch(tool: str, args: dict, *, policy: Policy | None = None,
         "get_disk_usage": lambda a: diagnostics.disk_usage("/"),
         "get_memory_usage": lambda a: diagnostics.memory_usage(),
         "run_diagnostic_task": lambda a: tasks.run_diagnostic(str(a.get("task_name") or a.get("name") or "uptime")),
-        "submit_task": lambda a: asdict(execution.RUNNER.submit(str(a.get("task_name") or a.get("name") or "uptime"), timeout=int(a.get("timeout", 30)), test_command=str(a.get("test_command", "pytest")))),
+        "submit_task": lambda a: asdict(
+            execution.RUNNER.submit(str(a.get("task_name") or a.get("name") or "uptime"), timeout=int(a.get("timeout", 30)), test_command=str(a.get("test_command", "pytest")))
+        ),
         "get_task_status": lambda a: asdict(execution.RUNNER.get(str(a["task_id"]))),
         "get_task_result": lambda a: asdict(execution.RUNNER.get(str(a["task_id"]))),
         "cancel_task": lambda a: asdict(execution.RUNNER.cancel(str(a["task_id"]))),
@@ -361,9 +363,7 @@ def dispatch(tool: str, args: dict, *, policy: Policy | None = None,
         "create_backup": lambda a: tools.create_backup(a.get("relative_directory", "."), approval_granted=approval_granted, policy=policy),
         "deploy_application": lambda a: tools.deploy_application(a.get("project_directory", "."), a.get("target_directory", "deploy-staging"), approval_granted=approval_granted, policy=policy),
         "get_desktop_status": lambda a: tools.get_desktop_status(),
-        "get_native_encode_status": lambda a: __import__(
-            "ai_bridge.native_encode", fromlist=["describe_native_encode"]
-        ).describe_native_encode(),
+        "get_native_encode_status": lambda a: __import__("ai_bridge.native_encode", fromlist=["describe_native_encode"]).describe_native_encode(),
         "capture_desktop_screenshot": lambda a: tools.capture_desktop_screenshot(approval_granted=approval_granted, policy=policy),
         "take_screenshot": lambda a: tools.capture_desktop_screenshot(approval_granted=approval_granted, policy=policy),
         "capture_desktop_frame": lambda a: tools.capture_desktop_frame(
@@ -676,11 +676,7 @@ def dispatch(tool: str, args: dict, *, policy: Policy | None = None,
         "browser_compare_screenshot",
     }
     for btool in _browser_names:
-        handlers[btool] = (
-            lambda a, _t=btool, _ag=approval_granted, _pol=policy: _dispatch_browser(
-                _t, a or {}, approval_granted=_ag, policy=_pol
-            )
-        )
+        handlers[btool] = lambda a, _t=btool, _ag=approval_granted, _pol=policy: _dispatch_browser(_t, a or {}, approval_granted=_ag, policy=_pol)
 
     handlers.update({name: (lambda a, _fn=fn: _fn(a)) for name, fn in microsoft365.TOOLS.items()})
     handlers.update({name: (lambda a, _fn=fn: _fn(a)) for name, fn in browserbase.TOOLS.items()})

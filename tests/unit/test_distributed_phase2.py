@@ -27,14 +27,8 @@ import types
 import pytest
 from fastapi import HTTPException
 
-from ai_bridge.control import agent_channel
+from ai_bridge.control import agent_channel, durable_ratelimit, orchestration, ratelimit, supervisor, task_runtime, task_service
 from ai_bridge.control import db as dbmod
-from ai_bridge.control import durable_ratelimit
-from ai_bridge.control import orchestration
-from ai_bridge.control import ratelimit
-from ai_bridge.control import supervisor
-from ai_bridge.control import task_runtime
-from ai_bridge.control import task_service
 
 
 # ------------------------------------------------------------- fake Redis

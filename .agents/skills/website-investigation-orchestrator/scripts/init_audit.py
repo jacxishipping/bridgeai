@@ -3,10 +3,11 @@
 import argparse
 import json
 import re
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
-import secrets
+
 
 def main():
     parser = argparse.ArgumentParser()

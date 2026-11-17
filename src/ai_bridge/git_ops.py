@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
-
 from pathlib import Path
 
 from .security import confined_path, truncate_output, workspace_root

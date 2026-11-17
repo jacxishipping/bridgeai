@@ -12,7 +12,6 @@ from ai_bridge.control.v1_routes import (
     set_device_human_takeover,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

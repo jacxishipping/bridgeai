@@ -1245,8 +1245,9 @@ def _baseline_dir() -> Path:
 def _image_rmse(a_bytes: bytes, b_bytes: bytes) -> float:
     """Normalized RMSE (0..1) between two images after resize to a common size."""
     try:
-        from PIL import Image
         import io
+
+        from PIL import Image
 
         ia = Image.open(io.BytesIO(a_bytes)).convert("L").resize((64, 64))
         ib = Image.open(io.BytesIO(b_bytes)).convert("L").resize((64, 64))

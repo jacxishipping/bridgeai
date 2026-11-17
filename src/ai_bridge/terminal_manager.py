@@ -13,12 +13,11 @@ import platform
 import queue
 import signal
 import subprocess
-import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Generator
+from typing import Any, Generator
 
 _TERMINAL_SESSIONS: dict[str, "TerminalSession"] = {}
 _LOCK = threading.Lock()

@@ -5,16 +5,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
 import base64
 import hashlib
 import os
 import shutil
 import threading
 import time
+from pathlib import Path
+from typing import Any
 
 from ..security import workspace_root
+
 _ACTIVE_TRANSFERS: dict[str, dict[str, Any]] = {}
 _TRANSFERS_LOCK = threading.Lock()
 
@@ -228,7 +229,7 @@ def desktop_handle_file_end(
         if final_path.exists():
             final_path.unlink()
         temp_path.rename(final_path)
-    except Exception as exc:
+    except Exception:
         # Fallback copy
         try:
             shutil.copy2(temp_path, final_path)

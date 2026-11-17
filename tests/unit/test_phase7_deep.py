@@ -6,6 +6,8 @@ import time
 
 from fastapi.testclient import TestClient
 
+from ai_bridge.control import metrics as metricsmod
+from ai_bridge.control import task_events
 from ai_bridge.control.agent_memory import (
     append_memory_chunk,
     clear_agent_memory,
@@ -13,8 +15,6 @@ from ai_bridge.control.agent_memory import (
     query_agent_memory,
 )
 from ai_bridge.control.app import create_app
-from ai_bridge.control import metrics as metricsmod
-from ai_bridge.control import task_events
 from ai_bridge.control.custom_agents import _system_prompt
 
 

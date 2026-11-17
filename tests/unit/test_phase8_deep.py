@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from unittest.mock import patch
@@ -13,8 +12,8 @@ from fastapi.testclient import TestClient
 
 from ai_bridge import browser_tools
 from ai_bridge.control import dispatch, dispatch_audit, production_readiness, task_runtime
-from ai_bridge.control.app import create_app, make_quick_sig
 from ai_bridge.control import metrics as metricsmod
+from ai_bridge.control.app import create_app, make_quick_sig
 from ai_bridge.logging_config import JSONFormatter
 from ai_bridge.policy import Policy
 from ai_bridge.security import redact, refuse_device_token_log

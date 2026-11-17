@@ -14,14 +14,11 @@ import subprocess
 import time
 
 from ..policy import Policy
-from ..security import confined_path
-from ..security import redact
-from ..security import workspace_root
+from ..security import confined_path, redact, workspace_root
 from ..terminal_manager import terminate_process_group
-
 from ._common import _check, default_policy
-
 from .desktop import wait_for_text
+
 _PACKAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9._-]+$")
 _LINUX_PKG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._+-]*$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9._-]+$")

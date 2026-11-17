@@ -7,7 +7,6 @@ admin token (explicit opt-in) may address any tenant.
 """
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
 
 from ai_bridge.control.app import create_app

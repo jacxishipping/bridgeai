@@ -10,10 +10,10 @@ Wave 3B Track B (F-04-06, INV-12 / TD-D01, TD-D05).
 * :mod:`ai_bridge.control.limiter` is the single rate-limit entry
   point; :mod:`ai_bridge.control.ratelimit` is a thin shim over it.
 """
+
 from __future__ import annotations
 
 import asyncio
-import logging
 import uuid
 
 import pytest
@@ -35,7 +35,111 @@ from ai_bridge.tool_registry import (
 # Public names of ai_bridge.tools captured BEFORE the F-04-06 split
 # (import of the committed single-file module on 19747b2). The package
 # must expose exactly this set — no more, no less.
-EXPECTED_TOOLS_PUBLIC_NAMES = ['Any', 'LAST_FRAME_SCALE', 'Path', 'Policy', 'RUNNER', 'annotations', 'base64', 'broadcast_fleet_command', 'capture_desktop_frame', 'capture_desktop_screenshot', 'clear_som_marks_cache', 'click_element', 'click_text', 'confined_path', 'create_backup', 'decide', 'default_policy', 'deploy_application', 'desktop_anticipate_action', 'desktop_click', 'desktop_clipboard_get', 'desktop_clipboard_set', 'desktop_execute_command', 'desktop_get_monitors', 'desktop_get_screenshot', 'desktop_get_session_recording', 'desktop_get_status', 'desktop_get_ui_elements', 'desktop_get_window_screenshot', 'desktop_get_windows', 'desktop_handle_file_chunk', 'desktop_handle_file_end', 'desktop_handle_file_start', 'desktop_is_action_vetoed', 'desktop_keyboard', 'desktop_list_transfers', 'desktop_mouse_move', 'desktop_open_application', 'desktop_prepare_file_download', 'desktop_record_session_event', 'desktop_scroll', 'desktop_seal_session_recording', 'desktop_start_session_recording', 'desktop_verify_action', 'desktop_veto_action', 'desktop_wait', 'diagnostics', 'execute_workflow', 'focus_window', 'get_clipboard', 'get_desktop_status', 'get_last_som_marks', 'get_network_info', 'get_resource_usage', 'get_screen_size', 'get_service_status', 'get_settings', 'get_system_info', 'get_system_monitors', 'get_transfer_quarantine_dir', 'get_transfer_storage_dir', 'hashlib', 'install_package', 'io', 'is_secret_name', 'json', 'keyboard_press', 'keyboard_type', 'launch_approved_application', 'list_desktop_windows', 'list_ui_elements', 'max_transfer_bytes', 'mouse_click', 'mouse_drag', 'mouse_move', 'mouse_scroll', 'ocr_screen', 'os', 'perform_approved_ui_action', 'platform', 'press_hotkey', 're', 'read_file', 'redact', 'run_linter', 'run_project_tests', 'run_shell', 'set_clipboard', 'set_of_marks_screenshot', 'shlex', 'shutil', 'subprocess', 'sys', 'terminal_exec', 'threading', 'time', 'update_fleet_agent', 'uuid', 'verify_screen_contains', 'wait_for_text', 'workspace_root', 'write_file', 'zipfile']
+EXPECTED_TOOLS_PUBLIC_NAMES = [
+    "Any",
+    "LAST_FRAME_SCALE",
+    "Path",
+    "Policy",
+    "RUNNER",
+    "annotations",
+    "base64",
+    "broadcast_fleet_command",
+    "capture_desktop_frame",
+    "capture_desktop_screenshot",
+    "clear_som_marks_cache",
+    "click_element",
+    "click_text",
+    "confined_path",
+    "create_backup",
+    "decide",
+    "default_policy",
+    "deploy_application",
+    "desktop_anticipate_action",
+    "desktop_click",
+    "desktop_clipboard_get",
+    "desktop_clipboard_set",
+    "desktop_execute_command",
+    "desktop_get_monitors",
+    "desktop_get_screenshot",
+    "desktop_get_session_recording",
+    "desktop_get_status",
+    "desktop_get_ui_elements",
+    "desktop_get_window_screenshot",
+    "desktop_get_windows",
+    "desktop_handle_file_chunk",
+    "desktop_handle_file_end",
+    "desktop_handle_file_start",
+    "desktop_is_action_vetoed",
+    "desktop_keyboard",
+    "desktop_list_transfers",
+    "desktop_mouse_move",
+    "desktop_open_application",
+    "desktop_prepare_file_download",
+    "desktop_record_session_event",
+    "desktop_scroll",
+    "desktop_seal_session_recording",
+    "desktop_start_session_recording",
+    "desktop_verify_action",
+    "desktop_veto_action",
+    "desktop_wait",
+    "diagnostics",
+    "execute_workflow",
+    "focus_window",
+    "get_clipboard",
+    "get_desktop_status",
+    "get_last_som_marks",
+    "get_network_info",
+    "get_resource_usage",
+    "get_screen_size",
+    "get_service_status",
+    "get_settings",
+    "get_system_info",
+    "get_system_monitors",
+    "get_transfer_quarantine_dir",
+    "get_transfer_storage_dir",
+    "hashlib",
+    "install_package",
+    "io",
+    "is_secret_name",
+    "json",
+    "keyboard_press",
+    "keyboard_type",
+    "launch_approved_application",
+    "list_desktop_windows",
+    "list_ui_elements",
+    "max_transfer_bytes",
+    "mouse_click",
+    "mouse_drag",
+    "mouse_move",
+    "mouse_scroll",
+    "ocr_screen",
+    "os",
+    "perform_approved_ui_action",
+    "platform",
+    "press_hotkey",
+    "re",
+    "read_file",
+    "redact",
+    "run_linter",
+    "run_project_tests",
+    "run_shell",
+    "set_clipboard",
+    "set_of_marks_screenshot",
+    "shlex",
+    "shutil",
+    "subprocess",
+    "sys",
+    "terminal_exec",
+    "threading",
+    "time",
+    "update_fleet_agent",
+    "uuid",
+    "verify_screen_contains",
+    "wait_for_text",
+    "workspace_root",
+    "write_file",
+    "zipfile",
+]
 
 
 # --------------------------------------------------------------- tools package
@@ -150,8 +254,7 @@ def test_tools_monkeypatch_on_package_propagates_to_submodules(monkeypatch):
 def test_tools_monkeypatch_of_win32_action_reaches_mouse_click(monkeypatch):
     seen = []
 
-    def fake_win32(act, *, x=None, y=None, text=None, key=None, title=None,
-                   delta=-120, start_x=None, start_y=None):
+    def fake_win32(act, *, x=None, y=None, text=None, key=None, title=None, delta=-120, start_x=None, start_y=None):
         seen.append({"action": act, "x": x, "y": y})
         return {"action": act, "status": "ok"}
 
@@ -160,8 +263,7 @@ def test_tools_monkeypatch_of_win32_action_reaches_mouse_click(monkeypatch):
     from ai_bridge.policy import Policy
 
     p = Policy(allow_tier3=True, max_tier_unattended=3, desktop_enabled=True)
-    res = tools.mouse_click(x=100, y=200, button="left", clicks=1,
-                            approval_granted=True, policy=p)
+    res = tools.mouse_click(x=100, y=200, button="left", clicks=1, approval_granted=True, policy=p)
     assert res["status"] == "ok"
     assert seen[-1] == {"action": "click", "x": 100, "y": 200}
 
@@ -202,12 +304,8 @@ def test_registry_get_tier_and_tools_by_tier():
     assert get_tier("delete_workspace_file") == "HIGH_RISK"
     assert get_tier("no_such_tool") is None
     read_only = tools_by_tier("READ_ONLY")
-    assert set(read_only) == {
-        name for name, tier in TOOL_TIERS.items() if tier.name == "READ_ONLY"
-    }
-    assert tools_by_tier("HIGH_RISK") == [
-        name for name, tier in TOOL_TIERS.items() if tier.name == "HIGH_RISK"
-    ]
+    assert set(read_only) == {name for name, tier in TOOL_TIERS.items() if tier.name == "READ_ONLY"}
+    assert tools_by_tier("HIGH_RISK") == [name for name, tier in TOOL_TIERS.items() if tier.name == "HIGH_RISK"]
     assert tools_by_tier("NOPE") == []
 
 

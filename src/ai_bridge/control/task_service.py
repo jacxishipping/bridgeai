@@ -32,13 +32,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import time
 import uuid
 from typing import Any, Callable
 
 from fastapi import HTTPException
 
-from ..policy import Policy, TOOL_TIERS, decide, normalize_tool_name
+from ..policy import TOOL_TIERS, Policy, decide, normalize_tool_name
 from . import db as dbmod
 from . import plane_state
 

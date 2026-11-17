@@ -1,8 +1,6 @@
 """Unit tests for Windows GUI desktop automation (mouse, keyboard, window control)."""
 from __future__ import annotations
 
-import pytest
-
 from ai_bridge import server as mcp_server
 from ai_bridge import tools
 from ai_bridge.control.dispatch import dispatch

@@ -5,6 +5,7 @@ over the shared state via the ControlContext passed to the factory
 (see routers/_context.py). Paths, methods and response shapes are
 unchanged (see tests/unit/test_architecture_phase4_routers.py).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,11 +13,12 @@ import json
 import secrets
 import time
 
-from fastapi import APIRouter, Body, HTTPException, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 
-from .. import agent_channel, db as dbmod, plane_state, supervisor as supervisormod
-from ..app import DevicePolicyIn, MAX_RESULT_CHARS, TaskResultIn
-
+from .. import agent_channel, plane_state
+from .. import db as dbmod
+from .. import supervisor as supervisormod
+from ..app import MAX_RESULT_CHARS, DevicePolicyIn, TaskResultIn
 from ._context import ControlContext
 
 
@@ -36,7 +38,13 @@ def create_agent_router(ctx: ControlContext) -> APIRouter:
     reject_policy_widening = ctx.reject_policy_widening
 
     @router.post("/api/agent/heartbeat")
-    def heartbeat(request: Request, body: dict = Body(default={}), x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def heartbeat(
+        request: Request,
+        body: dict = Body(default={}),
+        x_device_token: str | None = Header(default=None),
+        x_client_cert_fingerprint: str | None = Header(default=None),
+        x_ssl_client_fingerprint: str | None = Header(default=None),
+    ):
         row = device_row(x_device_token)
         _require_agent_mtls(request, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         now_ts = dbmod.now()
@@ -113,7 +121,13 @@ def create_agent_router(ctx: ControlContext) -> APIRouter:
             row = device_row(token)
             from .. import device_mtls as _dmtls
 
-            _dmtls.require_device_mtls(conn, row["id"], _dmtls.extract_request_fingerprint(None, x_client_cert_fingerprint=websocket.headers.get("x-client-cert-fingerprint"), x_ssl_client_fingerprint=websocket.headers.get("x-ssl-client-fingerprint")))
+            _dmtls.require_device_mtls(
+                conn,
+                row["id"],
+                _dmtls.extract_request_fingerprint(
+                    None, x_client_cert_fingerprint=websocket.headers.get("x-client-cert-fingerprint"), x_ssl_client_fingerprint=websocket.headers.get("x-ssl-client-fingerprint")
+                ),
+            )
         except HTTPException as exc:
             await websocket.close(code=4401, reason=str(exc.detail)[:120])
             return
@@ -196,7 +210,12 @@ def create_agent_router(ctx: ControlContext) -> APIRouter:
         }
 
     @router.put("/api/agent/policy")
-    def update_agent_policy(body: DevicePolicyIn, x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def update_agent_policy(
+        body: DevicePolicyIn,
+        x_device_token: str | None = Header(default=None),
+        x_client_cert_fingerprint: str | None = Header(default=None),
+        x_ssl_client_fingerprint: str | None = Header(default=None),
+    ):
         row = device_row(x_device_token)
         _require_agent_mtls(None, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         policy_data = body.model_dump()
@@ -218,13 +237,12 @@ def create_agent_router(ctx: ControlContext) -> APIRouter:
         row = device_row(x_device_token)
         _require_agent_mtls(None, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         new_token = secrets.token_urlsafe(32)
-        issued = dbmod.now(); expires = issued + device_ttl_days * 86400
-        conn.execute("UPDATE devices SET token_hash=?, token_issued_at=?, token_expires_at=? WHERE id=?",
-                     (dbmod.hash_token(new_token), issued, expires, row["id"]))
+        issued = dbmod.now()
+        expires = issued + device_ttl_days * 86400
+        conn.execute("UPDATE devices SET token_hash=?, token_issued_at=?, token_expires_at=? WHERE id=?", (dbmod.hash_token(new_token), issued, expires, row["id"]))
         conn.commit()
         audit("device", row["id"], "rotate_token", {}, "allowed")
-        return {"device_id": row["id"], "device_token": new_token, "token_expires_at": expires,
-                "note": "Old token is invalid immediately. Store the new token securely."}
+        return {"device_id": row["id"], "device_token": new_token, "token_expires_at": expires, "note": "Old token is invalid immediately. Store the new token securely."}
 
     @router.get("/api/agent/tasks/next")
     async def next_task(
@@ -321,19 +339,16 @@ def create_agent_router(ctx: ControlContext) -> APIRouter:
         if ap:
             ap_row = conn.execute("SELECT status, expires_at, tool FROM approvals WHERE id=?", (ap,)).fetchone()
             now_ts = dbmod.now()
-            out["approval_granted"] = bool(
-                ap_row
-                and ap_row["status"] == "approved"
-                and (ap_row["expires_at"] is None or ap_row["expires_at"] > now_ts)
-                and ap_row["tool"] == out["tool"]
-            )
+            out["approval_granted"] = bool(ap_row and ap_row["status"] == "approved" and (ap_row["expires_at"] is None or ap_row["expires_at"] > now_ts) and ap_row["tool"] == out["tool"])
         else:
             out["approval_granted"] = False
         out["policy"] = get_effective_device_policy(row)
         return {"task": out}
 
     @router.get("/api/agent/tasks/{task_id}/execution-state")
-    def agent_task_execution_state(task_id: str, x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def agent_task_execution_state(
+        task_id: str, x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)
+    ):
         row = device_row(x_device_token)
         _require_agent_mtls(None, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         task = conn.execute("SELECT id, status, device_id FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -355,7 +370,13 @@ def create_agent_router(ctx: ControlContext) -> APIRouter:
 
     @router.post("/api/agent/tasks/{task_id}/progress")
     @router.post("/api/tasks/{task_id}/progress")
-    def task_progress(task_id: str, body: dict = Body(default={}), x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def task_progress(
+        task_id: str,
+        body: dict = Body(default={}),
+        x_device_token: str | None = Header(default=None),
+        x_client_cert_fingerprint: str | None = Header(default=None),
+        x_ssl_client_fingerprint: str | None = Header(default=None),
+    ):
         """DIST-08 agent progress heartbeat (liveness only).
 
         The agent POSTs ``{"task_id", "progress_pct", "status_message",
@@ -429,7 +450,13 @@ def create_agent_router(ctx: ControlContext) -> APIRouter:
         }
 
     @router.post("/api/agent/tasks/{task_id}/result")
-    def task_result(task_id: str, body: TaskResultIn, x_device_token: str | None = Header(default=None), x_client_cert_fingerprint: str | None = Header(default=None), x_ssl_client_fingerprint: str | None = Header(default=None)):
+    def task_result(
+        task_id: str,
+        body: TaskResultIn,
+        x_device_token: str | None = Header(default=None),
+        x_client_cert_fingerprint: str | None = Header(default=None),
+        x_ssl_client_fingerprint: str | None = Header(default=None),
+    ):
         row = device_row(x_device_token)
         _require_agent_mtls(None, row["id"], x_client_cert_fingerprint, x_ssl_client_fingerprint)
         task = conn.execute("SELECT * FROM tasks WHERE id=? AND device_id=?", (task_id, row["id"])).fetchone()
@@ -443,18 +470,12 @@ def create_agent_router(ctx: ControlContext) -> APIRouter:
             raise HTTPException(status_code=409, detail=f"Task is '{task['status']}'; results are only accepted while it is running (late result rejected).")
         # Screenshot results carry base64 image data; truncating them would
         # corrupt the image the model or dashboard receives.
-        result_cap = (
-            16_000_000
-            if task["tool"] in ("take_screenshot", "capture_desktop_screenshot", "capture_desktop_frame", "set_of_marks_screenshot")
-            else MAX_RESULT_CHARS
-        )
+        result_cap = 16_000_000 if task["tool"] in ("take_screenshot", "capture_desktop_screenshot", "capture_desktop_frame", "set_of_marks_screenshot") else MAX_RESULT_CHARS
         now_ts = dbmod.now()
         if body.epoch is not None:
-            _cur = conn.execute("UPDATE tasks SET status=?, result=?, updated_at=? WHERE id=? AND status='running' AND epoch=?",
-                         (body.status, body.result[:result_cap], now_ts, task_id, body.epoch))
+            _cur = conn.execute("UPDATE tasks SET status=?, result=?, updated_at=? WHERE id=? AND status='running' AND epoch=?", (body.status, body.result[:result_cap], now_ts, task_id, body.epoch))
         else:
-            _cur = conn.execute("UPDATE tasks SET status=?, result=?, updated_at=? WHERE id=? AND status='running'",
-                         (body.status, body.result[:result_cap], now_ts, task_id))
+            _cur = conn.execute("UPDATE tasks SET status=?, result=?, updated_at=? WHERE id=? AND status='running'", (body.status, body.result[:result_cap], now_ts, task_id))
         if _cur.rowcount != 1:
             raise HTTPException(status_code=409, detail="Stale result: the task is no longer running or the execution epoch does not match (late result rejected).")
         try:

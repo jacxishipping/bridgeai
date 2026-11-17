@@ -12,6 +12,7 @@ Rules:
 - The policy object is constructed from admin config only. Tool
   arguments can never widen it (see test_policy_bypass in tests).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ class RiskTier(IntEnum):
     SENSITIVE = 3
     HIGH_RISK = 4
 
+
 # R-P0-05 (Wave 1C): the five previously untiered MCP tools. `system_info`
 # is the MCP wrapper name for `get_system_info` (both READ_ONLY).
 # `interact_and_view_screen` is READ_ONLY as a composite *view* tool; the
@@ -34,27 +36,39 @@ class RiskTier(IntEnum):
 # itself, and every subsequent tool call is gated (see the exemption in
 # decide() below).
 TOOL_TIERS: dict[str, RiskTier] = {
-    "list_devices": RiskTier.READ_ONLY, "get_device_status": RiskTier.READ_ONLY,
-    "get_system_info": RiskTier.READ_ONLY, "system_info": RiskTier.READ_ONLY,
+    "list_devices": RiskTier.READ_ONLY,
+    "get_device_status": RiskTier.READ_ONLY,
+    "get_system_info": RiskTier.READ_ONLY,
+    "system_info": RiskTier.READ_ONLY,
     "view_live_screen": RiskTier.READ_ONLY,
     "interact_and_view_screen": RiskTier.READ_ONLY,
     "select_device": RiskTier.SENSITIVE,
     "browser_navigate_with_shot": RiskTier.SENSITIVE,
     "get_resource_usage": RiskTier.READ_ONLY,
     "get_network_info": RiskTier.READ_ONLY,
-    "list_workspace": RiskTier.READ_ONLY, "read_workspace_file": RiskTier.READ_ONLY,
+    "list_workspace": RiskTier.READ_ONLY,
+    "read_workspace_file": RiskTier.READ_ONLY,
     "read_file": RiskTier.READ_ONLY,
-    "search_workspace": RiskTier.READ_ONLY, "get_service_status": RiskTier.READ_ONLY,
-    "get_recent_logs": RiskTier.READ_ONLY, "list_processes": RiskTier.READ_ONLY,
-    "get_disk_usage": RiskTier.READ_ONLY, "get_memory_usage": RiskTier.READ_ONLY,
-    "list_docker_containers": RiskTier.READ_ONLY, "git_status": RiskTier.READ_ONLY,
-    "git_diff": RiskTier.READ_ONLY, "get_task_status": RiskTier.READ_ONLY,
-    "get_task_result": RiskTier.READ_ONLY, "get_desktop_status": RiskTier.READ_ONLY,
+    "search_workspace": RiskTier.READ_ONLY,
+    "get_service_status": RiskTier.READ_ONLY,
+    "get_recent_logs": RiskTier.READ_ONLY,
+    "list_processes": RiskTier.READ_ONLY,
+    "get_disk_usage": RiskTier.READ_ONLY,
+    "get_memory_usage": RiskTier.READ_ONLY,
+    "list_docker_containers": RiskTier.READ_ONLY,
+    "git_status": RiskTier.READ_ONLY,
+    "git_diff": RiskTier.READ_ONLY,
+    "get_task_status": RiskTier.READ_ONLY,
+    "get_task_result": RiskTier.READ_ONLY,
+    "get_desktop_status": RiskTier.READ_ONLY,
     "get_native_encode_status": RiskTier.READ_ONLY,
-    "create_workspace_file": RiskTier.LOW_RISK, "run_project_tests": RiskTier.LOW_RISK,
+    "create_workspace_file": RiskTier.LOW_RISK,
+    "run_project_tests": RiskTier.LOW_RISK,
     "run_linter": RiskTier.LOW_RISK,
-    "edit_workspace_file": RiskTier.SENSITIVE, "move_workspace_file": RiskTier.SENSITIVE,
-    "create_backup": RiskTier.SENSITIVE, "deploy_application": RiskTier.SENSITIVE,
+    "edit_workspace_file": RiskTier.SENSITIVE,
+    "move_workspace_file": RiskTier.SENSITIVE,
+    "create_backup": RiskTier.SENSITIVE,
+    "deploy_application": RiskTier.SENSITIVE,
     "capture_desktop_screenshot": RiskTier.SENSITIVE,
     "take_screenshot": RiskTier.SENSITIVE,
     "capture_desktop_frame": RiskTier.SENSITIVE,
@@ -85,10 +99,13 @@ TOOL_TIERS: dict[str, RiskTier] = {
     "get_clipboard": RiskTier.READ_ONLY,
     "set_clipboard": RiskTier.SENSITIVE,
     "install_package": RiskTier.SENSITIVE,
-    "run_shell": RiskTier.SENSITIVE, "write_file": RiskTier.SENSITIVE,
+    "run_shell": RiskTier.SENSITIVE,
+    "write_file": RiskTier.SENSITIVE,
     "terminal_exec": RiskTier.SENSITIVE,
-    "delete_workspace_file": RiskTier.HIGH_RISK, "submit_task": RiskTier.SENSITIVE,
-    "request_approval": RiskTier.LOW_RISK, "approve_task": RiskTier.HIGH_RISK,
+    "delete_workspace_file": RiskTier.HIGH_RISK,
+    "submit_task": RiskTier.SENSITIVE,
+    "request_approval": RiskTier.LOW_RISK,
+    "approve_task": RiskTier.HIGH_RISK,
     "cancel_task": RiskTier.LOW_RISK,
     # Canonical v1.0 MCP Computer-Use Toolset (Section 8) & v2.0 Extensions
     "desktop_get_screenshot": RiskTier.SENSITIVE,
@@ -194,9 +211,11 @@ def normalize_tool_name(tool: str) -> str:
     name = (tool or "").strip()
     return TOOL_ALIASES.get(name, name)
 
+
 @dataclass(frozen=True)
 class Policy:
     """Admin-owned policy. Frozen so tool code cannot mutate it at runtime."""
+
     allow_writes: bool = True
     allow_tier3: bool = False
     allowed_services: frozenset[str] = frozenset()
@@ -217,28 +236,32 @@ class Policy:
     def tier_of(self, tool: str) -> RiskTier | None:
         return TOOL_TIERS.get(normalize_tool_name(tool))
 
+
 @dataclass
 class Decision:
     allowed: bool
     needs_approval: bool = False
     reason: str = ""
 
-_WRITE_TOOLS = frozenset({
-    "create_workspace_file",
-    "edit_workspace_file",
-    "move_workspace_file",
-    "delete_workspace_file",
-    "create_backup",
-    "deploy_application",
-    "write_file",
-    "git_create_branch",
-    "git_checkpoint",
-    "git_commit",
-    "git_apply_patch",
-})
 
-def decide(policy: Policy, tool: str, *, approval_granted: bool = False,
-           device_revoked: bool = False, is_admin: bool = False) -> Decision:
+_WRITE_TOOLS = frozenset(
+    {
+        "create_workspace_file",
+        "edit_workspace_file",
+        "move_workspace_file",
+        "delete_workspace_file",
+        "create_backup",
+        "deploy_application",
+        "write_file",
+        "git_create_branch",
+        "git_checkpoint",
+        "git_commit",
+        "git_apply_patch",
+    }
+)
+
+
+def decide(policy: Policy, tool: str, *, approval_granted: bool = False, device_revoked: bool = False, is_admin: bool = False) -> Decision:
     if device_revoked:
         return Decision(False, reason="Device is revoked.")
     canonical = normalize_tool_name(tool)
@@ -258,8 +281,7 @@ def decide(policy: Policy, tool: str, *, approval_granted: bool = False,
     # `unrestricted` bypass below, so even a granted-unrestricted policy
     # cannot run Tier 4 without approval.
     if tier == RiskTier.HIGH_RISK and not (approval_granted and is_admin):
-        return Decision(False, needs_approval=True,
-                        reason="High-risk operation requires explicit human approval.")
+        return Decision(False, needs_approval=True, reason="High-risk operation requires explicit human approval.")
 
     # Unrestricted server mode bypasses tier & approval guardrails — but
     # ONLY when granted by an explicit, audited admin action (see
@@ -272,13 +294,38 @@ def decide(policy: Policy, tool: str, *, approval_granted: bool = False,
         return Decision(False, reason="Workspace writes are disabled by policy.")
     if tier == RiskTier.SENSITIVE:
         desktop_tools = {
-            "capture_desktop_screenshot", "capture_desktop_frame", "take_screenshot", "start_webrtc_stream", "launch_approved_application",
-            "perform_approved_ui_action", "mouse_click", "mouse_move", "mouse_scroll",
-            "mouse_drag", "keyboard_type", "keyboard_press", "press_hotkey", "focus_window",
-            "ocr_screen", "click_text", "click_element", "list_ui_elements", "set_of_marks_screenshot",
-            "wait_for_text", "verify_screen_contains", "execute_workflow",
-            "desktop_get_screenshot", "desktop_get_window_screenshot", "desktop_mouse_move", "desktop_click", "desktop_keyboard",
-            "desktop_scroll", "desktop_clipboard_set", "desktop_open_application", "desktop_wait", "desktop_verify_action",
+            "capture_desktop_screenshot",
+            "capture_desktop_frame",
+            "take_screenshot",
+            "start_webrtc_stream",
+            "launch_approved_application",
+            "perform_approved_ui_action",
+            "mouse_click",
+            "mouse_move",
+            "mouse_scroll",
+            "mouse_drag",
+            "keyboard_type",
+            "keyboard_press",
+            "press_hotkey",
+            "focus_window",
+            "ocr_screen",
+            "click_text",
+            "click_element",
+            "list_ui_elements",
+            "set_of_marks_screenshot",
+            "wait_for_text",
+            "verify_screen_contains",
+            "execute_workflow",
+            "desktop_get_screenshot",
+            "desktop_get_window_screenshot",
+            "desktop_mouse_move",
+            "desktop_click",
+            "desktop_keyboard",
+            "desktop_scroll",
+            "desktop_clipboard_set",
+            "desktop_open_application",
+            "desktop_wait",
+            "desktop_verify_action",
         }
         if canonical in desktop_tools and not policy.desktop_enabled:
             return Decision(False, reason="Desktop automation is not enabled.")
@@ -289,17 +336,18 @@ def decide(policy: Policy, tool: str, *, approval_granted: bool = False,
         # routing-only (it changes no device state) and every tool call
         # made after selecting a device is gated individually.
         if not (policy.allow_tier3 or policy.max_tier_unattended >= 3 or is_admin) and not approval_granted and canonical not in {"submit_task", "create_backup", "select_device"}:
-            return Decision(False, needs_approval=True,
-                            reason="Sensitive operation requires Tier-3 opt-in or approval.")
-        effective_ceiling = max(policy.max_tier_unattended, 3) if (policy.allow_tier3 or policy.max_tier_unattended >= 3 or is_admin or canonical in {"submit_task", "create_backup", "select_device"}) else policy.max_tier_unattended
+            return Decision(False, needs_approval=True, reason="Sensitive operation requires Tier-3 opt-in or approval.")
+        effective_ceiling = (
+            max(policy.max_tier_unattended, 3)
+            if (policy.allow_tier3 or policy.max_tier_unattended >= 3 or is_admin or canonical in {"submit_task", "create_backup", "select_device"})
+            else policy.max_tier_unattended
+        )
         if not is_admin and tier > effective_ceiling and not approval_granted:
-            return Decision(False, needs_approval=True,
-                            reason="Operation exceeds the unattended tier ceiling.")
+            return Decision(False, needs_approval=True, reason="Operation exceeds the unattended tier ceiling.")
     return Decision(True, reason=f"Allowed (tier {tier}).")
 
 
-def grant_unrestricted_policy(policy: Policy, *, granted_by: str,
-                              db_path: str | None = None) -> Policy:
+def grant_unrestricted_policy(policy: Policy, *, granted_by: str, db_path: str | None = None) -> Policy:
     """Grant `unrestricted` mode by an explicit, audited admin action.
 
     R-P0-02 (Wave 1C): this is the ONLY supported way to obtain an
@@ -338,8 +386,7 @@ def grant_unrestricted_policy(policy: Policy, *, granted_by: str,
     return granted
 
 
-def revoke_unrestricted_policy(policy: Policy, *, revoked_by: str,
-                               db_path: str | None = None) -> Policy:
+def revoke_unrestricted_policy(policy: Policy, *, revoked_by: str, db_path: str | None = None) -> Policy:
     """Revoke `unrestricted` mode (audited). Returns a restrictive copy."""
     actor = (revoked_by or "").strip()
     if not actor:

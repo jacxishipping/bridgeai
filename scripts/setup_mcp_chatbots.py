@@ -53,8 +53,8 @@ def register_client(base_url: str, admin_token: str, name: str, redirect_uris: l
 
 def generate_pkce() -> tuple[str, str]:
     """Generate PKCE code_verifier and code_challenge (S256)."""
-    import hashlib
     import base64
+    import hashlib
 
     verifier = base64.urlsafe_b64encode(
         secrets.token_bytes(32)

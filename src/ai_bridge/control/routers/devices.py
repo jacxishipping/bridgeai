@@ -5,6 +5,7 @@ over the shared state via the ControlContext passed to the factory
 (see routers/_context.py). Paths, methods and response shapes are
 unchanged (see tests/unit/test_architecture_phase4_routers.py).
 """
+
 from __future__ import annotations
 
 import json
@@ -12,12 +13,15 @@ import secrets
 import time
 import uuid
 
-from fastapi import APIRouter, Body, HTTPException, Header
+from fastapi import APIRouter, Body, Header, HTTPException
 
-from .. import db as dbmod, desktop_capabilities as desktop_capabilitiesmod, fleet_health as fleet_healthmod, plane_state, task_service as task_service_mod
 from ...policy import TOOL_TIERS
+from .. import db as dbmod
+from .. import desktop_capabilities as desktop_capabilitiesmod
+from .. import fleet_health as fleet_healthmod
+from .. import plane_state
+from .. import task_service as task_service_mod
 from ..app import DevicePolicyIn, DeviceRefreshIn, DeviceUpdateIn, EnrollIn
-
 from ._context import ControlContext
 
 
@@ -49,28 +53,33 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         tenant = resolve_request_tenant(body.tenant, x_admin_token, x_session_token)
         device_id = uuid.uuid4().hex[:12]
         device_token = secrets.token_urlsafe(32)
-        issued = dbmod.now(); expires = issued + device_ttl_days * 86400
+        issued = dbmod.now()
+        expires = issued + device_ttl_days * 86400
         initial_policy = "{}"
         if body.unrestricted is True or (isinstance(body.policy, dict) and body.policy.get("unrestricted")):
-            initial_policy = json.dumps({
-                "inherit_global": False,
-                "unrestricted": True,
-                "unrestricted_granted_by": actor,
-                "allow_writes": True,
-                "allow_tier3": True,
-                "desktop_enabled": True,
-                "allow_shell": True,
-                "allow_package_install": True,
-                "allow_file_deletion": True,
-                "max_tier_unattended": 4,
-                "allowed_apps": ["*"],
-                "allowed_services": ["*"],
-                "note": "Unrestricted Linux Server Policy (Auto-configured on enrollment)",
-            })
+            initial_policy = json.dumps(
+                {
+                    "inherit_global": False,
+                    "unrestricted": True,
+                    "unrestricted_granted_by": actor,
+                    "allow_writes": True,
+                    "allow_tier3": True,
+                    "desktop_enabled": True,
+                    "allow_shell": True,
+                    "allow_package_install": True,
+                    "allow_file_deletion": True,
+                    "max_tier_unattended": 4,
+                    "allowed_apps": ["*"],
+                    "allowed_services": ["*"],
+                    "note": "Unrestricted Linux Server Policy (Auto-configured on enrollment)",
+                }
+            )
         elif isinstance(body.policy, dict) and body.policy:
             initial_policy = json.dumps(body.policy)
-        conn.execute("INSERT INTO devices (id, name, hostname, os, tenant, token_hash, created_at, token_issued_at, token_expires_at, policy_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                     (device_id, body.name, body.hostname, body.os, tenant, dbmod.hash_token(device_token), issued, issued, expires, initial_policy))
+        conn.execute(
+            "INSERT INTO devices (id, name, hostname, os, tenant, token_hash, created_at, token_issued_at, token_expires_at, policy_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (device_id, body.name, body.hostname, body.os, tenant, dbmod.hash_token(device_token), issued, issued, expires, initial_policy),
+        )
         conn.commit()
         from .. import device_mtls
 
@@ -85,15 +94,19 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         if body.unrestricted is True or (isinstance(body.policy, dict) and body.policy.get("unrestricted")):
             try:
                 from ... import audit_writer as _audit_writer
-                _audit_writer.write_audit_event(actor=actor, action="policy.unrestricted_granted", device_id=device_id,
-                                                details={"granted_by": actor, "tenant": tenant})
+
+                _audit_writer.write_audit_event(actor=actor, action="policy.unrestricted_granted", device_id=device_id, details={"granted_by": actor, "tenant": tenant})
             except Exception:
                 pass
         # Token is shown exactly once here; only its hash is stored.
-        return {"device_id": device_id, "device_token": device_token, "token_expires_at": expires,
-                "token_ttl_days": device_ttl_days,
-                "mtls_fingerprint": enrolled_fp,
-                "note": "Store the device token securely; it will not be shown again. It expires and must be rotated."}
+        return {
+            "device_id": device_id,
+            "device_token": device_token,
+            "token_expires_at": expires,
+            "token_ttl_days": device_ttl_days,
+            "mtls_fingerprint": enrolled_fp,
+            "note": "Store the device token securely; it will not be shown again. It expires and must be rotated.",
+        }
 
     @router.get("/api/devices", summary="List devices", description="Lists all devices in the fleet with their status, metadata, and live telemetry.")
     def list_devices(x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None), tenant: str | None = None):
@@ -102,7 +115,8 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         rows = conn.execute(
             "SELECT d.id, d.name, d.hostname, d.os, d.tenant, d.status, d.last_seen, d.revoked, d.created_at, "
             "d.token_expires_at, d.policy_json, m.group_name, m.tags_json FROM devices d "
-            "LEFT JOIN device_metadata m ON m.device_id=d.id WHERE d.tenant=?", (tenant,),
+            "LEFT JOIN device_metadata m ON m.device_id=d.id WHERE d.tenant=?",
+            (tenant,),
         ).fetchall()
         result = []
         for r in rows:
@@ -155,8 +169,8 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
             policy_json = json.dumps(_stamped)
             try:
                 from ... import audit_writer as _audit_writer
-                _audit_writer.write_audit_event(actor=actor, action="policy.unrestricted_granted", device_id=device_id,
-                                                details={"granted_by": actor, "tenant": _row_tenant(row)})
+
+                _audit_writer.write_audit_event(actor=actor, action="policy.unrestricted_granted", device_id=device_id, details={"granted_by": actor, "tenant": _row_tenant(row)})
             except Exception:
                 pass
         conn.execute(
@@ -210,16 +224,15 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
             custom = {}
         all_tools = []
         for tool_name, tier_enum in sorted(TOOL_TIERS.items()):
-            is_allowed = (
-                tool_name not in effective.get("denied_tools", [])
-                and (effective.get("allowed_tools") is None or tool_name in effective["allowed_tools"])
+            is_allowed = tool_name not in effective.get("denied_tools", []) and (effective.get("allowed_tools") is None or tool_name in effective["allowed_tools"])
+            all_tools.append(
+                {
+                    "tool": tool_name,
+                    "tier": tier_enum.value,
+                    "tier_name": tier_enum.name,
+                    "allowed": is_allowed,
+                }
             )
-            all_tools.append({
-                "tool": tool_name,
-                "tier": tier_enum.value,
-                "tier_name": tier_enum.name,
-                "allowed": is_allowed,
-            })
         return {
             "device_id": device_id,
             "device_name": row["name"],
@@ -233,7 +246,9 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         }
 
     @router.put("/api/devices/{device_id}/policy")
-    def set_device_policy_api(device_id: str, body: DevicePolicyIn, x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None), x_device_token: str | None = Header(default=None)):
+    def set_device_policy_api(
+        device_id: str, body: DevicePolicyIn, x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None), x_device_token: str | None = Header(default=None)
+    ):
         if x_device_token:
             dev_row = device_row(x_device_token)
             if dev_row["id"] != device_id:
@@ -251,8 +266,8 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
             policy_data["unrestricted_granted_by"] = actor
             try:
                 from ... import audit_writer as _audit_writer
-                _audit_writer.write_audit_event(actor=actor, action="policy.unrestricted_granted", device_id=device_id,
-                                                details={"granted_by": actor, "tenant": _row_tenant(row)})
+
+                _audit_writer.write_audit_event(actor=actor, action="policy.unrestricted_granted", device_id=device_id, details={"granted_by": actor, "tenant": _row_tenant(row)})
             except Exception:
                 pass
         conn.execute("UPDATE devices SET policy_json=? WHERE id=?", (json.dumps(policy_data), device_id))
@@ -261,7 +276,9 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         return get_device_policy_api(device_id, x_admin_token, x_session_token)
 
     @router.delete("/api/devices/{device_id}/policy")
-    def reset_device_policy_api(device_id: str, x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None), x_device_token: str | None = Header(default=None)):
+    def reset_device_policy_api(
+        device_id: str, x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None), x_device_token: str | None = Header(default=None)
+    ):
         # Only an administrator may remove a device policy: resetting to the
         # (possibly wider) global policy is a privilege increase.
         actor = require_role("admin", x_admin_token, x_session_token)
@@ -370,12 +387,14 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
             try:
                 p_args = json.loads(pr["args_json"] or "{}")
                 p_res = json.loads(pr["result"] or "{}") if pr["result"] else {}
-                packages_installed.append({
-                    "package_id": p_args.get("package_id"),
-                    "version": p_args.get("version") or p_res.get("version"),
-                    "manager": p_res.get("manager", "package"),
-                    "updated_at": pr["updated_at"],
-                })
+                packages_installed.append(
+                    {
+                        "package_id": p_args.get("package_id"),
+                        "version": p_args.get("version") or p_res.get("version"),
+                        "manager": p_res.get("manager", "package"),
+                        "updated_at": pr["updated_at"],
+                    }
+                )
             except Exception:
                 pass
 
@@ -439,11 +458,13 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
             try:
                 rp = json.loads(rhr["result"] or "{}")
                 if "cpu_percent" in rp and rp["cpu_percent"] is not None:
-                    res_history.append({
-                        "cpu_percent": rp.get("cpu_percent"),
-                        "memory_percent": rp.get("memory_percent"),
-                        "updated_at": rhr["updated_at"],
-                    })
+                    res_history.append(
+                        {
+                            "cpu_percent": rp.get("cpu_percent"),
+                            "memory_percent": rp.get("memory_percent"),
+                            "updated_at": rhr["updated_at"],
+                        }
+                    )
             except Exception:
                 pass
 
@@ -511,11 +532,19 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
                 continue
 
             created = task_service_mod.create_task(
-                conn, actor=actor, role="operator", tenant=row["tenant"],
-                device_id=device_id, tool=tool_name, args={},
-                human_initiated=False, device_row=row,
+                conn,
+                actor=actor,
+                role="operator",
+                tenant=row["tenant"],
+                device_id=device_id,
+                tool=tool_name,
+                args={},
+                human_initiated=False,
+                device_row=row,
                 get_effective_device_policy=get_effective_device_policy,
-                get_current_policy=get_current_policy, notify=None, audit_fn=audit,
+                get_current_policy=get_current_policy,
+                notify=None,
+                audit_fn=audit,
             )
             queued.append({"task_id": created["task_id"], "tool": tool_name, "status": created["status"]})
 
@@ -582,14 +611,16 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
                 if tel_data.get("disk_percent") is not None:
                     disk_vals.append(tel_data["disk_percent"])
 
-            device_summaries.append({
-                "id": d["id"],
-                "name": d["name"],
-                "os": d["os"],
-                "is_online": is_online,
-                "last_seen": d["last_seen"],
-                "telemetry": tel_data,
-            })
+            device_summaries.append(
+                {
+                    "id": d["id"],
+                    "name": d["name"],
+                    "os": d["os"],
+                    "is_online": is_online,
+                    "last_seen": d["last_seen"],
+                    "telemetry": tel_data,
+                }
+            )
 
         avg_cpu = round(sum(cpu_vals) / len(cpu_vals), 1) if cpu_vals else None
         avg_mem = round(sum(mem_vals) / len(mem_vals), 1) if mem_vals else None
@@ -630,9 +661,7 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         from .. import durable_ratelimit as drl
 
         payload["rate_limit_backend"] = drl.backend_name(conn)
-        payload["native_encode"] = __import__(
-            "ai_bridge.native_encode", fromlist=["describe_native_encode"]
-        ).describe_native_encode()
+        payload["native_encode"] = __import__("ai_bridge.native_encode", fromlist=["describe_native_encode"]).describe_native_encode()
         audit(actor, "", "fleet_desktop_capabilities_view", {}, "allowed")
         return payload
 
@@ -643,6 +672,7 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
     ):
         require_role("viewer", x_admin_token, x_session_token)
         import subprocess
+
         git_commit = "unknown"
         git_branch = "main"
         try:
@@ -670,8 +700,12 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
     ):
         actor = require_role("admin", x_admin_token, x_session_token)
         from ... import updates as _updatesmod
+
         if not _updatesmod.signed_update_configured():
-            raise HTTPException(status_code=409, detail="Signed fleet updates are not configured (set AI_BRIDGE_UPDATE_MANIFEST_PATH, AI_BRIDGE_UPDATE_SIGNATURE_PATH and AI_BRIDGE_UPDATE_PUBLIC_KEY); refusing unsigned fleet update.")
+            raise HTTPException(
+                status_code=409,
+                detail="Signed fleet updates are not configured (set AI_BRIDGE_UPDATE_MANIFEST_PATH, AI_BRIDGE_UPDATE_SIGNATURE_PATH and AI_BRIDGE_UPDATE_PUBLIC_KEY); refusing unsigned fleet update.",
+            )
         if device_id == "local":
             try:
                 res = _execute_workflow_step_sync("update_fleet_agent", {}, "local", "default", f"manual_update:{actor}")
@@ -685,11 +719,19 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
             raise HTTPException(status_code=404, detail="Device not found.")
         _require_row_tenant(dev_row, x_admin_token, x_session_token)
         created = task_service_mod.create_task(
-            conn, actor=actor, role="admin", tenant=_row_tenant(dev_row),
-            device_id=device_id, tool="update_fleet_agent", args={},
-            human_initiated=False, device_row=dev_row,
+            conn,
+            actor=actor,
+            role="admin",
+            tenant=_row_tenant(dev_row),
+            device_id=device_id,
+            tool="update_fleet_agent",
+            args={},
+            human_initiated=False,
+            device_row=dev_row,
             get_effective_device_policy=get_effective_device_policy,
-            get_current_policy=get_current_policy, notify=notify_tasks, audit_fn=audit,
+            get_current_policy=get_current_policy,
+            notify=notify_tasks,
+            audit_fn=audit,
         )
         audit(actor, device_id, "update_device_agent", {"task_id": created["task_id"], "status": created["status"]}, created["status"], tenant=dev_row["tenant"])
         return {"device_id": device_id, "status": created["status"], "task_id": created["task_id"]}

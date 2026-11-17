@@ -16,7 +16,7 @@ import os
 import re
 from typing import Any
 
-from fastapi import Header, HTTPException, Request
+from fastapi import HTTPException, Request
 
 
 def device_mtls_enabled() -> bool:

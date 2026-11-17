@@ -104,6 +104,7 @@ def _native_agent_e2e(admin_token: str, db_path: Path, desktop_exe: Path, contro
     """
     import socket
     import threading
+
     from uvicorn import Config, Server
 
     from ai_bridge.control.app import create_app

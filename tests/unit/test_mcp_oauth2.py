@@ -5,13 +5,11 @@ import json
 import time
 import urllib.parse
 
-from fastapi.testclient import TestClient
-
 from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
 
 from ai_bridge.control import mcp_oauth
 from ai_bridge.control.app import create_app
-
 
 ADMIN = "test-admin-token-oauth2"
 
