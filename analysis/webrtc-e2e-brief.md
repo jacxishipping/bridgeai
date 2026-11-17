@@ -292,12 +292,23 @@ by Cloudflare's edge in front of Render, not by the plane's FastAPI code
 (which would answer 4401 after accepting, per the protocol in §2) and not
 by the sandbox egress proxy (its own CONNECT 403 has a different signature:
 JSON, 81 bytes). Whether Cloudflare blocks WS upgrades to this host for
-everyone or only for datacenter-egress IPs is NOT settled from this VM: a
-cloud-browser WS probe (different egress) is running to decide it — if it
-gets 4401, the plane's ticket auth works and the block is this VM's egress;
-if it also gets 403/1006, Cloudflare blocks WS to this host generally,
-which would be a staging-deployment finding (live desktop streaming would
-be unreachable for all browser peers).
+everyone or only for datacenter-egress IPs is NOT settled from this VM.
+Two cloud-browser probe attempts both failed to produce a verdict, for
+reasons unrelated to the plane:
+- Attempt 1 (17 Nov 2026 ~13:13–13:16 UTC): the cloud browser could not open
+  DevTools by automation (no console access), and the self-running probe page
+  hosted on Muse file storage (`muse.ai/files/…/ws-probe.html`) was blocked
+  by the browser's organization policy ("Your organization doesn't allow you
+  to view this site").
+- Attempt 2 (~13:23 UTC): the same probe page served from jsDelivr
+  (`cdn.jsdelivr.net/gh/jacxishipping/bridgeai@main/analysis/ws-probe.html`)
+  loaded but rendered as raw text — jsDelivr serves `.html` as `text/plain`,
+  so the script never ran.
+The probe page itself is committed at `analysis/ws-probe.html` (GitHub main
+`8bc86c2`). The question stays open; the two remaining routes are (a) a WS
+probe from farhan (different network, needs the production admin token
+re-supplied for one MCP call) or (b) James running the one-line probe in his
+own browser's DevTools console (see the 5C close-out message, 17 Nov 2026).
 
 ### 7.4 What 5C actually proves, and what stays open
 PROVEN (real browser peer, real plane): signalling plane over HTTPS works
@@ -311,10 +322,10 @@ PASS) — still impossible on staging with no Windows agent attached.
 The WS criteria are therefore **NOT VERIFIED (environment/deployment
 blocked)**, not "the plane failed" — the harness records them as FAIL
 because its verdict logic cannot distinguish the two, and this addendum is
-the correction. If the cloud-browser probe clears the plane, 5C can close
-with the WS criteria verified from that vantage point; if it confirms a
-general Cloudflare block, the WS gate needs a different deployment or
-network path to verify, and 5C stays partially open.
+the correction. 5C closes with the WS criteria unverified; they can be
+re-opened if a farhan probe or a browser run by James clears the plane, or
+if a general Cloudflare block is confirmed, the WS gate needs a different
+deployment or network path to verify.
 
 ### 7.5 Still unverified after this run
 - Everything the harness does inside a real browser: `RTCPeerConnection`
