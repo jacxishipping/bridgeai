@@ -25,5 +25,5 @@ echo "== verify: restored DB table counts (expect migrations=15)"
 psql "$RESTORE_DSN" -t -c "SELECT 'migrations', count(*) FROM schema_migrations UNION ALL SELECT 'users', count(*) FROM users UNION ALL SELECT 'devices', count(*) FROM devices UNION ALL SELECT 'tasks', count(*) FROM tasks UNION ALL SELECT 'sessions', count(*) FROM sessions UNION ALL SELECT 'approvals', count(*) FROM approvals;"
 
 echo "== cleanup: drop drill DB"
-dropdb "$RESTORE_DSN"
+python3 scripts/backup_restore.py drop --pg-dsn "$RESTORE_DSN"
 echo "DRILL OK"

@@ -121,6 +121,34 @@ def backup_postgres(dsn: str, out_path: Path, fmt: str = "c") -> None:
           "Verify with a restore drill before relying on it.")
 
 
+def _pg_conn_args(dsn: str) -> tuple[list[str], dict[str, str], str]:
+    """Split a Postgres DSN into createdb/dropdb arguments.
+
+    createdb/dropdb take a literal database NAME, not a conninfo string:
+    passing a full DSN makes them connect to the default (local-socket)
+    host instead of the DSN's host. Parse the DSN and pass -h/-p/-U
+    explicitly, with the password via PGPASSWORD (never in argv, so it
+    is never printed by _redact).
+    """
+    from urllib.parse import unquote, urlsplit
+
+    u = urlsplit(dsn)
+    args: list[str] = []
+    env: dict[str, str] = {}
+    if u.hostname:
+        args += ["-h", u.hostname]
+    if u.port:
+        args += ["-p", str(u.port)]
+    if u.username:
+        args += ["-U", unquote(u.username)]
+    if u.password:
+        env["PGPASSWORD"] = unquote(u.password)
+    dbname = (u.path or "/").lstrip("/")
+    if not dbname:
+        raise SystemExit("DSN has no database name")
+    return args, env, dbname
+
+
 def _createdb(dsn: str) -> None:
     """Create the target database, tolerating 'already exists'.
 
@@ -130,10 +158,28 @@ def _createdb(dsn: str) -> None:
     """
     if shutil.which("createdb") is None:
         raise SystemExit("createdb not found on PATH")
-    print("+ createdb " + _redact([dsn]))
-    result = subprocess.run(["createdb", dsn], capture_output=True, text=True)
+    conn_args, extra_env, dbname = _pg_conn_args(dsn)
+    cmd = ["createdb"] + conn_args + [dbname]
+    print("+ " + _redact(cmd))
+    env = dict(os.environ)
+    env.update(extra_env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.returncode != 0 and "already exists" not in (result.stderr or ""):
         raise SystemExit(f"createdb failed: {result.stderr.strip()}")
+
+
+def _dropdb(dsn: str) -> None:
+    """Drop the database named by ``dsn``, tolerating 'does not exist'."""
+    if shutil.which("dropdb") is None:
+        raise SystemExit("dropdb not found on PATH")
+    conn_args, extra_env, dbname = _pg_conn_args(dsn)
+    cmd = ["dropdb"] + conn_args + [dbname]
+    print("+ " + _redact(cmd))
+    env = dict(os.environ)
+    env.update(extra_env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if result.returncode != 0 and "does not exist" not in (result.stderr or ""):
+        raise SystemExit(f"dropdb failed: {result.stderr.strip()}")
 
 
 def restore_postgres(dump_path: Path, dsn: str, fmt: str = "c") -> None:
@@ -172,7 +218,13 @@ def main(argv: list[str] | None = None) -> int:
     p_restore.add_argument("--pg-dump", type=Path, help="pg_dump file to restore")
     p_restore.add_argument("--pg-dsn", help="target Postgres DSN")
     p_restore.add_argument("--pg-format", choices=["c", "p"], default="c")
+    p_drop = sub.add_parser("drop", help="drop a Postgres database named by DSN")
+    p_drop.add_argument("--pg-dsn", required=True, help="Postgres DSN of the DB to drop")
     args = parser.parse_args(argv)
+
+    if args.command == "drop":
+        _dropdb(args.pg_dsn)
+        return 0
 
     if args.command == "backup":
         if args.pg_dsn:
