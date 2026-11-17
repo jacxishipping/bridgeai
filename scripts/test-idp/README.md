@@ -15,7 +15,10 @@ flow works across workers on staging. It is not production auth:
 
 Deploy: Render web service `ai-bridge-test-idp`, free plan, Docker,
 repo `jacxishipping/bridgeai`, branch `main`,
-dockerfilePath `scripts/test-idp/Dockerfile`, dockerContext `.`,
+dockerfilePath `scripts/test-idp/Dockerfile`, dockerContext `scripts/test-idp`
+(COPY paths in the Dockerfile are context-relative: with context `.` the
+first create failed at build time with `"/dex.yaml": not found` /
+`"/entrypoint.sh": not found` — the context MUST be `scripts/test-idp`),
 env `DEX_CLIENT_SECRET` + `DEX_TEST_PASSWORD_HASH` (from
 `test-idp-credentials.json`).
 Issuer: `https://ai-bridge-test-idp.onrender.com`.
