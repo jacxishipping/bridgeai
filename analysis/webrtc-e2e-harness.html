@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Bridge WebRTC E2E Harness (Wave 5C)</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 1.4em; } h2 { font-size: 1.1em; margin-top: 28px; }
+  label { display: block; margin: 8px 0 2px; font-weight: 600; font-size: 0.9em; }
+  input, select { width: 100%; padding: 8px; font-size: 0.95em; box-sizing: border-box; }
+  button { padding: 10px 18px; font-size: 1em; margin: 12px 8px 0 0; cursor: pointer; }
+  #log, #results { background: #111; color: #d6ffd6; padding: 12px; white-space: pre-wrap; word-break: break-word; font-family: monospace; font-size: 0.85em; max-height: 420px; overflow: auto; }
+  #results { color: #d6e6ff; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  th, td { border: 1px solid #999; padding: 6px 8px; text-align: left; font-size: 0.9em; vertical-align: top; }
+  .pass { color: #0a7a0a; font-weight: 700; } .fail { color: #b00000; font-weight: 700; }
+  .skip { color: #666; font-weight: 700; } .warn { color: #8a6d00; font-weight: 700; }
+  #verdict { font-size: 1.25em; font-weight: 800; padding: 12px; border: 2px solid #333; margin-top: 12px; }
+  .note { background: #fff8e1; border-left: 4px solid #d4a017; padding: 10px; font-size: 0.92em; }
+  video { width: 640px; max-width: 100%; background: #000; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h1>AI Bridge WebRTC End-to-End Harness — Wave 5C (real browser peer)</h1>
+<div class="note">
+  <b>What this proves.</b> This page is a <i>viewer</i> peer (the same role as the dashboard's
+  LiveDesktopView): it creates a v1 session, waits for the <b>agent-originated SDP offer</b>,
+  answers it, trickles ICE, opens the ticket-authenticated signalling WebSocket, and — only if a
+  real agent posts an offer — negotiates a peer connection and counts decoded video frames.
+  <b>The plane has no media peer of its own</b>: there is no aiortc peer connection on the
+  control plane for remote devices, and no synthetic/test video source exists. So if no agent
+  is attached, the honest outcome is <b>negotiation attempted + clean no-source handling</b>,
+  never a fabricated frame. The verdict reflects that: see the criteria table.
+  <br><b>Secrets:</b> the admin token and stream ticket are typed/pasted at runtime, used only
+  in request headers / the WS URL, and are <b>never written to the log or the results JSON</b>.
+  <br><b>CORS:</b> the plane allowlists only <code>http://localhost:5173</code>,
+  <code>http://127.0.0.1:5173</code>, <code>https://jxiptvplayer.app</code> and
+  <code>https://ai-bridge-dashboard.onrender.com</code>. <b>Serve this file from port 5173</b>
+  (e.g. <code>python3 -m http.server 5173</code> in this directory) — any other origin gets
+  <code>400 Disallowed CORS origin</code> on preflight and every authenticated call fails.
+</div>
+
+<h2>1. Inputs</h2>
+<label for="plane">Plane base URL</label>
+<input id="plane" value="https://ai-bridge-staging-plane.onrender.com">
+<label for="token">Staging admin token (paste at runtime — never saved, never logged)</label>
+<input id="token" type="password" autocomplete="off" placeholder="paste staging admin token here">
+<label for="device">Device</label>
+<select id="device"><option value="">— click “List devices” first —</option></select>
+<label for="mode">Session mode</label>
+<select id="mode"><option value="view_only" selected>view_only (safest — no input)</option><option value="ai_assisted">ai_assisted</option></select>
+<label for="wait">Offer-wait window (seconds to wait for the agent's SDP offer)</label>
+<input id="wait" type="number" value="20" min="5" max="120">
+<p>
+  <button id="btnList">List devices</button>
+  <button id="btnRun">Run full test</button>
+  <button id="btnStop">Stop / terminate session</button>
+  <button id="btnCopy">Copy results JSON</button>
+</p>
+
+<h2>2. Verdict</h2>
+<div id="verdict">NOT RUN YET</div>
+
+<h2>3. Criteria</h2>
+<table id="criteria"><tr><th>Criterion</th><th>Result</th><th>Detail</th></tr></table>
+
+<h2>4. Remote video (only if a real agent negotiates)</h2>
+<video id="remoteVideo" autoplay playsinline muted controls></video>
+<div id="videoInfo">No track received yet.</div>
+
+<h2>5. Log</h2>
+<pre id="log"></pre>
+
+<h2>6. Results JSON (copy this into the report)</h2>
+<pre id="results">{}</pre>
+
+<script>
+"use strict";
+/* AI Bridge WebRTC E2E harness — Wave 5C. Plain JS, no dependencies.
+   Viewer flow mirrors apps/dashboard/src/views/LiveDesktopView.tsx
+   handleStartWebrtc + apps/dashboard/src/api.ts:
+     POST /api/v1/sessions -> poll GET /api/v1/sessions/{id} for offer_sdp
+     -> RTCPeerConnection(ice_servers) -> setRemoteDescription(offer)
+     -> createAnswer -> POST /api/v1/sessions/{id}/answer
+     -> onicecandidate -> POST /api/v1/sessions/{id}/ice
+     -> POST /api/stream-ticket -> WS wss://.../api/v1/ws/sessions/{id}?ticket=...
+   Auth: X-Admin-Token header (Bearer also accepted via server middleware).
+   NEVER log the token or any ticket value. */
+
+const $ = (id) => document.getElementById(id);
+const startedAt = Date.now();
+const results = {
+  harness: "webrtc-e2e-harness wave5c",
+  plane: "",
+  started_at_iso: new Date().toISOString(),
+  device: null,
+  session_id: null,
+  criteria: {},
+  events: [],
+  verdict: "NOT RUN YET",
+  video: { track_received: false, frames_presented: 0, frames_decoded: null, width: 0, height: 0 },
+  ws: {},
+};
+let pc = null, ws = null, sessionId = null, deviceId = null;
+let presentedFrames = 0, lastPresentedTs = -1, distinctPresented = 0;
+
+function ts() { return ((Date.now() - startedAt) / 1000).toFixed(1) + "s"; }
+function log(msg) {
+  const line = "[" + ts() + "] " + msg;
+  $("log").textContent += line + "\n";
+  $("log").scrollTop = $("log").scrollHeight;
+  results.events.push(line);
+}
+function setCriterion(id, label, status, detail) {
+  // status: PASS | FAIL | SKIP | WARN
+  results.criteria[id] = { label, status, detail: String(detail || "") };
+  renderCriteria();
+  renderResults();
+  log("CRITERION " + id + ": " + status + " — " + detail);
+}
+function renderCriteria() {
+  const rows = Object.entries(results.criteria).map(([id, c]) =>
+    "<tr><td><b>" + id + "</b><br>" + esc(c.label) + "</td><td class='" +
+    (c.status === "PASS" ? "pass" : c.status === "FAIL" ? "fail" : c.status === "WARN" ? "warn" : "skip") +
+    "'>" + c.status + "</td><td>" + esc(c.detail) + "</td></tr>").join("");
+  $("criteria").innerHTML = "<tr><th>Criterion</th><th>Result</th><th>Detail</th></tr>" + rows;
+}
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function renderResults() { $("results").textContent = JSON.stringify(results, null, 2); }
+function setVerdict(v) { results.verdict = v; $("verdict").textContent = v; renderResults(); }
+
+function plane() { return $("plane").value.trim().replace(/\/+$/, ""); }
+function token() { return $("token").value.trim(); }
+function headers(extra) {
+  // Admin token goes in a header only. (The server also normalises
+  // `Authorization: Bearer <token>` to X-Admin-Token; we send the header
+  // form directly, exactly like the dashboard's api.ts call().)
+  return Object.assign({ "X-Admin-Token": token(), "Content-Type": "application/json" }, extra || {});
+}
+
+async function api(method, path, body, timeoutMs) {
+  const url = plane() + path;
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), timeoutMs || 15000);
+  try {
+    const res = await fetch(url, {
+      method, headers: headers(), body: body === undefined ? undefined : JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    const text = await res.text();
+    let json = null; try { json = JSON.parse(text); } catch (e) { /* non-JSON body */ }
+    return { status: res.status, ok: res.ok, json, text: text.slice(0, 600) };
+  } catch (e) {
+    // A CORS preflight rejection surfaces here as TypeError "Failed to fetch".
+    return { status: 0, ok: false, json: null, text: "NETWORK/CORS ERROR: " + (e && e.message ? e.message : e) +
+      " — if this is a preflight failure, this page is NOT served from an allowlisted origin (use http://localhost:5173)." };
+  } finally { clearTimeout(to); }
+}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function redactTicketInfo(t) { return t ? "<ticket-redacted, len " + t.length + ">" : "<none>"; }
+
+async function listDevices() {
+  results.plane = plane();
+  if (!token()) { log("ERROR: paste the staging admin token first."); return; }
+  log("GET /health ...");
+  const h = await api("GET", "/health", undefined, 15000);
+  log("health -> HTTP " + h.status + " " + h.text.slice(0, 200));
+  setCriterion("health", "Plane /health returns 200 {status:ok}",
+    h.status === 200 ? "PASS" : "FAIL", "HTTP " + h.status + " " + h.text.slice(0, 160));
+  if (h.status !== 200) return;
+  log("GET /api/devices ...");
+  const d = await api("GET", "/api/devices", undefined, 20000);
+  log("devices -> HTTP " + d.status);
+  if (!d.ok || !Array.isArray(d.json)) {
+    setCriterion("devices_list", "Device list retrievable", "FAIL", "HTTP " + d.status + " " + d.text.slice(0, 200));
+    return;
+  }
+  const devs = d.json;
+  setCriterion("devices_list", "Device list retrievable", "PASS",
+    devs.length + " device(s): " + devs.map((x) => (x.name || x.id) + " [" + (x.os || "?") + "/" + (x.status || "?") + "]").join(", "));
+  results.device = { count: devs.length, devices: devs.map((x) => ({ id: x.id, name: x.name, os: x.os, status: x.status })) };
+  const sel = $("device");
+  sel.innerHTML = "";
+  devs.forEach((x) => {
+    const o = document.createElement("option");
+    o.value = x.id; o.textContent = (x.name || x.id) + " — " + (x.os || "?") + " / " + (x.status || "?");
+    sel.appendChild(o);
+  });
+  log("Devices loaded: " + devs.length + ". Pick one and press Run full test.");
+}
+
+function wsConnect(url, timeoutMs) {
+  // Resolves {opened, snapshot, pong, closeCode, closeReason, error}
+  // or rejects on timeout. The server closes unauthenticated sockets
+  // with code 4401; a good socket first sends a session_snapshot.
+  return new Promise((resolve) => {
+    const out = { opened: false, snapshot: null, pong: null, closeCode: null, closeReason: "", error: null };
+    let done = false;
+    const finish = () => { if (!done) { done = true; try { s.close(); } catch (e) {} resolve(out); } };
+    const timer = setTimeout(() => { out.error = "timeout after " + timeoutMs + "ms"; finish(); }, timeoutMs);
+    let s;
+    try { s = new WebSocket(url); } catch (e) { out.error = "WebSocket constructor: " + e; clearTimeout(timer); resolve(out); return; }
+    s.onopen = () => { out.opened = true; log("WS open, sending ping..."); try { s.send(JSON.stringify({ type: "ping", client_ts_ms: Date.now() })); } catch (e) {} };
+    s.onmessage = (ev) => {
+      let m = null; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === "session_snapshot") { out.snapshot = { status: m.session && m.session.status, has_offer: !!(m.session && (m.session.offer_sdp || (m.session.offer && m.session.offer.sdp))) }; log("WS session_snapshot: status=" + out.snapshot.status + " has_offer=" + out.snapshot.has_offer); }
+      else if (m.type === "pong") { out.pong = { server_ts_ms: m.server_ts_ms }; log("WS pong received (server_ts_ms=" + m.server_ts_ms + ")"); clearTimeout(timer); finish(); }
+      else { log("WS message: " + m.type); }
+    };
+    s.onclose = (ev) => { out.closeCode = ev.code; out.closeReason = ev.reason || ""; log("WS closed code=" + ev.code + (ev.reason ? " reason=" + ev.reason : "")); clearTimeout(timer); finish(); };
+    s.onerror = () => { out.error = out.error || "websocket error (see close code)"; };
+  });
+}
+
+async function runFullTest() {
+  if (!token()) { log("ERROR: paste the staging admin token first."); return; }
+  deviceId = $("device").value;
+  if (!deviceId) { log("ERROR: list devices and pick one first."); return; }
+  results.plane = plane();
+  results.device = results.device || {};
+  results.device.selected_id = deviceId;
+  results.device.selected_label = $("device").selectedOptions[0] ? $("device").selectedOptions[0].textContent : deviceId;
+  setVerdict("RUNNING…");
+  log("=== WebRTC E2E run started: plane=" + plane() + " device=" + deviceId + " mode=" + $("mode").value + " ===");
+
+  // --- Step 0: ICE servers endpoint (regression target, Wave 5C fix) ---
+  const ice = await api("GET", "/api/v1/sessions/ice-servers", undefined, 15000);
+  if (ice.status === 200 && Array.isArray(ice.json && ice.json.ice_servers) && ice.json.ice_servers.length) {
+    setCriterion("ice_servers_endpoint", "GET /api/v1/sessions/ice-servers returns 200 with servers", "PASS",
+      ice.json.ice_servers.length + " server entr(ies); first urls=" + JSON.stringify(ice.json.ice_servers[0].urls).slice(0, 120));
+  } else {
+    setCriterion("ice_servers_endpoint", "GET /api/v1/sessions/ice-servers returns 200 with servers", "FAIL",
+      "HTTP " + ice.status + " " + ice.text.slice(0, 200) +
+      " — KNOWN DEFECT (Wave 5C): the literal route was shadowed by /{session_id}; fixed in the local tree, NOT yet deployed to staging. The dashboard falls back to the session's embedded ice_servers, so this alone does not block negotiation.");
+  }
+
+  // --- Step 1: create v1 session ---
+  const mode = $("mode").value;
+  const created = await api("POST", "/api/v1/sessions",
+    { device_id: deviceId, mode, fps: 30, scale: 1.0, monitor_index: 0 }, 20000);
+  log("POST /api/v1/sessions -> HTTP " + created.status + " " + (created.text || "").slice(0, 300));
+  if (created.status === 400 && /WebRTC desktop stream unavailable|Windows desktop hosts only/.test(created.text || "")) {
+    // Honest no-source gate: staging devices are Linux / the plane is
+    // Linux, and the server refuses to create a session. This is the
+    // EXPECTED outcome on staging as it stands — not a harness failure.
+    setCriterion("session_create_gate", "Session creation honestly gated (no Windows agent attached)", "PASS",
+      "HTTP 400, server refused with the Windows-only message; no session, no offer, no fabricated stream. Detail: " + (created.text || "").slice(0, 220));
+    await noSourceTicketAndWsChecks(deviceId);
+    await finishNoSource();
+    return;
+  }
+  if (!created.ok || !created.json || !created.json.session_id) {
+    setCriterion("session_create_gate", "Session creation honestly gated or succeeds", "FAIL",
+      "HTTP " + created.status + " " + (created.text || "").slice(0, 240));
+    setVerdict("FAIL — session creation returned an unexpected result (see criteria)");
+    return;
+  }
+  sessionId = created.json.session_id;
+  results.session_id = sessionId;
+  setCriterion("session_create_gate", "v1 session created", "PASS",
+    "session_id=" + sessionId + " status=" + (created.json.status || "?") + " device=" + deviceId);
+  log("Session created: " + sessionId + " (status " + (created.json.status || "?") + ")");
+
+  // --- Step 2: poll for the agent's offer ---
+  const waitSecs = Math.max(5, Math.min(120, parseInt($("wait").value, 10) || 20));
+  let offerSdp = (created.json.offer_sdp) || (created.json.offer && created.json.offer.sdp) || null;
+  let offerType = (created.json.offer_type) || "offer";
+  let lastPolled = created.json;
+  let polls = 0;
+  while (!offerSdp && polls < waitSecs * 2) {
+    await sleep(500); polls++;
+    const g = await api("GET", "/api/v1/sessions/" + encodeURIComponent(sessionId), undefined, 15000);
+    if (g.ok && g.json) {
+      lastPolled = g.json;
+      offerSdp = g.json.offer_sdp || (g.json.offer && g.json.offer.sdp) || null;
+      offerType = g.json.offer_type || "offer";
+      if (g.json.status === "error" || g.json.status === "ended") { log("Session entered status=" + g.json.status + " during offer wait; error=" + (g.json.error || "")); break; }
+    } else { log("Poll " + polls + " failed: HTTP " + g.status); }
+  }
+  log("Offer wait done after " + polls + " polls (" + (polls / 2).toFixed(1) + "s). offer present: " + !!offerSdp +
+    " final status=" + (lastPolled && lastPolled.status) + " error=" + ((lastPolled && lastPolled.error) || "none"));
+  if (!offerSdp) {
+    const telem = (lastPolled && lastPolled.telemetry) || {};
+    const telemEmpty = Object.keys(telem).length === 0;
+    const noFabrication = telemEmpty && !(lastPolled && lastPolled.offer) &&
+      !((lastPolled && lastPolled.agent_candidates) || []).length;
+    setCriterion("offer_wait", "Agent posts an SDP offer within the wait window", "SKIP",
+      "No offer arrived in " + waitSecs + "s (session stayed '" + (lastPolled && lastPolled.status) +
+      "'). Expected when no real agent is attached: the agent is the only offerer.");
+    setCriterion("no_source_clean", "No offer => no fabricated stream: session stays waiting, telemetry empty, no agent candidates", noFabrication ? "PASS" : "FAIL",
+      "status=" + (lastPolled && lastPolled.status) + " telemetry_keys=" + Object.keys(telem).length +
+      " agent_candidates=" + ((lastPolled && lastPolled.agent_candidates) || []).length +
+      " error=" + ((lastPolled && lastPolled.error) || "none") +
+      (noFabrication ? "" : " — UNEXPECTED content appeared without an agent; investigate before any pass."));
+    await liveSessionTicketAndWsChecks(deviceId, sessionId);
+    await terminateSession(sessionId);
+    finishNoSource();
+    return;
+  }
+
+  // --- Step 3: full negotiation (only reachable with a real agent) ---
+  setCriterion("offer_wait", "Agent posts an SDP offer within the wait window", "PASS",
+    "Offer received after ~" + (polls / 2).toFixed(1) + "s; type=" + offerType + " sdp_len=" + offerSdp.length);
+  let iceServers = (lastPolled && lastPolled.ice_servers) || null;
+  if (!Array.isArray(iceServers) || !iceServers.length) {
+    const ir = await api("GET", "/api/v1/sessions/ice-servers", undefined, 15000);
+    iceServers = (ir.json && ir.json.ice_servers) || [{ urls: "stun:stun.l.google.com:19302" }];
+  }
+  log("Creating RTCPeerConnection with " + iceServers.length + " ICE server entries...");
+  pc = new RTCPeerConnection({ iceServers });
+  const dc = pc.createDataChannel("input", { ordered: true });
+  dc.onopen = () => log("DataChannel 'input' open");
+  dc.onclose = () => log("DataChannel 'input' closed");
+  dc.onmessage = (ev) => log("DataChannel message: " + String(ev.data).slice(0, 200));
+  pc.onconnectionstatechange = () => log("pc.connectionState -> " + pc.connectionState);
+  pc.oniceconnectionstatechange = () => log("pc.iceConnectionState -> " + pc.iceConnectionState);
+  pc.onicegatheringstatechange = () => log("pc.iceGatheringState -> " + pc.iceGatheringState);
+  pc.ontrack = (ev) => {
+    log("ontrack: kind=" + (ev.track && ev.track.kind) + " streams=" + (ev.streams || []).length);
+    results.video.track_received = true;
+    if (ev.streams && ev.streams[0]) {
+      const v = $("remoteVideo");
+      v.srcObject = ev.streams[0];
+      v.play().catch(() => {});
+      if (typeof v.requestVideoFrameCallback === "function") {
+        const count = () => {
+          presentedFrames++;
+          const now = performance.now();
+          if (lastPresentedTs >= 0 && Math.abs(now - lastPresentedTs) > 1) distinctPresented++;
+          lastPresentedTs = now;
+          results.video.frames_presented = presentedFrames;
+          $("videoInfo").textContent = "Frames presented: " + presentedFrames +
+            " | video " + v.videoWidth + "x" + v.videoHeight;
+          results.video.width = v.videoWidth; results.video.height = v.videoHeight;
+          try { v.requestVideoFrameCallback(count); } catch (e) {}
+        };
+        try { v.requestVideoFrameCallback(count); } catch (e) { log("requestVideoFrameCallback unavailable: " + e); }
+      }
+    }
+  };
+  const icePosted = [];
+  pc.onicecandidate = async (ev) => {
+    if (!ev.candidate) { log("ICE gathering complete (null candidate)"); return; }
+    const r = await api("POST", "/api/v1/sessions/" + encodeURIComponent(sessionId) + "/ice",
+      { candidate: ev.candidate.toJSON(), from: "viewer" }, 15000);
+    icePosted.push(r.status);
+    log("Viewer ICE candidate posted -> HTTP " + r.status);
+  };
+  try {
+    await pc.setRemoteDescription({ type: offerType, sdp: offerSdp });
+    log("setRemoteDescription(offer) OK");
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    log("createAnswer + setLocalDescription OK (answer sdp_len=" + (answer.sdp || "").length + ")");
+    const ans = await api("POST", "/api/v1/sessions/" + encodeURIComponent(sessionId) + "/answer",
+      { sdp: answer.sdp, type: answer.type || "answer" }, 15000);
+    setCriterion("answer_posted", "Viewer answer posted to the session", ans.ok ? "PASS" : "FAIL",
+      "HTTP " + ans.status + " " + (ans.text || "").slice(0, 160));
+    if (!ans.ok) { await terminateSession(sessionId); setVerdict("FAIL — answer post failed"); return; }
+  } catch (e) {
+    setCriterion("answer_posted", "Viewer answer posted to the session", "FAIL", "setRemoteDescription/createAnswer threw: " + e);
+    await terminateSession(sessionId); setVerdict("FAIL — SDP negotiation threw (see log)"); return;
+  }
+
+  // --- Step 4: WS signalling with a fresh ticket ---
+  const wsRes = await liveSessionTicketAndWsChecks(deviceId, sessionId);
+  // --- Step 5: wait for ICE connected + frames ---
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline && pc.connectionState !== "connected" && pc.connectionState !== "failed" && pc.connectionState !== "closed") {
+    await sleep(500);
+  }
+  const connState = pc.connectionState, iceState = pc.iceConnectionState;
+  setCriterion("ice_connected", "PeerConnection reaches 'connected'", connState === "connected" ? "PASS" : "FAIL",
+    "connectionState=" + connState + " iceConnectionState=" + iceState + " viewer ICE posted: " + icePosted.length + " candidate(s), statuses " + icePosted.join(","));
+  await sleep(5000); // let frames arrive
+  let framesDecoded = null;
+  try {
+    const stats = await pc.getStats();
+    stats.forEach((s) => { if (s.type === "inbound-rtp" && s.kind === "video") framesDecoded = s.framesDecoded; });
+  } catch (e) { log("getStats failed: " + e); }
+  results.video.frames_decoded = framesDecoded;
+  const v = $("remoteVideo");
+  results.video.width = v.videoWidth; results.video.height = v.videoHeight;
+  results.video.frames_presented = presentedFrames;
+  const framesOk = results.video.track_received && (framesDecoded === null ? presentedFrames > 0 : framesDecoded > 0) &&
+    presentedFrames >= 2 && v.videoWidth > 0;
+  setCriterion("video_frames_real", "Real video frames decoded (track + advancing presented frames + non-zero dimensions)", framesOk ? "PASS" : "FAIL",
+    "track=" + results.video.track_received + " framesDecoded=" + framesDecoded + " framesPresented=" + presentedFrames +
+    " distinctPresentations~" + distinctPresented + " video=" + v.videoWidth + "x" + v.videoHeight +
+    " — NOTE: the browser can prove frames were decoded and are advancing; it cannot by itself prove the pixels are a live desktop rather than a synthetic source. Pixel-content authenticity rests on the agent's capture path (Wave 3C removed the fake-IDR path) and is NOT claimed here.");
+  setCriterion("ws_signalling", "Ticket WS: snapshot + pong (+ replay rejected)", wsRes.ok ? "PASS" : "FAIL", wsRes.detail);
+  await terminateSession(sessionId);
+  const allPass = ["offer_wait", "answer_posted", "ice_connected", "video_frames_real", "ws_signalling"]
+    .every((id) => results.criteria[id] && results.criteria[id].status === "PASS");
+  const iceOk = !results.criteria.ice_servers_endpoint || results.criteria.ice_servers_endpoint.status === "PASS";
+  setVerdict(allPass && iceOk ? "FULL PASS — real browser peer negotiated video with a real agent"
+    : allPass ? "FULL PASS (media) — but ice-servers endpoint still 404 (known defect, fix awaiting deploy)"
+    : "FAIL — see failing criteria above");
+}
+
+async function noSourceTicketAndWsChecks(devId) {
+  // No session exists, so mint a ticket bound to a synthetic session id
+  // and prove the WS endpoint refuses it (session lookup fails first),
+  // and that a garbage ticket is refused the same way.
+  const probeSession = "webrtc-e2e-probe-" + Date.now().toString(36);
+  log("No-source path: minting probe ticket for synthetic session " + probeSession + " ...");
+  const mint = await api("POST", "/api/stream-ticket", { device_id: devId, session_id: probeSession }, 15000);
+  if (mint.ok && mint.json && mint.json.ticket) {
+    setCriterion("ticket_mint", "Stream ticket mints (single-use, 60s) for a bound device+session", "PASS",
+      "HTTP 200 expires_in=" + mint.json.expires_in + " ticket=" + redactTicketInfo(mint.json.ticket) + " (mint does not validate session existence — by design; redemption does)");
+    const wsUrl = plane().replace(/^http/, "ws") + "/api/v1/ws/sessions/" + encodeURIComponent(probeSession) + "?ticket=" + encodeURIComponent(mint.json.ticket);
+    const r1 = await wsConnect(wsUrl, 10000);
+    results.ws.probe_ticket = { opened: r1.opened, close_code: r1.closeCode };
+    if (!r1.opened && r1.closeCode === 4401) {
+      setCriterion("ws_rejects_unknown_session", "WS with a ticket for a nonexistent session is refused (4401)", "PASS",
+        "Socket closed 4401 without opening; ticket could not redeem without a live session row.");
+    } else {
+      setCriterion("ws_rejects_unknown_session", "WS with a ticket for a nonexistent session is refused (4401)", "FAIL",
+        "opened=" + r1.opened + " closeCode=" + r1.closeCode + " error=" + (r1.error || "none"));
+    }
+    const badUrl = plane().replace(/^http/, "ws") + "/api/v1/ws/sessions/" + encodeURIComponent(probeSession) + "?ticket=garbage-ticket-value";
+    const r2 = await wsConnect(badUrl, 10000);
+    results.ws.garbage_ticket = { opened: r2.opened, close_code: r2.closeCode };
+    setCriterion("ws_rejects_bad_ticket", "WS with a garbage ticket is refused (4401)", (!r2.opened && r2.closeCode === 4401) ? "PASS" : "FAIL",
+      "opened=" + r2.opened + " closeCode=" + r2.closeCode);
+  } else {
+    setCriterion("ticket_mint", "Stream ticket mints (single-use, 60s) for a bound device+session", "FAIL",
+      "HTTP " + mint.status + " " + (mint.text || "").slice(0, 200));
+    setCriterion("ws_rejects_unknown_session", "WS with a ticket for a nonexistent session is refused (4401)", "SKIP", "ticket mint failed, cannot test redemption");
+    setCriterion("ws_rejects_bad_ticket", "WS with a garbage ticket is refused (4401)", "SKIP", "ticket mint failed");
+  }
+  // Unauthenticated WS (no ticket, no headers — browsers cannot set
+  // headers on a WS handshake, so this is the no-credential case).
+  const noAuthUrl = plane().replace(/^http/, "ws") + "/api/v1/ws/sessions/" + encodeURIComponent(probeSession);
+  const r3 = await wsConnect(noAuthUrl, 10000);
+  results.ws.no_auth = { opened: r3.opened, close_code: r3.closeCode };
+  setCriterion("ws_rejects_no_auth", "WS with no ticket/credential is refused (4401)", (!r3.opened && r3.closeCode === 4401) ? "PASS" : "FAIL",
+    "opened=" + r3.opened + " closeCode=" + r3.closeCode);
+}
+
+async function liveSessionTicketAndWsChecks(devId, sid) {
+  // Real session: mint ticket, WS connect, expect snapshot + pong, then
+  // replay the same ticket and expect 4401 (single-use).
+  const mint = await api("POST", "/api/stream-ticket", { device_id: devId, session_id: sid }, 15000);
+  if (!mint.ok || !mint.json || !mint.json.ticket) {
+    return { ok: false, detail: "ticket mint failed: HTTP " + mint.status + " " + (mint.text || "").slice(0, 160) };
+  }
+  setCriterion("ticket_mint", "Stream ticket mints (single-use, 60s) for a bound device+session", "PASS",
+    "HTTP 200 expires_in=" + mint.json.expires_in + " ticket=" + redactTicketInfo(mint.json.ticket));
+  const wsUrl = plane().replace(/^http/, "ws") + "/api/v1/ws/sessions/" + encodeURIComponent(sid) + "?ticket=" + encodeURIComponent(mint.json.ticket);
+  const r1 = await wsConnect(wsUrl, 12000);
+  results.ws.live = { opened: r1.opened, snapshot: r1.snapshot, pong: !!r1.pong, close_code: r1.closeCode };
+  let detail = "snapshot=" + JSON.stringify(r1.snapshot) + " pong=" + !!r1.pong + " closeCode=" + r1.closeCode;
+  let ok = r1.opened && !!r1.snapshot && !!r1.pong;
+  if (ok) {
+    const r2 = await wsConnect(wsUrl, 8000); // replay same ticket
+    results.ws.replay = { opened: r2.opened, close_code: r2.closeCode };
+    detail += " | replay: opened=" + r2.opened + " closeCode=" + r2.closeCode + (r2.opened || r2.closeCode !== 4401 ? " — REPLAY NOT REJECTED" : " (single-use enforced)");
+    if (r2.opened || r2.closeCode !== 4401) ok = false;
+  }
+  return { ok, detail };
+}
+
+async function terminateSession(sid) {
+  try {
+    const r = await api("POST", "/api/v1/sessions/" + encodeURIComponent(sid) + "/terminate", {}, 15000);
+    log("Terminate session -> HTTP " + r.status);
+    setCriterion("session_terminated", "Session terminated cleanly at end of run", r.ok ? "PASS" : "FAIL", "HTTP " + r.status);
+  } catch (e) { log("Terminate failed: " + e); }
+  try { if (pc) pc.close(); } catch (e) {}
+  try { if (ws) ws.close(); } catch (e) {}
+}
+
+function finishNoSource() {
+  // Verdict for the no-source outcome. The ice-servers endpoint is a
+  // known defect with a fix in the local tree; it is reported, not hidden.
+  const c = results.criteria;
+  const gating = ["health", "devices_list", "session_create_gate", "ticket_mint",
+    "ws_rejects_unknown_session", "ws_rejects_bad_ticket", "ws_rejects_no_auth"];
+  const gatingPass = gating.every((id) => c[id] && (c[id].status === "PASS" || c[id].status === "SKIP"));
+  const noSourceOk = c.no_source_clean ? c.no_source_clean.status === "PASS" : true;
+  const iceFail = c.ice_servers_endpoint && c.ice_servers_endpoint.status !== "PASS";
+  if (gatingPass && noSourceOk && !iceFail) setVerdict("PASS — NO SOURCE (honest): signalling plane verified; no agent attached, no stream fabricated");
+  else if (gatingPass && noSourceOk && iceFail) setVerdict("PASS — NO SOURCE (honest), WITH 1 KNOWN DEFECT: ice-servers endpoint 404 (fix exists locally, not yet deployed)");
+  else setVerdict("FAIL — see failing criteria above");
+}
+
+$("btnList").addEventListener("click", () => { listDevices().catch((e) => log("List devices error: " + e)); });
+$("btnRun").addEventListener("click", () => { runFullTest().catch((e) => { log("Run error: " + e); setVerdict("FAIL — harness error: " + e); }); });
+$("btnStop").addEventListener("click", async () => {
+  if (sessionId) { await terminateSession(sessionId); sessionId = null; }
+  try { if (pc) pc.close(); } catch (e) {}
+  log("Stopped.");
+});
+$("btnCopy").addEventListener("click", async () => {
+  const text = $("results").textContent;
+  try { await navigator.clipboard.writeText(text); log("Results JSON copied to clipboard."); }
+  catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); log("Results JSON copied (fallback)."); } catch (e2) { log("Copy failed — select the JSON block manually."); }
+    ta.remove();
+  }
+});
+renderCriteria();
+renderResults();
+log("Harness loaded. Serve from http://localhost:5173 (or 127.0.0.1:5173) — see note at top. Steps: 1) paste admin token, 2) List devices, 3) Run full test.");
+</script>
+</body>
+</html>

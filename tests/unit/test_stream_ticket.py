@@ -248,3 +248,32 @@ class TestV1WebSocketTokenFallbackRemoved:
         ) as ws:
             snapshot = ws.receive_json()
             assert snapshot["type"] == "session_snapshot"
+
+
+class TestIceServersRouteNotShadowed:
+    """Wave 5C regression: GET /api/v1/sessions/ice-servers must return
+    the ICE server list, not 404 "Session not found."
+
+    Starlette matches routes in registration order, and the parameter
+    route GET /api/v1/sessions/{session_id} used to be registered before
+    the literal ice-servers route, so "ice-servers" was swallowed as a
+    session id. The route snapshot test only checks the route set, not
+    order, so it never caught this. Verified live on staging (404 before
+    the fix) and locally via TestClient.
+    """
+
+    def test_ice_servers_returns_200_with_servers(self, client, admin_headers):
+        resp = client.get("/api/v1/sessions/ice-servers", headers=admin_headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert isinstance(body.get("ice_servers"), list)
+        assert body["ice_servers"], "expected at least one ICE server"
+        assert any("stun:" in str(s.get("urls")) for s in body["ice_servers"])
+
+    def test_ice_servers_requires_auth(self, client):
+        assert client.get("/api/v1/sessions/ice-servers").status_code == 401
+
+    def test_unknown_session_still_404(self, client, admin_headers):
+        resp = client.get("/api/v1/sessions/no-such-session", headers=admin_headers)
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Session not found."

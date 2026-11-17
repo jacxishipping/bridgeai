@@ -714,6 +714,20 @@ def attach_v1_routes(
 
         return format_session_v1(sess)
 
+    # Wave 5C: literal route MUST be registered before the
+    # "/api/v1/sessions/{session_id}" parameter route below — Starlette
+    # matches in registration order, so the parameter route otherwise
+    # swallows "ice-servers" as a session id and returns 404
+    # "Session not found." (verified live on staging + locally).
+    @app.get("/api/v1/sessions/ice-servers")
+    def v1_get_ice_servers(
+        x_admin_token: str | None = Header(default=None),
+        x_session_token: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
+    ):
+        require_role("viewer", x_admin_token, x_session_token, authorization)
+        return {"ice_servers": webrtc_stream.get_configured_ice_servers()}
+
     @app.get("/api/v1/sessions/{session_id}")
     def v1_get_session(
         session_id: str,
@@ -931,15 +945,6 @@ def attach_v1_routes(
             save_webrtc_session_db(conn, app.state, sess)
             await _broadcast_ws(session_id, {"type": "ice", "from": from_side, "candidate": cand})
         return {"ok": True, "session_id": session_id}
-
-    @app.get("/api/v1/sessions/ice-servers")
-    def v1_get_ice_servers(
-        x_admin_token: str | None = Header(default=None),
-        x_session_token: str | None = Header(default=None),
-        authorization: str | None = Header(default=None),
-    ):
-        require_role("viewer", x_admin_token, x_session_token, authorization)
-        return {"ice_servers": webrtc_stream.get_configured_ice_servers()}
 
     @app.get("/api/v1/sessions/{session_id}/recording")
     def v1_get_session_recording(
