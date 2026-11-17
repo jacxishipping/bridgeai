@@ -7,6 +7,9 @@ COPY src ./src
 # the image too — without it the container crashes on boot with
 # ModuleNotFoundError: No module named 'gateway'.
 COPY deployment/oauth ./deployment/oauth
+# The Postgres boot runs migrations from the repo-root migrations/
+# directory (migrations.py refuses to start without it, DB-08).
+COPY migrations ./migrations
 RUN pip install --no-cache-dir -e .
 
 FROM base AS dev
