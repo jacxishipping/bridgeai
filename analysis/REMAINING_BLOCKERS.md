@@ -1,6 +1,6 @@
 # Remaining Blockers (FINAL, 2026-11-17)
 
-Everything below was still true at head `61faa67`. **Wave 5A (17 Nov 2026, same day) closed in code:** P1s F-04-15, F-04-22, F-05-04, F-06-12; F08-02/03/04/07 in C++ source (build-unverified — see below); F-04-01 (durable approvals); SEC-06 (plaintext-secret migration code); the rate-limiter lockout P1 (W5A-01, code fix + regression tests, re-soak pending); and residuals P-11, v1 WS `?token=` fallback, `main.tsx` sync OIDC wrapper, plain-text enrollment token, `AI_BRIDGE_INSECURE_TLS=1` hatch. The items below are what is **still** open after Wave 5A. Full detail and evidence: `analysis/FINAL_IMPLEMENTATION_REPORT.md` §7, `FINAL_SECURITY_REASSESSMENT.md` §4–§5, `FINAL_PRODUCTION_READINESS.md` §4.
+Everything below was still true at head `61faa67`. **Wave 5A (17 Nov 2026, same day) closed in code:** P1s F-04-15, F-04-22, F-05-04, F-06-12; F08-02/03/04/07 in C++ source (build-unverified — see below); F-04-01 (durable approvals); SEC-06 (plaintext-secret migration code); the rate-limiter lockout P1 (W5A-01, code fix + regression tests, re-soak pending); and residuals P-11, v1 WS `?token=` fallback, `main.tsx` sync OIDC wrapper, plain-text enrollment token, `AI_BRIDGE_INSECURE_TLS=1` hatch. The items below are what is **still** open after Wave 5A. **Wave 5B (17 Nov 2026, same day) closed with local test evidence:** P1s TST-09 (10-step E2E workflow, `tests/e2e/test_workflow_10step.py`) and TST-10 (failure/recovery, `tests/e2e/test_failure_recovery.py`, 6 tests), and P2 TST-13 (Playwright e2e updated to the OIDC exchange-code flow and run 126/126 locally; one real app bug fixed — duplicate `<h1>` on 4 views). The items below are what is **still** open after Wave 5B. Full detail and evidence: `analysis/FINAL_IMPLEMENTATION_REPORT.md` §7, `FINAL_SECURITY_REASSESSMENT.md` §4–§5, `FINAL_PRODUCTION_READINESS.md` §4.
 
 ## Environment limits (this VM — none of these were available during remediation)
 
@@ -12,10 +12,10 @@ Everything below was still true at head `61faa67`. **Wave 5A (17 Nov 2026, same 
 - **No GitHub CI run observed** (CI job exists; no run triggered).
 - **`/tmp` is a 512 MB tmpfs:** full-suite runs must use `TMPDIR=~/workspace/tmp` (see `FINAL_TEST_RESULTS.md` §5 — the tmpfs filled to 100% during Wave 3 and invalidated two suite runs).
 
-## Open register rows (17)
+## Open register rows (14)
 
-**P1 (2):** TST-09 (no e2e / MCP round-trip / OAuth2 coverage), TST-10 (no failure/recovery tests; soak scripts unwired).
-**P2 (15):** F-04-10, F-04-18/F13-11 (TURN default shared secret), F-05-08 (DB rate-limit fallback still non-atomic read-modify-write — HEAD-verified), F-05-09, F-05-12/SEC-12, F-06-16 (stateless HTTP, no SSE/resumable sessions), I-05 (Copilot untested), PERF-08 (0.5 s execution-state poll still writes a `task_events` row per call), TST-13 (Playwright e2e tests the demo by design), TST-14 (C++ tests never run), P-07 (no lockfile/hashes), P-08 (deploy scripts duplicated, no health gate), P-12 (three default control URLs), P-15 (Render labelled/test-only topology), OV-03 (two WebRTC stacks coexist).
+**P1 (0):** none — the last two open P1s (TST-09, TST-10) were closed by Wave 5B with local test evidence (see intro).
+**P2 (14):** F-04-10, F-04-18/F13-11 (TURN default shared secret), F-05-08 (DB rate-limit fallback still non-atomic read-modify-write — HEAD-verified), F-05-09, F-05-12/SEC-12, F-06-16 (stateless HTTP, no SSE/resumable sessions), I-05 (Copilot untested), PERF-08 (0.5 s execution-state poll still writes a `task_events` row per call), TST-14 (C++ tests never run), P-07 (no lockfile/hashes), P-08 (deploy scripts duplicated, no health gate), P-12 (three default control URLs), P-15 (Render labelled/test-only topology), OV-03 (two WebRTC stacks coexist). (TST-13 was in this list; Wave 5B closed it — Playwright e2e updated to the exchange-code flow and run 126/126 locally.)
 
 ## Partially closed items with named residuals (38 — see FINAL_IMPLEMENTATION_REPORT.md §2 for all)
 
@@ -43,7 +43,7 @@ PERF-01/DB-04 (connection pool — needs checkout refactor + load harness), F-06
 
 ## What must happen before the production verdict can change
 
-1. Windows build + `ai_bridge_tests` run. 2. Postgres boot + backup/restore drill. 3. Two-worker Redis fan-out + 4-worker load test. 4. WebRTC E2E with a real browser peer. 5. 10-step E2E workflow + failure/recovery tests + Playwright e2e updated and run. 6. Close the remaining open P1s (TST-09, TST-10 — E2E, other phases; the other Wave 5A P1s and residuals are closed in code). 7. Fresh, independent audit pass (not a self-review). See `FINAL_PRODUCTION_READINESS.md` §4.
+1. Windows build + `ai_bridge_tests` run. 2. Postgres boot + backup/restore drill. 3. Two-worker Redis fan-out + 4-worker load test. 4. WebRTC E2E with a real browser peer. 5. ~~10-step E2E workflow + failure/recovery tests + Playwright e2e updated and run~~ — **DONE (Wave 5B, 17 Nov 2026, local evidence only)**. 6. ~~Close the remaining open P1s (TST-09, TST-10 — E2E, other phases; the other Wave 5A P1s and residuals are closed in code)~~ — **DONE (Wave 5B): no open P1s remain.** 7. Fresh, independent audit pass (not a self-review). See `FINAL_PRODUCTION_READINESS.md` §4.
 
 ## Rollback
 

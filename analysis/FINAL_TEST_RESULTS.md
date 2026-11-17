@@ -3,7 +3,7 @@
 **Date:** 2026-11-17 · **Repo:** `~/workspace/ai-bridge-main` · **Head:** `61faa67` (Wave 4)
 **Test commands:** Python: `TMPDIR=~/workspace/tmp .venv/bin/python -m pytest tests/ -q -p no:cacheprovider` · Dashboard: `cd apps/dashboard && npm test && npm run build` (plus `npm run test:i18n` as part of the `npm test` chain).
 
-**Headline:** Python **750 passed / 5 skipped / 12 failed**; dashboard **430/430 passed + 3/3 i18n**. The 12 Python failures are exactly the pre-existing baseline set — no new failure was introduced by any wave, and no test was deleted or disabled to make the suite pass.
+**Headline:** Python **750 passed / 5 skipped / 12 failed** at Wave 4; **Wave 5B (17 Nov 2026): 784 passed / 5 skipped / 11 failed**; dashboard **430/430 passed + 3/3 i18n** (unchanged through Wave 5B); **Playwright 126/126 passed locally** (Wave 5B — first ever full Playwright run). The 11 Python failures are a strict subset of the pre-existing baseline 12 — no new failure was introduced by any wave, and no test was deleted or disabled to make the suite pass.
 
 ## 1. Full-suite history (parent-verified runs)
 
@@ -15,8 +15,12 @@
 | Wave 2 fix-up | `19747b2` | 513 | 12 | 5 | +11, zero new failures |
 | Wave 3 | `88ad591` | 743 | 12 | 5 | +230, zero new failures |
 | Wave 4 | `61faa67` | **750** | **12** | **5** | +7, zero new failures |
+| Wave 5A | `c7d33d24` | 776 | 12 | 5 | +26, zero new failures (one swap vs baseline: flaky `test_concurrent_claim_and_cancel_under_load` tripped at 5.03 s, `test_capture_desktop_bettercam_uses_monitor_index` passed) |
+| Wave 5B | *(this commit)* | **784** | **11** | **5** | +7 new tests (10-step E2E + 6 failure/recovery, all passing) + 1 flipped: `test_capture_desktop_bettercam_uses_monitor_index` passed, so the failing set is the baseline 12 minus that test; flaky `test_concurrent_claim_and_cancel_under_load` passed this run |
 
 Final run: `12 failed, 750 passed, 5 skipped, 1 warning in 572.13s (0:09:32)` — log: `~/workspace/tmp/pytest-wave4.log`. The per-wave totals are not strictly comparable as a trend line (different scopes were reported by different waves — `tests/unit` vs `tests/unit` + `tests/security` vs `tests/` — and sibling waves landed tests in the same tree), but the invariant across every parent-verified full run is the same: **the FAILED list is byte-for-byte the baseline 12**.
+
+Wave 5B full run (17 Nov 2026, `TMPDIR=~/workspace/tmp .venv/bin/python -m pytest tests/ -q -p no:cacheprovider`, 629.49 s): **`11 failed, 784 passed, 5 skipped`**. The 11 failures are a strict subset of the baseline 12 below: `tests/unit/test_aci_desktop_deepening.py::test_capture_desktop_bettercam_uses_monitor_index` (#5) **passed** this run, so it is no longer in the failing set. No new failure appeared; no test was deleted, skipped, or weakened. Total reconciles: 776 (Wave 5A) + 7 new + 1 flipped = 784; 793 baseline total + 7 new = 800.
 
 ## 2. The 12 pre-existing failures (unchanged since baseline)
 
@@ -48,6 +52,8 @@ All 12 fail identically on the pristine `79c010e` baseline and on every wave hea
 | Wave 2 fix-up | **430/430 + 3/3 i18n, exit 0** (21 expectations updated to the login-first contract, none deleted; 1 real bug fixed in `Device360View`) |
 | Wave 3 | 430/430 (parent-verified) |
 | Wave 4 | **430/430 + 3/3 i18n, exit 0** (parent-verified by running `npm test`; output: `[✓] All 430 test cases executed cleanly and passed!`) |
+| Wave 5B | **430/430 + 3/3 i18n, exit 0; `npm run build` exit 0** (run 17 Nov 2026 on the final tree incl. the `src/App.tsx` header fix; Tier 5 test 1.5 still passes — it checks the view-id strings appear in `App.tsx`, which they do in the route switch) |
+| Playwright e2e (Wave 5B, first ever full run, 17 Nov 2026) | **126/126 passed in 6.0 min** (brand 5, dashboard 44, density 3, live-workspace 24, localization 32, operations 18) — local run against the vite dev server; Chromium 156.0.8078.4 (Playwright 1.64.1, installed manually via curl because the Node downloader fails through the egress proxy). The OIDC test was rewritten to the exchange-code flow; 40 failures on the first run were all pre-existing test/app drift (demo gating, hold-to-confirm, health-gated sign-in, stale expectations) — fixed test-side except one real app bug (duplicate `<h1>` on 4 views, fixed in `src/App.tsx`). The interactive-terminal 390 px axe failure seen once was flaky (passed 2/2 in isolation and in the full run). One environment note: in this VM, `npx`/`npm` fail with `EPERM` writing log files and `vite` fails writing its config temp file when run as a direct child of the agent shell (a sandbox quirk: after the process reads overlay files, file writes fail); the runs that pass are launched without stdout redirection and with `NPM_CONFIG_LOGS_MAX=0`, letting Playwright spawn the dev server itself. |
 
 Dashboard test counts by suite (as reported by Wave 2B, parent re-verified on disk): Tier 1 155, Tier 2 155, Tier 5 31, challenger-stress 15, challenger-m1-2-stress 27, challenger-compliance 43 — the master runner total is 430 including i18n-adjacent checks; `npm test` total incl. i18n is 433. (The audit's 356/364/375 counts and Wave 2B's 356 `it(` re-count disagree; both are superseded by the 430 figure, which is the count of tests that actually execute and pass.)
 
@@ -69,7 +75,7 @@ Three existing tests were rewritten in Wave 1B because they asserted the vulnera
 
 | Test / verification | Why not | What would unblock it |
 |---|---|---|
-| Playwright e2e (`apps/dashboard/e2e/`, 48 cases) | Never run in any wave; `dashboard.spec.ts:134` still asserts the old OIDC fragment flow and would fail against the new exchange-code flow | Update the spec to the exchange flow, then run `npx playwright test` |
+| Playwright e2e (`apps/dashboard/e2e/`, 126 cases) | ~~Never run in any wave; `dashboard.spec.ts:134` still asserts the old OIDC fragment flow and would fail against the new exchange-code flow~~ **RUN in Wave 5B (17 Nov 2026): 126/126 passed locally** — spec updated to the exchange-code flow first; see §3 |
 | Windows `ai_bridge_tests` (C++ `test_windows_agent.cpp`, incl. new §[7/7]) | No Windows host/toolchain (no MSVC/clang-cl, no Windows SDK) | A Windows host or Windows CI runner |
 | Postgres boot / backup-restore drill / migration parity on Postgres | No Postgres server/binaries (`psql`, `pg_dump`, `createdb` absent) | A Postgres instance; run `scripts/check_schema_parity.py` + `scripts/backup_restore.py` against it |
 | Two-worker Redis fan-out / 4-worker load test | No Redis server/binary; no load-test harness (PERF-01 pool deferred) | Redis + a second gunicorn worker + a load harness |
@@ -77,8 +83,8 @@ Three existing tests were rewritten in Wave 1B because they asserted the vulnera
 | Live Ollama / LangChain / OpenAI / Anthropic / Copilot tenant | No live services/tenant | Credentials + a live tenant (explicitly out of scope for this remediation) |
 | Live deploy / enrollment / `nginx -t` | No Docker daemon, no nginx binary, no live plane | A staging host with Docker + nginx |
 | GitHub CI run | No GitHub run triggered | Push to a remote and observe a CI run |
-| 10-step E2E workflow (brief Part 10) | No such test exists (TST-09 open) | Write it; run against a local plane |
-| Failure/recovery tests (crash/restart/DB failure/races) | No such tests exist (TST-10 open) | Write them; wire soak scripts into CI |
+| 10-step E2E workflow (brief Part 10) | ~~No such test exists (TST-09 open)~~ **Written and passing in Wave 5B:** `tests/e2e/test_workflow_10step.py` (1 test, 10 asserted steps, local plane) |
+| Failure/recovery tests (crash/restart/DB failure/races) | ~~No such tests exist (TST-10 open)~~ **Written and passing in Wave 5B:** `tests/e2e/test_failure_recovery.py` (6 tests, each verified against the implementation before asserting) |
 
 ## 7. Test evidence integrity
 

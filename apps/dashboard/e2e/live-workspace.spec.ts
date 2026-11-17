@@ -291,7 +291,11 @@ test("approval review shows exact action and records decision reason; conflicts 
 });
 
 test("enrollment is actionable and one-time credentials are never persisted", async ({ page }) => {
-  await mockLive(page, { empty: true });
+  // The live Inventory (which owns the enrollment dialog) only renders when
+  // the fleet is non-empty; with zero devices the live view shows an empty
+  // state whose action navigates to the demo Devices view instead. Enroll
+  // from the Inventory with a seeded device present.
+  await mockLive(page);
   let enrollments = 0;
   await page.route("**/api/devices/enroll", (route) => {
     enrollments++;

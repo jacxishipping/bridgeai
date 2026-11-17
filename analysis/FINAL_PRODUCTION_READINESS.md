@@ -53,18 +53,18 @@ The system is now a **strong lab / staging candidate**: it can be run locally, s
 | 19 | Dashboard test suite rewired to real modules; Tier 5 included (TST-04/05) | **MET** | Tier 1/2 import real modules; Tier 5 + challenger wired in; `npm test` 430/430 + i18n 3/3 (parent-verified) |
 | 20 | Docs corrected; one status per feature (DOC sweep) | **MET** | Wave 2B sweep: test counts, Fluent 2 → JX-UI, SECURITY.md v0.3.x, single mTLS/OIDC/macOS statements, `ORIGINAL_REQUEST.md` citation removed, threat-model updated. (The api-reference rewrite is claimed by Wave 2B as part of the sweep; its completeness was not re-checked line-by-line for this report.) |
 
-**Gate tally: 13 MET, 6 PARTIALLY MET, 1 NOT MET.** (Unchanged by Wave 5A — gates 15 and 17 gained code fixes, but neither flips until the live re-soak / live-DB migration run happens in a later phase.)
+**Gate tally: 13 MET, 6 PARTIALLY MET, 1 NOT MET.** (Unchanged by Wave 5A — gates 15 and 17 gained code fixes, but neither flips until the live re-soak / live-DB migration run happens in a later phase. Unchanged by Wave 5B too: no gate condition covers the E2E tests (TST-09/TST-10/TST-13), so closing those three register rows moves no gate — but see the re-verification table below, where the 10-step E2E row now flips to DONE.)
 
 ### Re-verification required before a GO (report 21 §3, final paragraph)
 
 | Required re-verification | Status |
 |---|---|
 | Fresh, independent audit pass over the P0/P1 fixes (not a self-review) | **NOT DONE** — every verification in this remediation was performed by the same agent chain that made the changes, or its parent |
-| 10-step E2E workflow (brief Part 10) passing against a local plane | **NOT DONE** — no such test exists (TST-09 open) |
+| 10-step E2E workflow (brief Part 10) passing against a local plane | **DONE (Wave 5B, 17 Nov 2026)** — `tests/e2e/test_workflow_10step.py::test_ten_step_workflow` passes against a local plane (TestClient, fresh temp SQLite DB): enroll → heartbeat → create → claim → real `dispatch` of `get_resource_usage` → result → admin read → Tier-3 approval gate (claim blocked before approval, allowed after) → cancel → audit + revoke with 401 after revoke. **Failure/recovery tests also done (TST-10):** `tests/e2e/test_failure_recovery.py` (6 tests: restart recovery on the same DB file, duplicate-result 409, cancel-in-flight + late-result 409, e-stop block + resume, malformed-input 4xx, revoked/unknown token 401) — all passing. Honest scope: local plane only, no live device, no network. |
 | 4-worker load test | **NOT DONE** (see gate 15) |
 | Postgres restore drill | **NOT DONE** (see gate 16) |
 | WebRTC E2E test with a real browser peer | **NOT DONE** — unit tests with fake senders only; aiortc not installed |
-| Full Python + dashboard suites with published logs | **DONE** — 776 passed / 12 pre-existing failures + 430/430 dashboard; logs retained (`FINAL_TEST_RESULTS.md`, `~/workspace/tmp/pytest-wave5a.log`). Wave 5A added 26 tests (all passing); the 12 failures are the known baseline set — one swap: the documented flaky `test_concurrent_claim_and_cancel_under_load` tripped its 5.0 s wall-clock bound at 5.03 s (all 30 tasks claimed exactly once), while `test_capture_desktop_bettercam_uses_monitor_index` passed this run |
+| Full Python + dashboard suites with published logs | **DONE** — Wave 5B (17 Nov 2026): Python **784 passed / 11 failed / 5 skipped** (baseline 12 failures minus `test_capture_desktop_bettercam_uses_monitor_index`, which passed this run; the other 11 are the known baseline set — see `FINAL_TEST_RESULTS.md` §1–§2); dashboard **430/430 + i18n 3/3**; **Playwright 126/126 passed locally** (brand 5, dashboard 44, density 3, live-workspace 24, localization 32, operations 18 — including the rewritten OIDC exchange-code test). Logs retained (`FINAL_TEST_RESULTS.md`, `~/workspace/tmp/pytest-wave5a.log`). Wave 5A added 26 tests (all passing); Wave 5B added 7 Python tests (all passing). The documented flaky `test_concurrent_claim_and_cancel_under_load` passed this run (as in Wave 4; it tripped only in the Wave 5A run at 5.03 s vs the 5.0 s bound, all 30 tasks claimed exactly once). |
 
 ## 2. Verdict per area (report 21 §1, re-scored)
 
@@ -76,9 +76,9 @@ The system is now a **strong lab / staging candidate**: it can be run locally, s
 | Database | NO-GO | **NO-GO** | No Postgres boot/restore drill; pool deferred; `tasks.device_id` deliberately has no FK |
 | Distributed reliability | NO-GO | **NO-GO** | No live two-worker verification; no load test; DIST-08 residual (0.5 s poll still writes a `task_events` row per call) |
 | WebRTC / desktop control | NO-GO | **NO-GO** | No live peer run; C++ uncompiled; F08-07 DLL surface fixed in code (default-deny + per-session arming) but uncompiled; dual stacks unconsolidated (OV-03) |
-| Dashboard | NO-GO as shipped default | **CONDITIONAL GO for the live workspace** | Live workspace is honest and tested (430/430); e2e still tests the demo by design and was never run; `main.tsx` sync OIDC wrapper removed and enrollment token masked (Wave 5A) |
+| Dashboard | NO-GO as shipped default | **CONDITIONAL GO for the live workspace** | Live workspace is honest and tested (430/430); Playwright e2e now run locally 126/126 (Wave 5B) — most specs test the demo by design, live-workspace specs use a mocked live API; `main.tsx` sync OIDC wrapper removed and enrollment token masked (Wave 5A) |
 | Deployment | NO-GO | **NO-GO** | P-11 closed and `AI_BRIDGE_INSECURE_TLS=1` hatch removed (Wave 5A); CFN heredoc anomaly; no live deploy/boot verification (no Docker daemon, no nginx binary); P-07/P-08/P-12/P-15 open |
-| Testing | NO-GO | **CONDITIONAL** | Suite is real and green (750 + 430/430); no e2e, no failure/recovery tests, C++ tests never run, flaky timing test unquarantined |
+| Testing | NO-GO | **CONDITIONAL** | Suite is real and green (784 Python + 430/430 dashboard + 126/126 Playwright local, Wave 5B); 10-step E2E + failure/recovery tests now exist and pass locally; C++ tests never run, flaky timing test unquarantined |
 | Documentation | NO-GO as a trust source | **CONDITIONAL** | Sweep done; api-reference rewrite not re-checked line-by-line; some residuals (see DOC rows) |
 | MCP implementation | NO-GO | **CONDITIONAL** (code) | Gate + audit + tiers live; PKCE now required (Wave 5A); DPoP/PAR absent; stateless HTTP (F-06-16) untouched |
 | Platform agents | NO-GO | **CONDITIONAL** (code) | Worker thread + heartbeat + drain + 401 classification done; GUI rebase infeasible (behaviours adopted in place); macOS never run; Windows GUI drain unexecuted |
@@ -94,7 +94,7 @@ Scores are the remediation team's self-assessment on report 22's 1–10 scale, f
 | Architecture | 4/10 | **6/10** | `app.py` split into 9 routers; one registry, one limiter, one task service, one audit writer (mostly); route snapshot identical. Still two WebRTC stacks, two MCP surfaces in places, and in-process state that constrains multi-worker operation |
 | Python code quality | 4/10 | **6/10** | God modules split; error taxonomy; structured redaction; Settings cached/validated. Still: dead `audit.py::audit_event`, remaining duplication, regex SQL replaced only in Wave 4 |
 | C++ code quality | 5/10 | **5/10** | Code improved (fake IDR gone, CHECK() tests, single-instance guards, honest `StartSession`) but **uncompiled and unrun** — no evidence to raise the score |
-| Frontend architecture | 5/10 | **6/10** | Honest default, real test suite, stream tickets, CSRF on session POSTs. Held back by demo-only e2e |
+| Frontend architecture | 5/10 | **6/10** | Honest default, real test suite, stream tickets, CSRF on session POSTs. Playwright e2e now run locally (126/126, Wave 5B) but still demo-by-design for most specs; one real app bug found and fixed by the run (duplicate `<h1>` on 4 views — `VIEWS_WITH_OWN_HEADER` in `src/App.tsx`) |
 | MCP implementation | 4/10 | **6/10** | One gate on all tools, audit live, proper outbound client with `initialize`, error taxonomy. Held back by no DPoP/PAR, stateless HTTP, no resources/prompts |
 | Security | 3/10 | **5/10** | All 16 P0 bypasses closed in code; audit real and atomic; secrets encrypted and scrubbed. Held back by the native surface (fixed in source, uncompiled) and zero live verification |
 | Authentication | 4/10 | **5/10** | Legacy token off, CSRF on, OIDC exchange-code flow, 401 split, PKCE required (Wave 5A). Held back by stdio bearer-less by design, native plaintext remnants |
@@ -104,7 +104,7 @@ Scores are the remediation team's self-assessment on report 22's 1–10 scale, f
 | WebRTC implementation | 4/10 | **5/10** | View-only/takeover enforced in code, RTCP ABR, ICE gate, held-button release. Held back by no live peer run and uncompiled C++ |
 | Performance | 4/10 | **5/10** | List projection, indexes, single-query fleet health, COUNT-first prune. Held back by pool deferred and no load test or benchmark |
 | Scalability | 3/10 | **4/10** | Multi-worker operation is safer in code; still no evidence above ~20 devices and no load harness |
-| Testing | 2/10 | **6/10** | 750 Python tests passing with published logs; dashboard suite real (430/430). Held back by no e2e, no failure/recovery tests, C++ tests never run, flaky timing test |
+| Testing | 2/10 | **7/10** | 784 Python tests passing with published logs; dashboard suite real (430/430); Playwright 126/126 local; 10-step E2E + failure/recovery tests now exist and pass locally. Held back by C++ tests never run and the flaky timing test (unquarantined) |
 | Maintainability | 4/10 | **6/10** | Splits + consolidation + taxonomy + parity tooling. Held back by dead code, remaining duplication, and the audit-writer split |
 | Documentation | 4/10 | **6/10** | Sweep done; one status per feature for mTLS/OIDC/macOS; counts corrected. Held back by the unrechecked api-reference rewrite and doc residuals |
 | Production readiness | 2/10 | **4/10** | A much stronger lab system: all P0s closed in code, suite green, honest dashboard. Still NO-GO — the gate conditions in §1 are not all met and the required re-verification has not happened |
@@ -117,8 +117,8 @@ In order, each with its evidence requirement:
 2. **Postgres boot + backup/restore drill** (DB-01/02/03/05). Boot the plane from migrations alone on Postgres; run `scripts/backup_restore.py` end-to-end; run `scripts/check_schema_parity.py` against Postgres.
 3. **Two-worker Redis fan-out + 4-worker load test** (DIST-03, PERF-02, gate 15). Prove the scheduler fires once, cancels reach agents on other workers, OIDC completes across workers, and the effective rate limit equals the configured limit.
 4. **WebRTC E2E with a real browser peer** (F13-03, F13-07, F13-10). Prove view-only/takeover enforcement and the ICE gate against a live peer.
-5. **10-step E2E workflow against a local plane** (TST-09) + failure/recovery tests (TST-10) + Playwright e2e updated to the exchange-code flow and run (TST-13).
-6. **Close the remaining open P1s**: TST-09/10 (E2E — see item 5). The Wave 5A wave closed the other open P1s in code: F-04-15, F-04-22, F-05-04, F-06-12, F08-02/03/04/07 (C++ source, build pending — see item 1), plus P-11, the v1 WS token fallback, and the `main.tsx` sync OIDC wrapper.
+5. **10-step E2E workflow against a local plane** (TST-09) + failure/recovery tests (TST-10) + Playwright e2e updated to the exchange-code flow and run (TST-13) — **DONE (Wave 5B, 17 Nov 2026):** `tests/e2e/test_workflow_10step.py` (1 test, 10 asserted steps) and `tests/e2e/test_failure_recovery.py` (6 tests) pass; Playwright 126/126 passed locally (OIDC exchange-code test rewritten; one real app bug fixed — duplicate `<h1>` on live-desktop-studio / interactive-terminal / human-approvals / mcp-and-oauth — plus stale test expectations corrected to the current UI). All local-plane/local-browser evidence only.
+6. **Close the remaining open P1s**: TST-09/10 **closed by Wave 5B** (see item 5) — no open P1s remain. The Wave 5A wave closed the other open P1s in code: F-04-15, F-04-22, F-05-04, F-06-12, F08-02/03/04/07 (C++ source, build pending — see item 1), plus P-11, the v1 WS token fallback, and the `main.tsx` sync OIDC wrapper.
 7. **Fresh, independent audit pass** over the P0/P1 fixes (not a self-review) — the report 21 requirement. Only after 1–6 does an independent pass have something complete to review.
 
 ## 5. Acceptable uses (unchanged from report 21 §5, now on a stronger codebase)

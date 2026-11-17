@@ -65,7 +65,9 @@ test("search, switch and reload preserve language and unsubmitted credentials", 
   await expect(page.getByLabel("Token de administrador", { exact: true })).toHaveValue("");
   await page.getByRole("button", { name: "Idioma", exact: true }).click();
   await page.getByRole("searchbox").fill("not-a-language");
-  await expect(page.getByRole("status")).toContainText("No matching translation");
+  // Two role=status elements exist on this page (the language dialog's and
+  // the login view's own reachability notice), so scope to the dialog's.
+  await expect(page.getByRole("status").filter({ hasText: "No matching translation" })).toContainText("No matching translation");
   await page.getByRole("searchbox").fill("English");
   await page.getByRole("button", { name: "English English" }).click();
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
@@ -92,7 +94,9 @@ test("blocked storage changes this visit only and explains why", async ({ page }
   await page.getByRole("searchbox").fill("Deutsch");
   await page.getByRole("button", { name: "Deutsch German" }).click();
   await expect(page.locator("html")).toHaveAttribute("lang", "de");
-  await expect(page.getByRole("status")).toContainText("visit only");
+  // Two role=status elements exist on this page (the language dialog's and
+  // the login view's own reachability notice), so scope to the dialog's.
+  await expect(page.getByRole("status").filter({ hasText: "visit only" })).toContainText("visit only");
   await page.getByRole("button", { name: "Schließen", exact: true }).last().click();
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("lang", "en");

@@ -38,6 +38,14 @@ const VIEWS_WITH_OWN_HEADER: ViewId[] = [
   "overview",
   "devices",
   "device-360-system",
+  // These views render their own <header><h1> (LiveDesktopView, TerminalView,
+  // HumanApprovalsView, ConnectionsView); without this entry App.tsx would
+  // render a second shell h1 above it (duplicate-h1 a11y defect, caught by
+  // the Playwright layout tests).
+  "live-desktop-studio",
+  "interactive-terminal",
+  "human-approvals",
+  "mcp-and-oauth",
 ];
 
 export const App: React.FC = () => {

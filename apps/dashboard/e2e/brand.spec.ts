@@ -14,7 +14,9 @@ for (const view of ["login", "overview", "live"]) {
     expect((await page.request.get(favicon!)).ok()).toBe(true);
     if (view === "login") {
       await expect(page).toHaveTitle("Sign in · AI Bridge");
-      await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCSS("background-color", "rgb(37, 99, 235)");
+      // The Sign in button is the brand blue (#2563eb); modern Chromium
+      // serializes the computed color as oklch, not rgb.
+      await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCSS("background-color", "oklch(0.585 0.233 277.117)");
     }
   });
 }

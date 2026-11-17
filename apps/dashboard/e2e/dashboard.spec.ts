@@ -1,5 +1,28 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+
+// D-01 demo gating: demo views render seeded data only after the explicit
+// "Explore demo workspace" choice on the sign-in screen; a deep-linked demo
+// hash without credentials resolves to #/login. Enter the demo the way the
+// app intends, then dismiss the simulated-data interstitial so the views
+// underneath are interactive.
+async function enterDemo(page: Page) {
+  await page.goto("/#/login");
+  await page.getByRole("button", { name: "Explore demo workspace", exact: true }).click();
+  await expect(page).toHaveURL(/#\/overview$/);
+  await page.getByRole("button", { name: "Continue to demo", exact: true }).click();
+}
+
+// Destructive confirmations are hold-to-confirm buttons (TopHeader demo stop,
+// LiveControlView emergency stop): the timer starts on mousedown and fires
+// only if still held after holdDurationMs.
+async function holdButton(page: Page, name: string, holdMs: number) {
+  const button = page.getByRole("button", { name, exact: true });
+  await button.hover();
+  await page.mouse.down();
+  await page.waitForTimeout(holdMs);
+  await page.mouse.up();
+}
 
 const views = [
   "login", "overview", "devices", "device-360-system", "task-queue-and-vision",
@@ -14,6 +37,7 @@ for (const width of [390, 1440]) {
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.setViewportSize({ width, height: 1000 });
+      await enterDemo(page);
       await page.goto(`/#/${view}`);
       await expect(page.locator("h1")).toHaveCount(1);
       const main = page.locator("main");
@@ -22,12 +46,13 @@ for (const width of [390, 1440]) {
       const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
       expect(results.violations).toEqual([]);
       expect(errors).toEqual([]);
-      if (view !== "login") await expect(page.getByRole("note").filter({ hasText: "Demo workspace" })).toBeVisible();
+      if (view !== "login") await expect(page.getByRole("note").filter({ hasText: "SAMPLE DATA" })).toBeVisible();
     });
   }
 }
 
 test("search supports keyboard selection, Escape, and focus restoration", async ({ page }) => {
+  await enterDemo(page);
   await page.goto("/#/overview");
   const trigger = page.getByRole("button", { name: "Search pages and devices", exact: true });
   await trigger.click();
@@ -46,6 +71,7 @@ test("search supports keyboard selection, Escape, and focus restoration", async 
 
 test("mobile drawer navigates and restores page context on refresh and Back", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
+  await enterDemo(page);
   await page.goto("/#/overview");
   await page.getByRole("button", { name: "Open navigation" }).click();
   await page.getByRole("button", { name: "Devices", exact: true }).click();
@@ -60,20 +86,30 @@ test("mobile drawer navigates and restores page context on refresh and Back", as
 test("demo stop requires confirmation and never requests a live action", async ({ page }) => {
   const mutations: string[] = [];
   page.on("request", (request) => { if (request.method() !== "GET") mutations.push(request.url()); });
+  await enterDemo(page);
   await page.goto("/#/overview");
   await page.getByRole("button", { name: "Emergency All-Stop", exact: true }).click();
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByRole("button", { name: "Emergency All-Stop", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Emergency All-Stop", exact: true }).click();
-  await page.getByRole("button", { name: "Stop demo fleet", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Demo fleet stopped");
+  // The demo confirmation is a hold-to-confirm (700 ms); a plain click does nothing.
+  await holdButton(page, "Hold to stop demo tasks", 1000);
+  // The overview renders many role=status elements; scope to the header's
+  // screen-reader announcement.
+  await expect(page.getByRole("status").filter({ hasText: "Demo fleet stopped" })).toContainText("Demo fleet stopped");
   expect(mutations).toEqual([]);
 });
 
 test("overview keeps only essential counts and opens task details on demand", async ({ page }) => {
+  await enterDemo(page);
   await page.goto("/#/overview");
   const main = page.locator("main");
-  await expect(main.locator("dl > div")).toHaveCount(3);
+  // The overview's essential counts are ProductMetricCard buttons (six of
+  // them), not the <dl> the old test expected — the only <dl> on this page
+  // is inside the Task details dialog, opened below.
+  for (const label of ["Devices online", "Active tasks", "Awaiting approval", "Completed (1h)", "Failed (1h)", "Queue depth"]) {
+    await expect(main.getByRole("button", { name: label })).toBeVisible();
+  }
   await expect(main.locator("li")).toHaveCount(5);
   await expect(main.getByText("14,291", { exact: true })).toHaveCount(0);
   await expect(main.getByText(/mTLS|99.87%|Instant Fleet Launchpad/)).toHaveCount(0);
@@ -86,6 +122,7 @@ test("overview keeps only essential counts and opens task details on demand", as
 });
 
 test("simplified inventory filters and device links still work", async ({ page }) => {
+  await enterDemo(page);
   await page.goto("/#/devices");
   await page.getByRole("button", { name: "Offline (1)", exact: true }).click();
   const inventory = page.getByRole("region", { name: "Device inventory" });
@@ -101,6 +138,9 @@ test("simplified inventory filters and device links still work", async ({ page }
 
 test("invalid token is rejected by the API, not accepted locally", async ({ page }) => {
   await page.route("**/api/auth/me", (route) => route.fulfill({ status: 401, json: { detail: "Invalid token" } }));
+  // The sign-in form stays disabled until the control-plane health probe
+  // reports reachable, so the probe needs its mock too.
+  await page.route("**/health", (route) => route.fulfill({ json: { version: "test", emergency_stop: false } }));
   await page.goto("/#/login");
   await page.getByLabel("Admin token", { exact: true }).fill("invalid-token");
   const request = page.waitForRequest("**/api/auth/me");
@@ -126,15 +166,29 @@ test("account authentication stores a session rather than an admin token", async
   expect(await page.evaluate(() => sessionStorage.getItem("ai_bridge_admin_token"))).toBeNull();
 });
 
-test("identity callback removes the token from the URL and verifies the session", async ({ page }) => {
+test("OIDC exchange-code callback stores a session and strips the code from the URL", async ({ page }) => {
+  // F-05-15 (Wave 4): the server redirects with a single-use 60 s
+  // `?oidc_code=`; the dashboard exchanges it once via
+  // POST /api/auth/oidc/exchange for a session token. No token ever
+  // appears in the URL (the old `/#session_token=` fragment flow is gone).
+  const exchangeRequests: unknown[] = [];
+  await page.route("**/api/auth/oidc/exchange", (route) => {
+    exchangeRequests.push(route.request().postDataJSON());
+    return route.fulfill({ json: { session_token: "oidc-session" } });
+  });
   await page.route("**/api/auth/me", (route) => route.fulfill({ json: { username: "sso-reader", role: "viewer" } }));
   await page.route("**/health", (route) => route.fulfill({ json: { version: "test", emergency_stop: false } }));
   await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
   const identityRequest = page.waitForRequest("**/api/auth/me");
-  await page.goto("/#session_token=callback-session");
-  expect((await identityRequest).headers()["x-session-token"]).toBe("callback-session");
+  await page.goto("/?oidc_code=one-time-code-123");
+  expect((await identityRequest).headers()["x-session-token"]).toBe("oidc-session");
   await expect(page).toHaveURL(/#\/live$/);
+  expect(page.url()).not.toContain("oidc_code");
   await expect(page.getByText("Signed in as sso-reader", { exact: false })).toBeVisible();
+  expect(exchangeRequests).toHaveLength(1);
+  expect(exchangeRequests[0]).toEqual({ code: "one-time-code-123" });
+  expect(await page.evaluate(() => sessionStorage.getItem("ai_bridge_session_token"))).toBe("oidc-session");
+  expect(await page.evaluate(() => sessionStorage.getItem("ai_bridge_admin_token"))).toBeNull();
   expect(await page.evaluate(() => localStorage.getItem("ai_bridge_session_token"))).toBeNull();
 });
 
@@ -164,11 +218,14 @@ test("live stop requires confirmation and shows API failures inside the dialog",
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   expect(changes).toBe(0);
   await page.getByRole("button", { name: "Stop fleet", exact: true }).click();
-  await page.getByRole("button", { name: "Confirm change", exact: true }).click();
+  // The live confirmation is a hold-to-confirm (1200 ms); a plain click does nothing.
+  await holdButton(page, "Hold to stop fleet", 1600);
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("503");
   expect(changes).toBe(1);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Emergency stop is not active");
+  // The "Emergency stop is not active" text lives in the Fleet safety
+  // region's status; the live view renders several role=status elements.
+  await expect(page.getByRole("region", { name: "Fleet safety" }).getByRole("status")).toContainText("Emergency stop is not active");
 });
 
 for (const width of [320, 768]) {
