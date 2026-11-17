@@ -34,7 +34,17 @@ def test_worm_siem_emit_posts(monkeypatch):
     class _Resp:
         status_code = 204
 
-    with patch("httpx.post", return_value=_Resp()) as post:
+    # Hermetic: emit_audit_event validates the URL with real DNS first
+    # (validate_outbound_url, SSRF fail-closed). siem.example is a reserved
+    # .example host that only resolves on this VM's wildcard DNS, so on a
+    # real macOS/Windows runner it NXDOMAINs and emit returns ok=False.
+    # Patch the validator in the worm_siem namespace (the production
+    # validator itself is untouched and still fail-closed) so this test
+    # exercises the emit/post path without network DNS.
+    with (
+        patch("ai_bridge.control.worm_siem.validate_outbound_url", side_effect=lambda u: u),
+        patch("httpx.post", return_value=_Resp()) as post,
+    ):
         out = worm_siem.emit_audit_event({"tool": "enroll_device", "decision": "allowed"})
         assert out["ok"] is True
         assert post.called

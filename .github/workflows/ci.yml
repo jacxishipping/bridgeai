@@ -71,10 +71,17 @@ jobs:
         with: { python-version: "3.12" }
       - name: Install Python package
         run: pip install -e ".[dev]"
+      # NOTE: -DCMAKE_POLICY_VERSION_MINIMUM=3.5 must NOT be passed here.
+      # The Windows runner's shell mangles the dotted value ("3.5" arrives
+      # as "3" plus a stray ".5" argument, and CMake rejects it: Invalid
+      # CMAKE_POLICY_VERSION_MINIMUM value "3"). windows-agent/CMakeLists.txt
+      # already sets it internally (set(... FORCE)) inside the
+      # libdatachannel block, before all FetchContent declares, so the
+      # transitive deps with old minimums are covered without a flag.
       - name: Configure C++ agent with libdatachannel (Mbed TLS, no system OpenSSL)
         working-directory: windows-agent
         run: |
-          cmake -B build -DAIBRIDGE_WITH_LIBDATACHANNEL=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DAIBRIDGE_WITH_LIBDATACHANNEL=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build desktop agent
         working-directory: windows-agent
         run: cmake --build build --config Release --target ai_bridge_desktop -- /m
