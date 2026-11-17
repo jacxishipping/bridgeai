@@ -348,13 +348,16 @@ export async function runTier2Tests() {
       expect(src).toContain('role="alert"');
     });
 
-    it('F6-E3: The enrollment template interpolates the real token (no redaction); the no-token fallback uses <TOKEN>', async () => {
+    it('F6-E3: The enrollment copy command uses the real token; the displayed command and token line are masked', async () => {
       const src = readSource('views/DevicesView.tsx');
-      // Byte-verified: live Linux and Windows templates both embed
-      // ${enrolledToken}; only the no-token fallback shows a placeholder.
+      // Byte-verified: the *copy* templates embed ${enrolledToken};
+      // the *displayed* command shows a <TOKEN> placeholder and the
+      // token line shows the masked value (Wave 5A).
       expect(src).toContain('--device-token=${enrolledToken}');
       expect(src).toContain("-DeviceToken '${enrolledToken}'");
       expect(src).toContain('--device-token=<TOKEN>');
+      expect(src).toContain('enrolledTokenMasked');
+      expect(src).toContain('linuxEnrollCommandDisplay');
       expect(src).not.toContain('<redacted>');
       expect(api.terminalStreamUrl('a/b', 's?1')).toContain('a%2Fb');
       expect(api.terminalStreamUrl('a/b', 's?1')).toContain('s%3F1');

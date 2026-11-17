@@ -38,6 +38,7 @@ set(WIN32_SYSTEM_LIBS
     advapi32
     crypt32
     wtsapi32
+    userenv
     shcore
     winhttp
 )

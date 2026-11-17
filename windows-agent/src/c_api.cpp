@@ -199,6 +199,20 @@ AIBRIDGE_API int aibridge_encode_h264_frame(
     return static_cast<int>(au.annexb_nal_bytes.size());
 }
 
+AIBRIDGE_API int aibridge_set_input_permissions(int allow_mouse, int allow_keyboard, int allow_clipboard, int session_active) {
+    // F08-07: the only way to enable DLL input injection. Callers
+    // must pass the permissions of a live, authorised session;
+    // passing session_active=0 (or all-false) revokes input and
+    // releases any held keys/buttons via SetPermissions().
+    aibridge::input::SessionInputPermissions perms;
+    perms.allow_mouse = allow_mouse != 0;
+    perms.allow_keyboard = allow_keyboard != 0;
+    perms.allow_clipboard = allow_clipboard != 0;
+    perms.session_active = session_active != 0;
+    g_input.SetPermissions(perms);
+    return 1;
+}
+
 AIBRIDGE_API int aibridge_send_mouse_move(double x, double y, int is_normalized, int mon_x, int mon_y, int mon_w, int mon_h) {
     return g_input.MoveMouse(x, y, is_normalized != 0, mon_x, mon_y, mon_w, mon_h) ? 1 : 0;
 }

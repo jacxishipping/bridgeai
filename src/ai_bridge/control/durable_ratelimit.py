@@ -19,14 +19,62 @@ Backend selection (Wave 2A / PERF-02):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 from typing import Any
 
 log = logging.getLogger("ai_bridge.durable_ratelimit")
+
+# Wave 5A (rate-limiter lockout, confirmed live 2026-11-17): the Redis
+# sliding window must record ONLY admitted requests. The old code did
+# ``zadd`` of the current request BEFORE counting, so every rejected
+# request refreshed the window and a token that tripped the limit stayed
+# 429 forever under sustained load. The Lua script below makes the
+# prune -> count -> add-if-under-limit sequence atomic on real Redis
+# (one round trip, no interleaving across workers). Clients without
+# ``eval`` (old redis-py, test fakes) use the pipeline fallback in
+# ``_redis_allow_pipeline`` / ``_async_redis_allow_pipeline``, which
+# performs the same admit-only sequence in two round trips (racy under
+# concurrent writers, but it can never lock the window out: rejected
+# requests are never recorded).
+_RATE_LIMIT_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+local ttl = math.max(2, math.floor(window * 2) + 1)
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
+local count = redis.call('ZCARD', key)
+if count >= limit then
+  redis.call('EXPIRE', key, ttl)
+  return 0
+end
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, ttl)
+return 1
+"""
+
+
+def _rate_limit_ttl(window: float) -> int:
+    return max(2, int(window * 2) + 1)
+
+
+def _rate_limit_member(now: float) -> str:
+    # Unique per request: two requests in the same microsecond must not
+    # collapse into one sorted-set member (that would under-count).
+    return f"{now:.6f}:{secrets.token_hex(4)}"
+
+
+def _eval_not_supported(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "unknown command" in msg or "noscript" in msg or "eval" in msg
+
 
 _RATE_LOCK = threading.Lock()
 _MEMORY: dict[str, list[float]] = {}
@@ -112,6 +160,37 @@ def _memory_allow(key: str, limit: int, window: float) -> bool:
         return True
 
 
+def _redis_allow_pipeline(client: Any, key: str, limit: int, window: float, now: float) -> bool:
+    """Admit-only fallback for Redis clients without Lua ``eval``.
+
+    Prune expired entries, count, and only then record the request —
+    and only when it is admitted. Two round trips (racy under
+    concurrent writers, unlike the Lua path) but never records a
+    rejected request, so the window always drains.
+    """
+    redis_key = f"aibridge:ratelimit:{key}"
+    window_start = now - window
+    ttl = _rate_limit_ttl(window)
+    pipe = client.pipeline()
+    pipe.zremrangebyscore(redis_key, "-inf", window_start)
+    pipe.zcard(redis_key)
+    _, count = pipe.execute()
+    if count >= limit:
+        # Rejected: refresh the TTL so the key still expires, but do
+        # NOT add this request to the window. Via a pipeline: some
+        # clients (notably the async fakeredis-style clients used in
+        # tests) expose expire only on pipelines, not on the client.
+        pipe = client.pipeline()
+        pipe.expire(redis_key, ttl)
+        pipe.execute()
+        return False
+    pipe = client.pipeline()
+    pipe.zadd(redis_key, {_rate_limit_member(now): now})
+    pipe.expire(redis_key, ttl)
+    pipe.execute()
+    return True
+
+
 def _redis_allow(key: str, limit: int, window: float) -> bool | None:
     global _SYNC_REDIS, _SYNC_REDIS_OK, _SYNC_REDIS_FAILED_AT
     client = _get_sync_redis()
@@ -119,15 +198,17 @@ def _redis_allow(key: str, limit: int, window: float) -> bool | None:
         return None
     redis_key = f"aibridge:ratelimit:{key}"
     now = time.time()
-    window_start = now - window
     try:
-        pipe = client.pipeline()
-        pipe.zremrangebyscore(redis_key, "-inf", window_start)
-        pipe.zadd(redis_key, {f"{now:.6f}": now})
-        pipe.zcard(redis_key)
-        pipe.expire(redis_key, max(2, int(window * 2) + 1))
-        _, _, count, _ = pipe.execute()
-        return count <= limit
+        eval_fn = getattr(client, "eval", None)
+        if callable(eval_fn):
+            try:
+                admitted = eval_fn(_RATE_LIMIT_LUA, 1, redis_key, now, window, limit, _rate_limit_member(now))
+            except Exception as exc:
+                if _eval_not_supported(exc):
+                    return _redis_allow_pipeline(client, key, limit, window, now)
+                raise
+            return bool(admitted)
+        return _redis_allow_pipeline(client, key, limit, window, now)
     except Exception as exc:
         # Redis died mid-request: drop the cached client so the next call
         # re-probes (after the negative-cache cooldown) instead of reusing
@@ -231,6 +312,33 @@ async def _get_async_redis():
     return None
 
 
+async def _async_redis_allow_pipeline(client: Any, key: str, limit: int, window: float, now: float) -> bool:
+    """Async admit-only fallback for Redis clients without Lua ``eval``.
+
+    Same sequence as :func:`_redis_allow_pipeline`: prune, count, and
+    record only admitted requests.
+    """
+    redis_key = f"aibridge:ratelimit:{key}"
+    window_start = now - window
+    ttl = _rate_limit_ttl(window)
+    pipe = client.pipeline()
+    pipe.zremrangebyscore(redis_key, "-inf", window_start)
+    pipe.zcard(redis_key)
+    _, count = await pipe.execute()
+    if count >= limit:
+        # Rejected: refresh the TTL via a pipeline (see the sync
+        # fallback) and do NOT add this request to the window.
+        pipe = client.pipeline()
+        pipe.expire(redis_key, ttl)
+        await pipe.execute()
+        return False
+    pipe = client.pipeline()
+    pipe.zadd(redis_key, {_rate_limit_member(now): now})
+    pipe.expire(redis_key, ttl)
+    await pipe.execute()
+    return True
+
+
 async def _async_redis_allow(key: str, limit: int, window: float) -> bool | None:
     """Async Redis sliding-window check; None when Redis is unavailable."""
     global _ASYNC_REDIS, _ASYNC_REDIS_OK, _ASYNC_REDIS_FAILED_AT
@@ -239,15 +347,19 @@ async def _async_redis_allow(key: str, limit: int, window: float) -> bool | None
         return None
     redis_key = f"aibridge:ratelimit:{key}"
     now = time.time()
-    window_start = now - window
     try:
-        pipe = client.pipeline()
-        pipe.zremrangebyscore(redis_key, "-inf", window_start)
-        pipe.zadd(redis_key, {f"{now:.6f}": now})
-        pipe.zcard(redis_key)
-        pipe.expire(redis_key, max(2, int(window * 2) + 1))
-        _, _, count, _ = await pipe.execute()
-        return count <= limit
+        eval_fn = getattr(client, "eval", None)
+        if callable(eval_fn):
+            try:
+                admitted = eval_fn(_RATE_LIMIT_LUA, 1, redis_key, now, window, limit, _rate_limit_member(now))
+                if asyncio.iscoroutine(admitted):
+                    admitted = await admitted
+            except Exception as exc:
+                if _eval_not_supported(exc):
+                    return await _async_redis_allow_pipeline(client, key, limit, window, now)
+                raise
+            return bool(admitted)
+        return await _async_redis_allow_pipeline(client, key, limit, window, now)
     except Exception as exc:
         _ASYNC_REDIS = None
         _ASYNC_REDIS_OK = False

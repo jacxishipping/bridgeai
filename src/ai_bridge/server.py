@@ -67,8 +67,68 @@ except ImportError:  # pragma: no cover - registry not landed yet
 # Records are scoped to the session that requested them (F-04-01,
 # partial in Wave 1C — durable DB storage is Wave 2) and expire after
 # _APPROVAL_TTL_S so a stale approval cannot be replayed later.
+#
+# F-04-01 (Wave 5A): when the control-plane DB is configured
+# (AI_BRIDGE_MCP_AUDIT_DB, the same DB the audit writer uses),
+# approvals live in that DB's settings table (control/approval_store)
+# so they survive an MCP server restart and are visible to every
+# process sharing the DB. Without a configured DB the in-process dict
+# below remains the store (plain stdio use). The connection is cached
+# for the life of the process, like the cached Redis clients.
 _APPROVALS: dict[str, dict] = {}
 _APPROVAL_TTL_S = 15 * 60
+_APPROVAL_DB_CONN: Any | None = None
+_APPROVAL_DB_PATH: str | None = None
+
+
+def _approval_store_conn() -> Any | None:
+    """Cached control-DB connection for durable approvals, or None.
+
+    None means "no DB configured" (in-memory approvals) or "the DB
+    could not be opened" (fall back to in-memory rather than breaking
+    the approval flow; the failure is reported on stderr).
+    """
+    global _APPROVAL_DB_CONN, _APPROVAL_DB_PATH
+    try:
+        db_path = _audit_db_path()
+    except Exception:
+        return None
+    if db_path is None:
+        return None
+    db_path = str(db_path)
+    if _APPROVAL_DB_CONN is not None and _APPROVAL_DB_PATH == db_path:
+        return _APPROVAL_DB_CONN
+    if _APPROVAL_DB_CONN is not None:
+        try:
+            _APPROVAL_DB_CONN.close()
+        except Exception:
+            pass
+        _APPROVAL_DB_CONN = None
+        _APPROVAL_DB_PATH = None
+    try:
+        from .control import db as control_db
+
+        _APPROVAL_DB_CONN = control_db.connect(db_path)
+        _APPROVAL_DB_PATH = db_path
+        return _APPROVAL_DB_CONN
+    except Exception as exc:
+        print(f"[ai-bridge] durable approval store unavailable ({exc}); "
+              "using in-memory approvals", file=sys.stderr)
+        _APPROVAL_DB_CONN = None
+        _APPROVAL_DB_PATH = None
+        return None
+
+
+def _reset_approval_store_for_tests() -> None:
+    global _APPROVAL_DB_CONN, _APPROVAL_DB_PATH
+    try:
+        if _APPROVAL_DB_CONN is not None:
+            _APPROVAL_DB_CONN.close()
+    except Exception:
+        pass
+    _APPROVAL_DB_CONN = None
+    _APPROVAL_DB_PATH = None
+    _APPROVALS.clear()
 
 # R-P0-01 (Wave 1C): set ONLY by the explicit --unsafe-allow-anon CLI
 # flag in main(). The former anonymous-HTTP env var no longer
@@ -94,6 +154,19 @@ def _peek_local_approval(tool_name: str) -> bool:
         if now - float(rec.get("created_at", now)) > _APPROVAL_TTL_S:
             continue
         return True
+    # F-04-01 (Wave 5A): same check against the durable store, when one
+    # is configured. The in-memory dict is checked first so the common
+    # path stays a dict lookup.
+    try:
+        conn = _approval_store_conn()
+        if conn is not None:
+            from .control import approval_store
+
+            return approval_store.find_approved(
+                conn, tool_name, key, _APPROVAL_TTL_S, now
+            ) is not None
+    except Exception:
+        pass
     return False
 
 
@@ -111,6 +184,16 @@ def _consume_local_approval(tool_name: str) -> bool:
             continue
         rec["status"] = "used"
         return True
+    try:
+        conn = _approval_store_conn()
+        if conn is not None:
+            from .control import approval_store
+
+            return approval_store.consume_approved(
+                conn, tool_name, key, _APPROVAL_TTL_S, now
+            )
+    except Exception:
+        pass
     return False
 
 
@@ -464,6 +547,66 @@ def _validate_tool_args(tool_name: str, bound_args: dict[str, Any]) -> None:
 _GATE_DECIDE_EXEMPT = frozenset({"approve_task"})
 
 
+# F-04-22 cache for the durable emergency-stop read (see
+# _emergency_stop_active): last read time (monotonic) + value.
+_ESTOP_CACHE: dict[str, Any] = {"at": 0.0, "active": False}
+_ESTOP_CACHE_TTL_S = 1.0
+_ESTOP_EXEMPT_TOOLS = frozenset({"request_approval", "approve_task"})
+
+
+def _emergency_stop_active() -> bool:
+    """True when the emergency stop is active (mirror or durable flag).
+
+    F-04-22 (Wave 5A): the emergency stop was only a local mirror
+    (plane_control_flags, synced by agent heartbeats) and a durable
+    flag in the control-plane DB (control/plane_state.py) — neither
+    was consulted by the MCP gate, so local shell/desktop tools kept
+    executing while the stop was active. The gate checks both sources
+    before executing any state-changing tool (tier >= 2). Read-only
+    (tier 1) tools and the approval meta-tools are exempt: an admin
+    must still be able to inspect state and grant approvals while the
+    stop is active; executing on an approval stays blocked until the
+    stop is cleared. The durable read is best-effort (1 s cache,
+    read-only open of the control DB named by AI_BRIDGE_MCP_AUDIT_DB);
+    a read failure falls back to the local mirror rather than
+    blocking the gate.
+    """
+    try:
+        from .plane_control_flags import is_emergency_stop as _mirror_active
+
+        if _mirror_active():
+            return True
+    except Exception:
+        pass
+    now = time.monotonic()
+    if now - float(_ESTOP_CACHE.get("at", 0.0)) < _ESTOP_CACHE_TTL_S:
+        return bool(_ESTOP_CACHE.get("active", False))
+    active = False
+    try:
+        db_path = _audit_db_path()
+        if db_path is not None and os.path.exists(db_path):
+            import sqlite3
+
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM settings WHERE key='plane.emergency_stop'"
+                ).fetchone()
+                active = bool(row and str(row[0]) in ("1", "true", "True", "yes"))
+            finally:
+                conn.close()
+    except Exception:
+        active = False
+    _ESTOP_CACHE["at"] = now
+    _ESTOP_CACHE["active"] = active
+    return active
+
+
+def _reset_emergency_stop_cache_for_tests() -> None:
+    _ESTOP_CACHE["at"] = 0.0
+    _ESTOP_CACHE["active"] = False
+
+
 def _gated(fn):
     """Uniform MCP wrapper gate: validate -> decide -> execute -> audit.
 
@@ -513,6 +656,28 @@ def _gated(fn):
                              args=call_args, result_summary=coded,
                              db_path=db_path)
             raise PermissionError(coded)
+        # F-04-22: emergency stop blocks state-changing tools (tier >= 2)
+        # even when policy would otherwise allow them. Read-only tools
+        # and the approval meta-tools stay usable while the stop is on.
+        # The tier is checked first so read-only calls never touch the
+        # durable stop flag.
+        if tool_name not in _ESTOP_EXEMPT_TOOLS:
+            try:
+                tier_no = int(_tool_tier(tool_name))  # RiskTier is an IntEnum
+            except (TypeError, ValueError):
+                tier_no = 0
+            if tier_no >= 2 and _emergency_stop_active():
+                coded = error_detail(
+                    ErrorCode.POLICY_DENIED,
+                    "Emergency stop is active: state-changing tools are blocked "
+                    "until the emergency stop is cleared.",
+                )
+                record_tool_call(actor=actor, session_id=session_id, tool=tool_name,
+                                 tier=_tool_tier(tool_name),
+                                 device_id=device_id, decision="denied",
+                                 args=call_args, result_summary=coded,
+                                 db_path=db_path)
+                raise PermissionError(coded)
         try:
             result = fn(*args, **kwargs)
         except Exception as exc:
@@ -1040,11 +1205,28 @@ def request_approval(tool_name: str, reason: str) -> dict:
     """Create an approval request for a high-risk operation. It grants nothing by itself."""
     import uuid
     approval_id = uuid.uuid4().hex[:12]
-    # F-04-01 (partial, Wave 1C): scope the record to the requesting
-    # session with a creation timestamp; _peek/_consume only honour
-    # same-session, unexpired approvals. Durable DB storage is Wave 2.
-    _APPROVALS[approval_id] = {"tool": tool_name, "reason": reason, "status": "pending",
-                               "session": _session_key(), "created_at": time.time()}
+    # F-04-01 (Wave 5A): scope the record to the requesting session
+    # with a creation timestamp; _peek/_consume only honour
+    # same-session, unexpired approvals. When the control-plane DB is
+    # configured the record is stored durably (control/approval_store)
+    # so it survives a restart; otherwise it lives in _APPROVALS.
+    rec = {"tool": tool_name, "reason": reason, "status": "pending",
+           "session": _session_key(), "created_at": time.time()}
+    stored_durably = False
+    try:
+        conn = _approval_store_conn()
+        if conn is not None:
+            from .control import approval_store
+
+            approval_store.create_approval(
+                conn, approval_id, tool_name, reason, rec["session"],
+                created_at=rec["created_at"],
+            )
+            stored_durably = True
+    except Exception:
+        stored_durably = False
+    if not stored_durably:
+        _APPROVALS[approval_id] = rec
     return {"approval_id": approval_id, "status": "pending",
             "note": "An administrator must approve this via the dashboard or approve_task (admin bearer session)."}
 
@@ -1064,6 +1246,18 @@ def approve_task(approval_id: str) -> dict:
         raise PermissionError(error_detail(
             ErrorCode.AUTH_REQUIRED,
             "approve_task requires an authenticated admin session (HTTP bearer token)."))
+    # F-04-01 (Wave 5A): approve in the durable store when one is
+    # configured, else in the in-memory dict. A record the dashboard
+    # created in the DB is approved here too (same store, same id).
+    try:
+        conn = _approval_store_conn()
+        if conn is not None:
+            from .control import approval_store
+
+            if approval_store.set_approval_status(conn, approval_id, "approved"):
+                return {"approval_id": approval_id, "status": "approved"}
+    except Exception:
+        pass
     rec = _APPROVALS.get(approval_id)
     if rec is None:
         raise ValueError(error_detail(ErrorCode.APPROVAL_NOT_FOUND, f"Unknown approval_id: {approval_id}."))

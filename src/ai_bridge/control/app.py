@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import socket
 import threading
@@ -856,23 +857,37 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     if os.environ.get("AI_BRIDGE_CSRF_DISABLED", "").strip().lower() not in ("1", "true", "yes"):
         app.middleware("http")(csrf_middleware)
     # Browser dashboards call the API cross-origin; allow_credentials=True
-    # requires an explicit origin list (not "*"). Extend via AI_BRIDGE_CORS_ORIGINS.
+    # requires an explicit origin list (not "*"). Extend via
+    # AI_BRIDGE_CORS_ORIGINS / AI_BRIDGE_DASHBOARD_URL. F-05-04 (Wave 5A):
+    # wildcard methods/headers with credentials are gone — the allowlist
+    # below is the full set the dashboard and agents need. The bare-IP
+    # origin (http://201.79.36.129) and the placeholder
+    # https://your-aws-domain.com were removed: credentials must never
+    # be sent to a plaintext bare-IP origin, and a placeholder origin
+    # trusts a domain nobody owns. Named production origins below are
+    # the deployed dashboard hosts; any other origin must be added
+    # explicitly via AI_BRIDGE_CORS_ORIGINS.
     from . import production_readiness as _prodready_cors
 
     allowed_origins = [
         "http://127.0.0.1:5173",
         "http://localhost:5173",
-        "http://201.79.36.129",
         "https://jxiptvplayer.app",
         "https://ai-bridge-dashboard.onrender.com",
-        _prodready_cors.env_public_base_url() or "https://your-aws-domain.com",
+        _prodready_cors.env_public_base_url() or "",
         os.environ.get("AI_BRIDGE_DASHBOARD_URL", ""),
     ]
     for origin in os.environ.get("AI_BRIDGE_CORS_ORIGINS", "").split(","):
         allowed_origins.append(origin.strip())
     allowed_origins = [o for o in dict.fromkeys(allowed_origins) if o]
     app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
-                       allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+                       allow_credentials=True,
+                       allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                       allow_headers=["Authorization", "Content-Type",
+                                      "X-Admin-Token", "X-Session-Token",
+                                      "X-Device-Token", "X-CSRF-Token",
+                                      "X-Client-Cert-Fingerprint",
+                                      "X-SSL-Client-Fingerprint"])
     app.state.conn = conn
     app.state.admin_token = token
     app.state.emergency_stop = False
@@ -880,6 +895,22 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     from .v1_routes import bind_control_connection, hydrate_human_takeover_from_db
 
     plane_state.sync_emergency_stop_to_app(conn, app.state)
+    # SEC-06 (Wave 5A): re-encrypt any legacy plaintext MCP OAuth
+    # secrets left over from before Fernet encryption landed. Best
+    # effort and idempotent: a missing token key (or any failure) is
+    # logged and never fails boot — the plaintext rows stay readable
+    # until an operator runs scripts/migrate_mcp_secrets_to_fernet.py
+    # with a key configured.
+    try:
+        from . import mcp_oauth as _mcp_oauth_boot
+
+        _mig = _mcp_oauth_boot.migrate_plaintext_secrets(conn)
+        if _mig["total"]:
+            logging.getLogger("ai_bridge.control.app").info(
+                "migrated %d plaintext MCP OAuth secret(s) to Fernet", _mig["total"])
+    except Exception as _mig_exc:
+        logging.getLogger("ai_bridge.control.app").warning(
+            "plaintext MCP secret migration skipped: %s", _mig_exc)
     hydrate_human_takeover_from_db(conn)
     bind_control_connection(conn)
     role_catalog.seed_role_catalog(conn)

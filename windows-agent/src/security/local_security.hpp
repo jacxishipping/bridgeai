@@ -43,7 +43,19 @@ public:
     static bool SendAuthenticatedMessage(HANDLE pipe, const std::string& msg_type, const std::string& json_payload, const std::string& shared_secret);
     static bool ReadAuthenticatedMessage(HANDLE pipe, std::string& out_msg_type, std::string& out_json_payload, const std::string& shared_secret);
 
-    static std::string ComputeTag(const std::string& msg_type, const std::string& payload, const std::string& secret);
+    // F08-03 (Wave 5A): replay protection. The wire format is
+    //   msg_type "\n" nonce "\n" timestamp "\n" tag "\n" payload
+    // where the tag covers msg_type, nonce, timestamp, and payload.
+    // BuildWireMessage / ParseAndVerifyWire are pure functions (no
+    // I/O) so the replay rules are unit-testable without a pipe:
+    // ParseAndVerifyWire rejects stale timestamps (outside ±120 s),
+    // malformed nonces, bad tags, and any nonce seen before within
+    // the window. Send/ReadAuthenticatedMessage are thin wrappers
+    // around them.
+    static std::string BuildWireMessage(const std::string& msg_type, const std::string& json_payload, const std::string& shared_secret);
+    static bool ParseAndVerifyWire(const std::string& wire, const std::string& shared_secret, std::string& out_msg_type, std::string& out_json_payload);
+
+    static std::string ComputeTag(const std::string& msg_type, const std::string& nonce, int64_t timestamp_seconds, const std::string& payload, const std::string& secret);
 };
 
 } // namespace security

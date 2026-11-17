@@ -188,18 +188,6 @@ export async function consumeIdentityRedirectAsync(): Promise<boolean> {
   }
 }
 
-export function consumeIdentityRedirect() {
-  // Synchronous wrapper for the existing call site in main.tsx (which calls
-  // this synchronously before rendering). The code is stripped from the URL
-  // synchronously and the exchange runs in the background; the live view
-  // re-verifies the session via /api/auth/me before showing any data, so a
-  // token that lands a moment later is picked up there. Follow-up: have
-  // main.tsx await consumeIdentityRedirectAsync() before rendering instead.
-  if (!new URLSearchParams(window.location.search).has("oidc_code")) return false;
-  void consumeIdentityRedirectAsync();
-  return true;
-}
-
 export async function authenticate(credentials: { token: string } | { username: string; password: string }) {
   clearCredentials();
   try {

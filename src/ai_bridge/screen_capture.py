@@ -12,6 +12,7 @@ Features:
 from __future__ import annotations
 
 import ctypes
+import os
 import platform
 import time
 from pathlib import Path
@@ -20,44 +21,46 @@ from typing import Any
 try:
     from PIL import Image
 except ImportError:
+    # F-04-15: Pillow is REQUIRED for screen capture. The old fallback
+    # class silently fabricated images (frombuffer() returned a stub
+    # whose save() wrote the first 1024 raw bytes) so callers believed
+    # a capture had succeeded when no real image existed. A missing
+    # Pillow must fail loudly at the point of use, never fabricate.
+    # The inert names below (Resampling, Image.Image) exist only so
+    # module import and type annotations keep working without Pillow;
+    # every method that would produce or transform image data raises.
+    _PIL_MISSING_MSG = (
+        "Pillow is required for screen capture but is not installed "
+        "(pip install pillow); refusing to fabricate an image."
+    )
+
     class _FallbackResampling:
         BILINEAR = 2
 
     class _FallbackImageInstance:
-        def __init__(self, width: int, height: int, raw: bytes, mode: str = "RGB"):
-            self.width = int(width)
-            self.height = int(height)
-            self._raw = raw
-            self.mode = mode
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError(_PIL_MISSING_MSG)
 
-        @property
-        def size(self) -> tuple[int, int]:
-            return (self.width, self.height)
+        def resize(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(_PIL_MISSING_MSG)
 
-        def resize(self, size: tuple[int, int], _resample: Any = None) -> "_FallbackImageInstance":
-            return _FallbackImageInstance(size[0], size[1], self._raw, self.mode)
+        def convert(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(_PIL_MISSING_MSG)
 
-        def convert(self, mode: str) -> "_FallbackImageInstance":
-            return _FallbackImageInstance(self.width, self.height, self._raw, mode)
-
-        def save(self, fp: Any, format: str | None = None, **_kwargs: Any) -> None:
-            if hasattr(fp, "write"):
-                fp.write(self._raw[:1024] or b"RAW")
-            else:
-                Path(fp).write_bytes(self._raw[:1024] or b"RAW")
+        def save(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError(_PIL_MISSING_MSG)
 
     class Image:  # type: ignore[no-redef]
         Image = _FallbackImageInstance
         Resampling = _FallbackResampling
 
         @staticmethod
-        def frombuffer(
-            mode: str,
-            size: tuple[int, int],
-            data: bytes,
-            *_args: Any,
-        ) -> _FallbackImageInstance:
-            return _FallbackImageInstance(size[0], size[1], bytes(data), mode)
+        def frombuffer(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError(_PIL_MISSING_MSG)
+
+        @staticmethod
+        def fromarray(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError(_PIL_MISSING_MSG)
 
 _DXGI_CAMERAS: dict[int, Any] = {}
 _DXGI_FAILED_INDEXES: set[int] = set()
@@ -129,6 +132,31 @@ class _AIBridgeMonitorInfo(ctypes.Structure):
 
 
 
+def _verify_dll_pin(dll_path: Path) -> bool:
+    """True when the DLL at ``dll_path`` may be loaded.
+
+    When ``AI_BRIDGE_NATIVE_DLL_SHA256`` is set, the file's SHA-256 must
+    match the pin; a mismatch fails closed. With no pin configured the
+    DLL is accepted (candidates are already confined to this repo's own
+    build output — see :func:`get_native_dll`).
+    """
+    pinned = os.environ.get("AI_BRIDGE_NATIVE_DLL_SHA256", "").strip().lower()
+    if not pinned:
+        return True
+    import hashlib
+    import logging as _logging
+
+    digest = hashlib.sha256(dll_path.read_bytes()).hexdigest()
+    if digest != pinned:
+        _logging.getLogger("ai_bridge.screen_capture").warning(
+            "Refusing to load native DLL %s: SHA-256 does not match "
+            "AI_BRIDGE_NATIVE_DLL_SHA256 pin.",
+            dll_path,
+        )
+        return False
+    return True
+
+
 def get_native_dll():
     """Load the compiled C++ `ai_bridge_native.dll` if available on Windows."""
     global _NATIVE_DLL, _NATIVE_DLL_LOADED
@@ -147,6 +175,13 @@ def get_native_dll():
     ]
     for dll_path in candidates:
         if dll_path.exists():
+            # F-04-15 / F13-15: the DLL is loaded unchecked. The
+            # candidates are already confined to this repo's own build
+            # output, and an operator can pin the expected SHA-256 via
+            # AI_BRIDGE_NATIVE_DLL_SHA256 (see _verify_dll_pin); a pinned
+            # DLL whose hash does not match is never loaded.
+            if not _verify_dll_pin(dll_path):
+                continue
             try:
                 dll = ctypes.CDLL(str(dll_path))
                 dll.aibridge_capture_frame.argtypes = [
@@ -170,6 +205,16 @@ def get_native_dll():
                 dll.aibridge_encode_h264_frame.restype = ctypes.c_int
                 dll.aibridge_release_all_keys.argtypes = []
                 dll.aibridge_release_all_keys.restype = ctypes.c_int
+                # F08-07 (Wave 5A): the DLL input surface is deny-by-
+                # default; input is enabled per live session by the
+                # WebRTC input path (webrtc_stream._set_dll_input_permissions)
+                # and revoked on session end. Loading the DLL alone
+                # must never enable input injection.
+                if hasattr(dll, "aibridge_set_input_permissions"):
+                    dll.aibridge_set_input_permissions.argtypes = [
+                        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                    ]
+                    dll.aibridge_set_input_permissions.restype = ctypes.c_int
                 dll.aibridge_send_mouse_move.argtypes = [
                     ctypes.c_double,
                     ctypes.c_double,

@@ -364,15 +364,20 @@ export async function runTier1Tests() {
   // F6: Cross-Platform Agent Enroller (5 tests)
   // =========================================================================
   describe('F6: Cross-Platform Agent Enroller', () => {
-    it('F6.1: [source-level] Demo enrollment issues no real token; the live template interpolates the real token (not redacted)', async () => {
+    it('F6.1: [source-level] Demo enrollment issues no real token; the live copy command uses the real token but the display is masked', async () => {
       const src = readSource('views/DevicesView.tsx');
       expect(src).toContain('Demo preview only — no real device token is issued. Connect a control plane to enroll.');
       expect(src).toContain('curl -sSL');
-      // Byte-verified: both live templates interpolate ${enrolledToken}; the
-      // no-token fallback uses a <TOKEN> placeholder. There is no redaction.
+      // Byte-verified: the *copy* templates interpolate ${enrolledToken};
+      // the *displayed* command uses a <TOKEN> placeholder and the token
+      // line shows a masked value with a Show/Hide toggle (Wave 5A).
       expect(src).toContain('--device-token=${enrolledToken}');
       expect(src).toContain("-DeviceToken '${enrolledToken}'");
       expect(src).toContain('--device-token=<TOKEN>');
+      expect(src).toContain('enrolledTokenMasked');
+      expect(src).toContain('linuxEnrollCommandDisplay');
+      expect(src).toContain('windowsEnrollCommandDisplay');
+      expect(src).toContain('showEnrolledToken');
       expect(src).not.toContain('<redacted>');
     });
 

@@ -257,6 +257,32 @@ def set_agent_context(control_url: str, device_token: str) -> None:
     _AGENT_CONTEXT["device_token"] = device_token
 
 
+def _set_dll_input_permissions(dll: Any, allow_mouse: bool, allow_keyboard: bool) -> None:
+    """Push the session's input permissions into the native DLL.
+
+    F08-07 (Wave 5A): the DLL input surface is deny-by-default, so
+    the WebRTC input path must enable exactly what the live session
+    allows before dispatching an input event, and revoke it on
+    release/teardown (see release_all_held_keys). Older DLL builds
+    without the export are left alone (the pre-5A DLL is allow-all;
+    the export exists in every build from this tree).
+    """
+    if dll is None:
+        return
+    setter = getattr(dll, "aibridge_set_input_permissions", None)
+    if setter is None:
+        return
+    try:
+        setter(
+            1 if allow_mouse else 0,
+            1 if allow_keyboard else 0,
+            0,
+            1 if (allow_mouse or allow_keyboard) else 0,
+        )
+    except Exception:
+        pass
+
+
 def release_all_held_keys() -> int:
     """Release all held keys and mouse buttons across both native C++ SendInput and Python Win32.
 
@@ -276,6 +302,10 @@ def release_all_held_keys() -> int:
         dll = get_native_dll()
         if dll is not None:
             released_count += int(dll.aibridge_release_all_keys())
+            # F08-07: revoking input at teardown — a later session must
+            # re-enable it explicitly; a stale allow must never survive
+            # a disconnect.
+            _set_dll_input_permissions(dll, False, False)
     except Exception:
         pass
 
@@ -1328,6 +1358,16 @@ class AgentStreamer:
             button = str(data.get("button", "left")).lower()
 
             dll = get_native_dll()
+
+            # F08-07: arm the DLL input surface for exactly what this
+            # live session allows (and nothing else). The per-action
+            # _session_allows_input() checks below still run; this only
+            # enables the DLL surface, which defaults to deny.
+            _set_dll_input_permissions(
+                dll,
+                self._session_allows_input(is_mouse=True),
+                self._session_allows_input(is_keyboard=True),
+            )
 
             # Mouse actions
             if action in ("click", "double_click", "triple_click", "right_click", "middle_click", "mouse_button", "mousedown", "mouseup"):

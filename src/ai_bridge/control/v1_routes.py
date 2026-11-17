@@ -978,22 +978,25 @@ def attach_v1_routes(
 
     @app.websocket("/api/v1/ws/sessions/{session_id}")
     async def v1_session_websocket(websocket: WebSocket, session_id: str):
-        dev_tok = websocket.headers.get("x-device-token") or websocket.query_params.get("device_token")
-        adm_tok = websocket.headers.get("x-admin-token") or websocket.query_params.get("admin_token")
-        sess_tok = websocket.headers.get("x-session-token") or websocket.query_params.get("session_token")
+        # D-08 / Wave 5A: tokens are accepted ONLY as headers (or as a
+        # single-use stream ticket in the URL). The old `?token=`
+        # fallback — and the device/admin/session token query params —
+        # are removed: a long-lived token in the URL lands in server
+        # logs, proxy logs, and browser history. This matches the agent
+        # WS route (/api/agent/ws), which has been header-only since
+        # Wave 4. Browsers use api.sessionWebSocketUrl(), which mints a
+        # ticket; native clients set the X-*-Token headers.
+        dev_tok = websocket.headers.get("x-device-token")
+        adm_tok = websocket.headers.get("x-admin-token")
+        sess_tok = websocket.headers.get("x-session-token")
         auth_hdr = websocket.headers.get("authorization")
-        q_tok = websocket.query_params.get("token")
         ticket = websocket.query_params.get("ticket")
-        if q_tok and not (adm_tok or sess_tok or auth_hdr):
-            auth_hdr = f"Bearer {q_tok}"
         try:
             if ticket:
                 # D-08: single-use stream ticket (POST /api/stream-ticket).
                 # Redeemed here, bound to this session and its device; a
                 # replayed, expired, or wrong-device/session ticket closes
-                # the socket. Long-lived tokens in the URL remain accepted
-                # for non-dashboard WS clients, but the dashboard no longer
-                # sends them (api.sessionWebSocketUrl mints a ticket).
+                # the socket.
                 from . import db as _dbmod
 
                 _sess = load_webrtc_session_db(conn, app.state, session_id)

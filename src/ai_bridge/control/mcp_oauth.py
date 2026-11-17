@@ -159,6 +159,64 @@ def _is_encrypted(value: Any) -> bool:
     return bool(value) and str(value).startswith(_FERNET_PREFIX)
 
 
+def migrate_plaintext_secrets(conn: Any) -> dict[str, Any]:
+    """Re-encrypt every legacy plaintext MCP OAuth secret in place.
+
+    SEC-06 (Wave 5A): rows written before Fernet encryption landed
+    store ``auth_token`` / ``oauth_client_secret`` /
+    ``oauth_refresh_token`` in plaintext (no ``fernet1:`` prefix) and
+    stay readable until re-written. This migration encrypts each such
+    value with the configured token key and updates the row; already
+    encrypted and empty values are untouched. It is idempotent — a
+    second run migrates zero rows.
+
+    Returns ``{"migrated": {column: count}, "total": n,
+    "already_encrypted": n, "errors": [server ids that failed]}``.
+    Raises RuntimeError when no token key is configured (fail closed:
+    never write a value that only looks encrypted).
+    """
+    cols = ", ".join(["id"] + list(_SECRET_COLUMNS))
+    rows = conn.execute(f"SELECT {cols} FROM mcp_servers").fetchall()
+    migrated: dict[str, int] = {col: 0 for col in _SECRET_COLUMNS}
+    already_encrypted = 0
+    errors: list[str] = []
+    for row in rows:
+        srv = dict(row)
+        server_id = str(srv.get("id") or "")
+        updates: dict[str, str] = {}
+        for col in _SECRET_COLUMNS:
+            value = srv.get(col) or ""
+            if not value:
+                continue
+            if _is_encrypted(value):
+                already_encrypted += 1
+                continue
+            try:
+                updates[col] = encrypt_token(str(value))
+            except Exception as exc:  # noqa: BLE001 — per-row, keep going
+                logger.warning(
+                    "migrate_plaintext_secrets: cannot encrypt %s for server %s: %s",
+                    col, server_id, exc,
+                )
+                errors.append(server_id)
+        if updates:
+            assignments = ", ".join(f"{col}=?" for col in updates)
+            conn.execute(
+                f"UPDATE mcp_servers SET {assignments} WHERE id=?",
+                (*updates.values(), server_id),
+            )
+            for col in updates:
+                migrated[col] += 1
+    conn.commit()
+    return {
+        "migrated": migrated,
+        "total": sum(migrated.values()),
+        "already_encrypted": already_encrypted,
+        "errors": sorted(set(errors)),
+    }
+
+
+
 def _audit_secret_read(conn: Any, srv: dict[str, Any]) -> None:
     """Audit one secret read via db.audit (actor "system", tool
     "mcp_server_secret_read"). Best-effort: an audit failure is logged, not

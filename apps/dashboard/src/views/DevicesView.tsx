@@ -93,6 +93,7 @@ export const DevicesView: React.FC = () => {
   const [tokenExpiry, setTokenExpiry] = useState<string>("24h");
   const [tokenProvisioned, setTokenProvisioned] = useState<boolean>(false);
   const [enrolledToken, setEnrolledToken] = useState<string>("");
+  const [showEnrolledToken, setShowEnrolledToken] = useState<boolean>(false);
   const [enrolledDeviceId, setEnrolledDeviceId] = useState<string>("");
   const [enrollError, setEnrollError] = useState<string>("");
   const [isEnrolling, setIsEnrolling] = useState<boolean>(false);
@@ -176,6 +177,22 @@ export const DevicesView: React.FC = () => {
     ? `iwr ${controlUrl}/install.ps1 -OutFile install-ai-bridge.ps1; powershell -ExecutionPolicy Bypass -File .\\install-ai-bridge.ps1 -ControlUrl '${controlUrl}' -DeviceToken '${enrolledToken}'`
     : `# Generate an enrollment token first, then:\n# iwr ${controlUrl}/install.ps1 -OutFile install-ai-bridge.ps1; powershell -File .\\install-ai-bridge.ps1 -ControlUrl '${controlUrl}' -DeviceToken <TOKEN>`;
 
+  // Wave 5A: the enrollment token is never rendered in plain text.
+  // The token line shows a masked value (first 4 + last 4) with an
+  // explicit Show/Hide toggle, and the visible install command shows
+  // a <TOKEN> placeholder. The Copy button still copies the real
+  // command (an explicit user action) — the *display* is what must
+  // not leak the secret to shoulder-surfers, screenshots, or the DOM.
+  const enrolledTokenMasked = enrolledToken.length > 8
+    ? `${enrolledToken.slice(0, 4)}••••${enrolledToken.slice(-4)}`
+    : "••••";
+  const linuxEnrollCommandDisplay = hasRealToken
+    ? linuxEnrollCommand.split(enrolledToken).join("<TOKEN>")
+    : linuxEnrollCommand;
+  const windowsEnrollCommandDisplay = hasRealToken
+    ? windowsEnrollCommand.split(enrolledToken).join("<TOKEN>")
+    : windowsEnrollCommand;
+
   const handleCopyEnrollCommand = useCallback(async () => {
     if (!hasRealToken) {
       setClipboardError(isLive
@@ -183,6 +200,10 @@ export const DevicesView: React.FC = () => {
         : "Connect to a control plane to issue a real device token.");
       return;
     }
+    // Wave 5A: Copy is an explicit user action, so it copies the real
+    // command (with the real token). The *displayed* command uses the
+    // <TOKEN> placeholder variants (linuxEnrollCommandDisplay /
+    // windowsEnrollCommandDisplay) and never shows the token.
     const text = enrollPlatformTab === "linux" ? linuxEnrollCommand : windowsEnrollCommand;
     setClipboardError("");
     try {
@@ -679,7 +700,17 @@ export const DevicesView: React.FC = () => {
                   Enrolled Device ID: {enrolledDeviceId}
                 </div>
                 <div className="text-[var(--product-text-secondary)] break-all">
-                  Device Token: <span className="text-emerald-400">{enrolledToken}</span>
+                  Device Token:{" "}
+                  <span className="text-emerald-400">
+                    {showEnrolledToken ? enrolledToken : enrolledTokenMasked}
+                  </span>{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowEnrolledToken((v) => !v)}
+                    className="text-indigo-400 hover:text-indigo-300 underline text-xs"
+                  >
+                    {showEnrolledToken ? "Hide" : "Show"}
+                  </button>
                 </div>
               </div>
             )}
@@ -783,7 +814,7 @@ export const DevicesView: React.FC = () => {
               {/* Command box */}
               <div className="relative p-3.5 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)]">
                 <pre className="text-emerald-400 whitespace-pre-wrap break-all text-[11px] pr-20 select-all font-mono">
-                  {enrollPlatformTab === "linux" ? linuxEnrollCommand : windowsEnrollCommand}
+                  {enrollPlatformTab === "linux" ? linuxEnrollCommandDisplay : windowsEnrollCommandDisplay}
                 </pre>
                 <div className="absolute right-3 top-3">
                 <JXButton

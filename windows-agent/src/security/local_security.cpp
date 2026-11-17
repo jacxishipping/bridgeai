@@ -3,9 +3,12 @@
 #include <wincrypt.h>
 #include <sddl.h>
 
+#include <chrono>
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <iomanip>
+#include <unordered_map>
 
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -14,6 +17,58 @@ namespace aibridge {
 namespace security {
 
 namespace {
+
+// F08-03: replay window — a message whose timestamp is further than
+// this from the receiver's clock is rejected outright.
+constexpr int64_t kReplayWindowSeconds = 120;
+
+// F08-03: nonces accepted within the window, with the Unix second
+// they were first seen. Guarded by g_nonce_mutex; entries older than
+// the window are pruned on every verification.
+std::mutex g_nonce_mutex;
+std::unordered_map<std::string, int64_t> g_seen_nonces;
+
+int64_t CurrentUnixSeconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+bool GenerateNonce(std::string& out_nonce) {
+    // 16 bytes from the OS CSPRNG, hex-encoded (32 chars).
+    HCRYPTPROV hProv = 0;
+    if (!CryptAcquireContextW(&hProv, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        return false;
+    }
+    uint8_t raw[16] = {};
+    BOOL ok = CryptGenRandom(hProv, sizeof(raw), raw);
+    CryptReleaseContext(hProv, 0);
+    if (!ok) return false;
+    static constexpr char kHex[] = "0123456789abcdef";
+    out_nonce.clear();
+    out_nonce.reserve(32);
+    for (uint8_t b : raw) {
+        out_nonce.push_back(kHex[(b >> 4) & 0xF]);
+        out_nonce.push_back(kHex[b & 0xF]);
+    }
+    return true;
+}
+
+bool IsHex32(const std::string& s) {
+    if (s.size() != 32) return false;
+    for (char c : s) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+bool ConstantTimeEqual(const std::string& a, const std::string& b) {
+    if (a.size() != b.size() || a.empty()) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
 
 // Strict base64 decoder (RFC 4648, no whitespace tolerated): returns false
 // on any character outside the alphabet, misplaced padding, or a length
@@ -107,8 +162,11 @@ bool DpapiSecretStore::UnprotectSecret(const std::vector<uint8_t>& encrypted, st
     return true;
 }
 
-std::string SecureNamedPipe::ComputeTag(const std::string& msg_type, const std::string& payload, const std::string& secret) {
+std::string SecureNamedPipe::ComputeTag(const std::string& msg_type, const std::string& nonce, int64_t timestamp_seconds, const std::string& payload, const std::string& secret) {
     // RFC 2104 HMAC-SHA256 using Windows CryptoAPI SHA-256 primitive.
+    // F08-03: the tag covers the nonce and timestamp as well as the
+    // type and payload, so a captured message cannot be replayed with
+    // a fresh timestamp or transplanted onto another message.
     auto sha256 = [](const uint8_t* data, size_t len, std::vector<uint8_t>& digest) -> bool {
         HCRYPTPROV hProv = 0;
         HCRYPTHASH hHash = 0;
@@ -148,7 +206,7 @@ std::string SecureNamedPipe::ComputeTag(const std::string& msg_type, const std::
         opad[i] = static_cast<uint8_t>(key[i] ^ 0x5C);
     }
 
-    std::string message = msg_type + "|" + payload;
+    std::string message = msg_type + "|" + nonce + "|" + std::to_string(timestamp_seconds) + "|" + payload;
     std::vector<uint8_t> inner_in;
     inner_in.reserve(kBlockSize + message.size());
     inner_in.insert(inner_in.end(), ipad.begin(), ipad.end());
@@ -181,9 +239,15 @@ HANDLE SecureNamedPipe::CreateRestrictedServerPipe(const wchar_t* pipe_name) {
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
     sa.bInheritHandle = FALSE;
 
-    // SDDL: Allow Generic All to LocalSystem (SY) and Built-in Admins (BA), and Generic Read/Write to Authenticated Users (AU)
+    // F08-03 (Wave 5A): SDDL tightened from AU (any authenticated
+    // user, Generic Read/Write) to IU (interactive logon users only).
+    // The desktop agent runs in the interactive session, so IU covers
+    // the only legitimate client; a service or network-logon process
+    // can no longer open the pipe at all. The pipe secret + HMAC
+    // (with nonce/timestamp replay protection) remain the second
+    // layer — the ACL is not the sole control.
     PSECURITY_DESCRIPTOR pSD = nullptr;
-    const wchar_t* sddl = L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
+    const wchar_t* sddl = L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &pSD, nullptr)) {
         sa.lpSecurityDescriptor = pSD;
     }
@@ -225,6 +289,76 @@ HANDLE SecureNamedPipe::ConnectClientPipe(const wchar_t* pipe_name, DWORD timeou
     return hPipe;
 }
 
+std::string SecureNamedPipe::BuildWireMessage(
+    const std::string& msg_type,
+    const std::string& json_payload,
+    const std::string& shared_secret
+) {
+    if (msg_type.empty() || shared_secret.empty()) return {};
+    std::string nonce;
+    if (!GenerateNonce(nonce)) return {};
+    int64_t now = CurrentUnixSeconds();
+    std::string tag = ComputeTag(msg_type, nonce, now, json_payload, shared_secret);
+    if (tag.empty()) return {};
+    return msg_type + "\n" + nonce + "\n" + std::to_string(now) + "\n" + tag + "\n" + json_payload;
+}
+
+bool SecureNamedPipe::ParseAndVerifyWire(
+    const std::string& wire,
+    const std::string& shared_secret,
+    std::string& out_msg_type,
+    std::string& out_json_payload
+) {
+    if (wire.empty() || shared_secret.empty()) return false;
+    size_t nl1 = wire.find('\n');
+    if (nl1 == std::string::npos) return false;
+    size_t nl2 = wire.find('\n', nl1 + 1);
+    if (nl2 == std::string::npos) return false;
+    size_t nl3 = wire.find('\n', nl2 + 1);
+    if (nl3 == std::string::npos) return false;
+    size_t nl4 = wire.find('\n', nl3 + 1);
+    if (nl4 == std::string::npos) return false;
+
+    std::string msg_type = wire.substr(0, nl1);
+    std::string nonce = wire.substr(nl1 + 1, nl2 - (nl1 + 1));
+    std::string ts_text = wire.substr(nl2 + 1, nl3 - (nl2 + 1));
+    std::string recv_tag = wire.substr(nl3 + 1, nl4 - (nl3 + 1));
+    std::string payload = wire.substr(nl4 + 1);
+
+    if (msg_type.empty() || !IsHex32(nonce)) return false;
+    int64_t timestamp = 0;
+    try {
+        size_t used = 0;
+        timestamp = std::stoll(ts_text, &used);
+        if (used != ts_text.size()) return false;
+    } catch (...) {
+        return false;
+    }
+    int64_t now = CurrentUnixSeconds();
+    int64_t skew = now - timestamp;
+    if (skew < 0) skew = -skew;
+    if (skew > kReplayWindowSeconds) return false;
+
+    std::string expected_tag = ComputeTag(msg_type, nonce, timestamp, payload, shared_secret);
+    if (!ConstantTimeEqual(recv_tag, expected_tag)) return false;
+
+    // Replay check: reject any nonce already seen within the window,
+    // and prune entries older than the window so the set stays small.
+    {
+        std::lock_guard<std::mutex> lock(g_nonce_mutex);
+        for (auto it = g_seen_nonces.begin(); it != g_seen_nonces.end();) {
+            if (now - it->second > kReplayWindowSeconds) it = g_seen_nonces.erase(it);
+            else ++it;
+        }
+        if (g_seen_nonces.find(nonce) != g_seen_nonces.end()) return false;
+        g_seen_nonces.emplace(nonce, now);
+    }
+
+    out_msg_type = msg_type;
+    out_json_payload = payload;
+    return true;
+}
+
 bool SecureNamedPipe::SendAuthenticatedMessage(
     HANDLE pipe,
     const std::string& msg_type,
@@ -232,9 +366,8 @@ bool SecureNamedPipe::SendAuthenticatedMessage(
     const std::string& shared_secret
 ) {
     if (pipe == INVALID_HANDLE_VALUE || msg_type.empty()) return false;
-    std::string tag = ComputeTag(msg_type, json_payload, shared_secret);
-    std::string wire = msg_type + "\n" + tag + "\n" + json_payload;
-    if (wire.size() > 65536) return false;
+    std::string wire = BuildWireMessage(msg_type, json_payload, shared_secret);
+    if (wire.empty() || wire.size() > 65536) return false;
 
     DWORD written = 0;
     BOOL ok = WriteFile(pipe, wire.data(), static_cast<DWORD>(wire.size()), &written, nullptr);
@@ -255,32 +388,7 @@ bool SecureNamedPipe::ReadAuthenticatedMessage(
     }
 
     std::string wire(buffer.data(), bytes_read);
-    size_t first_nl = wire.find('\n');
-    if (first_nl == std::string::npos) return false;
-    size_t second_nl = wire.find('\n', first_nl + 1);
-    if (second_nl == std::string::npos) return false;
-
-    std::string msg_type = wire.substr(0, first_nl);
-    std::string recv_tag = wire.substr(first_nl + 1, second_nl - (first_nl + 1));
-    std::string payload = wire.substr(second_nl + 1);
-
-    std::string expected_tag = ComputeTag(msg_type, payload, shared_secret);
-    if (recv_tag.size() != expected_tag.size() || expected_tag.empty()) {
-        return false;
-    }
-
-    // Constant-time tag comparison
-    unsigned char diff = 0;
-    for (size_t i = 0; i < expected_tag.size(); ++i) {
-        diff |= static_cast<unsigned char>(recv_tag[i] ^ expected_tag[i]);
-    }
-    if (diff != 0) {
-        return false;
-    }
-
-    out_msg_type = msg_type;
-    out_json_payload = payload;
-    return true;
+    return ParseAndVerifyWire(wire, shared_secret, out_msg_type, out_json_payload);
 }
 
 } // namespace security

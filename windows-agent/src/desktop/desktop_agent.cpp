@@ -55,8 +55,39 @@ std::string ExtractJsonField(const std::string& json, const std::string& key) {
     return out;
 }
 
-void RegisterWithSupervisorPipe(const std::string& pipe_name_utf8, const std::string& pipe_secret) {
-    if (pipe_secret.empty()) return;
+struct SupervisorRegistration {
+    bool confirmed = false;
+    std::string status;
+    uint32_t active_session_id = 0;
+    std::string hostname;
+};
+
+std::string ExtractJsonUintField(const std::string& json, const std::string& key) {
+    // Numeric (unquoted) JSON field extraction for the supervisor reply
+    // (active_session_id); string fields use ExtractJsonField above.
+    std::string needle = "\"" + key + "\"";
+    size_t pos = json.find(needle);
+    if (pos == std::string::npos) return {};
+    pos = json.find(':', pos + needle.size());
+    if (pos == std::string::npos) return {};
+    ++pos;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
+    size_t start = pos;
+    while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') ++pos;
+    return json.substr(start, pos - start);
+}
+
+// F08-04 (Wave 5A): the old code sent REGISTER_DESKTOP_AGENT and
+// closed the pipe without reading the reply, discarding the
+// supervisor's verdict, active_session_id, and hostname. It now reads
+// the authenticated reply, verifies status == "registered", and
+// returns the values to main(), which reports them in its JSON output.
+// A missing or rejected reply is NOT fatal (the agent can still run
+// a WebRTC session), but it is logged loudly so a supervisor that
+// never confirms registration is visible instead of silent.
+SupervisorRegistration RegisterWithSupervisorPipe(const std::string& pipe_name_utf8, const std::string& pipe_secret) {
+    SupervisorRegistration result;
+    if (pipe_secret.empty()) return result;
     std::wstring pipe_w = L"\\\\.\\pipe\\AIBridgeDesktopPipe";
     if (!pipe_name_utf8.empty()) {
         int needed = MultiByteToWideChar(CP_UTF8, 0, pipe_name_utf8.data(), static_cast<int>(pipe_name_utf8.size()), nullptr, 0);
@@ -70,11 +101,23 @@ void RegisterWithSupervisorPipe(const std::string& pipe_name_utf8, const std::st
         DWORD sess_id = 0;
         ProcessIdToSessionId(GetCurrentProcessId(), &sess_id);
         std::string payload = "{\"session\":" + std::to_string(sess_id) + "}";
-        aibridge::security::SecureNamedPipe::SendAuthenticatedMessage(
-            hPipe, "REGISTER_DESKTOP_AGENT", payload, pipe_secret
-        );
+        if (aibridge::security::SecureNamedPipe::SendAuthenticatedMessage(
+                hPipe, "REGISTER_DESKTOP_AGENT", payload, pipe_secret)) {
+            std::string reply_type, reply_payload;
+            if (aibridge::security::SecureNamedPipe::ReadAuthenticatedMessage(
+                    hPipe, reply_type, reply_payload, pipe_secret)) {
+                result.status = ExtractJsonField(reply_payload, "status");
+                std::string sess_text = ExtractJsonUintField(reply_payload, "active_session_id");
+                if (!sess_text.empty()) {
+                    result.active_session_id = static_cast<uint32_t>(std::stoul(sess_text));
+                }
+                result.hostname = ExtractJsonField(reply_payload, "hostname");
+                result.confirmed = (reply_type == "REGISTERED" && result.status == "registered");
+            }
+        }
         CloseHandle(hPipe);
     }
+    return result;
 }
 }
 
@@ -165,7 +208,14 @@ int main(int argc, char* argv[]) {
         }
         pipe_secret = unsealed;
     }
-    RegisterWithSupervisorPipe(pipe_name, pipe_secret);
+    SupervisorRegistration supervisor_reg = RegisterWithSupervisorPipe(pipe_name, pipe_secret);
+    // F08-04: the supervisor's verdict is reported, not discarded.
+    // Registration is not fatal when unconfirmed (no supervisor
+    // installed, or the pipe was unreachable), but it is loud.
+    if (!pipe_secret.empty() && !supervisor_reg.confirmed) {
+        std::cerr << "[AI Bridge] WARNING: supervisor registration not confirmed"
+                  << " (status='" << supervisor_reg.status << "'); continuing unsupervised.\n";
+    }
 
     // F08-12: single-instance guard. The installer used to launch this
     // agent twice (HKLM Run + scheduled task) with no mutex or lock
@@ -217,6 +267,8 @@ int main(int argc, char* argv[]) {
         // Auto-stop after a short E2E window unless interrupted — CI harness sets stop via timeout kill.
         bool ok = session->RunUntilStopped(&g_stop, &err);
         std::cout << "{\"ok\":" << (ok ? "true" : "false")
+                  << ",\"supervisor_registered\":" << (supervisor_reg.confirmed ? "true" : "false")
+                  << ",\"supervisor_session_id\":" << supervisor_reg.active_session_id
                   << ",\"backend\":\"" << aibridge::webrtc::PeerBackendName(session->Backend()) << "\""
                   << ",\"ice_state\":\"" << session->IceState() << "\""
                   << ",\"frames_sent\":" << session->FramesSent()
@@ -239,6 +291,8 @@ int main(int argc, char* argv[]) {
     auto backend = aibridge::webrtc::DescribeAvailablePeerBackend();
 
     std::cout << "{\"process\":\"ai_bridge_desktop\",\"role\":\"interactive_desktop_agent\","
+              << "\"supervisor_registered\":" << (supervisor_reg.confirmed ? "true" : "false") << ","
+              << "\"supervisor_session_id\":" << supervisor_reg.active_session_id << ","
               << "\"session_started\":" << (session_started ? "true" : "false") << ","
               << "\"session_error\":\"" << probe_stats.error << "\","
               << "\"capture_ok\":" << (ok ? "true" : "false") << ","

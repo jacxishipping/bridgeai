@@ -14,6 +14,7 @@ import base64
 import hashlib
 import hmac
 import html
+import ipaddress
 import os
 import secrets
 import sqlite3
@@ -103,11 +104,33 @@ def admin_ok(token: str | None) -> bool:
 
 
 def valid_redirect_uri(uri: str) -> bool:
+    """Validate a redirect URI registered / used by an OAuth client.
+
+    F-06-12 (Wave 5A): registration used to accept any ``https`` URI,
+    so a client could register an attacker-controlled redirect and
+    have authorization codes delivered to it. Still any-https would be
+    too lax; the checks below reject the concrete abuse shapes without
+    an allowlist the gateway does not have (clients register their own
+    URIs, and the authorize step additionally requires an exact match
+    against the registered list):
+    * no fragment (a fragment would leak the code to the redirect page),
+    * no userinfo (``https://victim@attacker/`` smuggling),
+    * no IP-literal host other than loopback (code delivery straight to
+      an attacker IP); loopback http stays allowed per RFC 8252 §7.3.
+    """
     try:
         p = urlparse(uri)
     except Exception:
         return False
     if p.fragment or not p.netloc or not p.hostname:
+        return False
+    if p.username or p.password:
+        return False
+    try:
+        host_ip = ipaddress.ip_address(p.hostname)
+    except ValueError:
+        host_ip = None
+    if host_ip is not None and not host_ip.is_loopback:
         return False
     if p.scheme == "https":
         return True
@@ -766,9 +789,18 @@ def authorize_get(
         return redirect_with(
             redirect_uri, {"error": "unsupported_response_type", "state": state}
         )
-    if code_challenge and code_challenge_method not in ("S256",):
-        return redirect_with(
-            redirect_uri, {"error": "invalid_request", "state": state}
+    # F-06-12 (Wave 5A): PKCE (S256) is mandatory for every
+    # authorization request. A code issued without a challenge could be
+    # redeemed by anyone who intercepts it (this gateway's clients are
+    # public — token_endpoint_auth_method "none").
+    if not code_challenge or code_challenge_method != "S256":
+        return HTMLResponse(
+            _error_page(
+                "PKCE Required",
+                "This authorization server requires a PKCE S256 code "
+                "challenge (code_challenge + code_challenge_method=S256).",
+            ),
+            status_code=400,
         )
     params = {
         "client_id": client_id,
@@ -825,6 +857,14 @@ def authorize_post(
     }
     if not admin_ok(admin_token):
         return HTMLResponse(approval_form(params, "Invalid administrator token."), status_code=401)
+    # F-06-12 (Wave 5A): PKCE (S256) is mandatory — checked after the
+    # admin token so a wrong admin token still reports 401, not a
+    # redirect. A code issued without a challenge could be redeemed by
+    # anyone who intercepts it.
+    if not code_challenge or code_challenge_method != "S256":
+        return redirect_with(
+            redirect_uri, {"error": "invalid_request", "state": state}
+        )
     # Authenticating with only the administrator token grants access to all devices.
     # If an optional device token is provided, bind to that device; otherwise unbound fleet access.
     binding = ""
@@ -884,8 +924,12 @@ def issue_pair(client_id: str, scope: str, device_id: str = "") -> dict:
 
 
 def pkce_ok(verifier: str, challenge: str, method: str) -> bool:
-    if not challenge:
-        return True
+    # F-06-12 (Wave 5A): a code with no stored challenge must NOT be
+    # redeemable — the old code returned True here, so any code issued
+    # before PKCE was enforced (or issued to a client that sent no
+    # challenge) could be exchanged with no verifier at all.
+    if not challenge or not verifier:
+        return False
     if method != "S256":
         return False
     calc = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())

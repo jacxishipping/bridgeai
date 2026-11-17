@@ -69,7 +69,15 @@ private:
     bool CheckRateLimitLocked();
 
     mutable std::mutex mutex_;
-    SessionInputPermissions permissions_{true, true, false, true};
+    // F08-07 (Wave 5A): input is DENIED by default. The old default
+    // was allow-all ({true, true, false, true}), so any local process
+    // that loaded the DLL could inject mouse/keyboard input with no
+    // session, no permissions, and no authentication. Input is now
+    // enabled only by an explicit SetPermissions() call from a live,
+    // authorised session (C++ PeerConnection / WebRTC transport, or
+    // the Python plane via aibridge_set_input_permissions), and
+    // SetPermissions(false, ...) on session end revokes it again.
+    SessionInputPermissions permissions_{false, false, false, false};
     std::unordered_set<WORD> held_keys_;
     uint32_t held_mouse_buttons_mask_ = 0; // bit 0: left, bit 1: right, bit 2: middle
 

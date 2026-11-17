@@ -198,3 +198,53 @@ class TestStreamTicketWebSocket:
         with pytest.raises(Exception):
             with client.websocket_connect("/api/v1/ws/sessions/sess-1?ticket=bogus"):
                 pass
+
+
+class TestV1WebSocketTokenFallbackRemoved:
+    """Wave 5A: the v1 WS `?token=` fallback (and the device/admin/
+    session token query params) are removed — long-lived tokens in
+    the URL land in logs and history. Headers or a single-use ticket
+    are the only ways in."""
+
+    def test_websocket_token_query_param_does_not_authenticate(
+        self, client, admin_token, app_instance
+    ):
+        save_webrtc_session_db(
+            app_instance.state.conn,
+            app_instance.state,
+            {"session_id": "sess-1", "device_id": "local", "status": "waiting"},
+        )
+        with pytest.raises(Exception):
+            with client.websocket_connect(
+                f"/api/v1/ws/sessions/sess-1?token={admin_token}"
+            ):
+                pass
+
+    def test_websocket_admin_token_query_param_does_not_authenticate(
+        self, client, admin_token, app_instance
+    ):
+        save_webrtc_session_db(
+            app_instance.state.conn,
+            app_instance.state,
+            {"session_id": "sess-1", "device_id": "local", "status": "waiting"},
+        )
+        with pytest.raises(Exception):
+            with client.websocket_connect(
+                f"/api/v1/ws/sessions/sess-1?admin_token={admin_token}"
+            ):
+                pass
+
+    def test_websocket_admin_token_header_still_authenticates(
+        self, client, admin_token, app_instance
+    ):
+        save_webrtc_session_db(
+            app_instance.state.conn,
+            app_instance.state,
+            {"session_id": "sess-1", "device_id": "local", "status": "waiting"},
+        )
+        with client.websocket_connect(
+            "/api/v1/ws/sessions/sess-1",
+            headers={"X-Admin-Token": admin_token},
+        ) as ws:
+            snapshot = ws.receive_json()
+            assert snapshot["type"] == "session_snapshot"

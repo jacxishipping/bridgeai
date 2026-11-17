@@ -91,6 +91,12 @@ AIBRIDGE_API int aibridge_set_encoder_bitrate(int bitrate_kbps);
 
 
 // SendInput mouse & keyboard controls with DPI / multi-monitor coordinate normalization & disconnect key-up safety
+// F08-07 (Wave 5A): the DLL input surface is deny-by-default —
+// aibridge_send_* calls are no-ops until a live, authorised session
+// enables input via aibridge_set_input_permissions (and revokes it
+// again on session end). Any local process may load the DLL, but
+// loading alone no longer grants input injection.
+AIBRIDGE_API int aibridge_set_input_permissions(int allow_mouse, int allow_keyboard, int allow_clipboard, int session_active);
 AIBRIDGE_API int aibridge_send_mouse_move(double x, double y, int is_normalized, int mon_x, int mon_y, int mon_w, int mon_h);
 AIBRIDGE_API int aibridge_send_mouse_button(const char* button, const char* state, double x, double y, int is_normalized, int mon_x, int mon_y, int mon_w, int mon_h);
 AIBRIDGE_API int aibridge_send_mouse_scroll(int delta_y, int delta_x);

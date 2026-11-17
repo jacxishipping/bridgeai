@@ -72,6 +72,8 @@ int main() {
         );
         CHECK(sent);
 
+        // F08-04: the client reads the supervisor's reply (the desktop
+        // agent used to send and close without reading it).
         std::string reply_type, reply_payload;
         bool read_ok = aibridge::security::SecureNamedPipe::ReadAuthenticatedMessage(
             hClient, reply_type, reply_payload, ipc_key
@@ -80,6 +82,57 @@ int main() {
         CloseHandle(hClient);
         server_thread.join();
         CHECK(server_received_type == "REGISTER_DESKTOP_AGENT");
+    }
+
+    // F08-03 (Wave 5A): replay protection, exercised without a pipe via
+    // the pure BuildWireMessage / ParseAndVerifyWire functions.
+    std::cout << "[2b/7] Testing pipe replay protection (nonce + timestamp)..." << std::endl;
+    {
+        const std::string ipc_key = "test-shared-hmac-secret";
+        std::string wire = aibridge::security::SecureNamedPipe::BuildWireMessage(
+            "HEARTBEAT_PING", "{\"n\":1}", ipc_key);
+        CHECK(!wire.empty());
+        std::string out_type, out_payload;
+        // First delivery verifies.
+        CHECK(aibridge::security::SecureNamedPipe::ParseAndVerifyWire(
+            wire, ipc_key, out_type, out_payload));
+        CHECK(out_type == "HEARTBEAT_PING" && out_payload == "{\"n\":1}");
+        // The identical bytes a second time are a replay: rejected.
+        CHECK(!aibridge::security::SecureNamedPipe::ParseAndVerifyWire(
+            wire, ipc_key, out_type, out_payload));
+        // A fresh message (new nonce) verifies.
+        std::string wire2 = aibridge::security::SecureNamedPipe::BuildWireMessage(
+            "HEARTBEAT_PING", "{\"n\":1}", ipc_key);
+        CHECK(wire2 != wire);
+        CHECK(aibridge::security::SecureNamedPipe::ParseAndVerifyWire(
+            wire2, ipc_key, out_type, out_payload));
+        // Tampered payload: the tag no longer matches (fresh wire, so
+        // this isolates tampering from the replay check above).
+        std::string wire3 = aibridge::security::SecureNamedPipe::BuildWireMessage(
+            "HEARTBEAT_PING", "{\"n\":1}", ipc_key);
+        std::string tampered = wire3;
+        size_t last_nl = tampered.find_last_of('\n');
+        if (last_nl != std::string::npos) tampered.replace(last_nl + 1, 1, "X");
+        CHECK(!aibridge::security::SecureNamedPipe::ParseAndVerifyWire(
+            tampered, ipc_key, out_type, out_payload));
+        // Wrong secret: rejected.
+        CHECK(!aibridge::security::SecureNamedPipe::ParseAndVerifyWire(
+            aibridge::security::SecureNamedPipe::BuildWireMessage(
+                "HEARTBEAT_PING", "{\"n\":2}", ipc_key),
+            "different-secret", out_type, out_payload));
+        // Stale timestamp (10 minutes old): rejected even with a valid tag.
+        {
+            const std::string nonce = "0123456789abcdef0123456789abcdef";
+            int64_t stale = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()) - 600;
+            std::string tag = aibridge::security::SecureNamedPipe::ComputeTag(
+                "HEARTBEAT_PING", nonce, stale, "{\"n\":3}", ipc_key);
+            std::string stale_wire = "HEARTBEAT_PING\n" + nonce + "\n" +
+                                     std::to_string(stale) + "\n" + tag + "\n{\"n\":3}";
+            CHECK(!aibridge::security::SecureNamedPipe::ParseAndVerifyWire(
+                stale_wire, ipc_key, out_type, out_payload));
+        }
     }
 
     std::cout << "[3/7] Testing SendInput Coordinate Transformation & Disconnect Key Release Safety..." << std::endl;
@@ -93,6 +146,17 @@ int main() {
         CHECK(pt_center.normalized_dx > 0 && pt_center.normalized_dy > 0);
 
         aibridge::input::WindowsInputController input_ctrl;
+        // F08-07 (Wave 5A): a fresh controller denies input by
+        // default — no session has enabled it yet. Loading the DLL
+        // alone must not grant injection.
+        {
+            auto defaults = input_ctrl.GetPermissions();
+            CHECK(!defaults.allow_mouse && !defaults.allow_keyboard &&
+                  !defaults.allow_clipboard && !defaults.session_active);
+            CHECK(!input_ctrl.MoveMouse(0.5, 0.5, true));
+            CHECK(!input_ctrl.KeyEvent(VK_SHIFT, true, false));
+            CHECK(input_ctrl.GetHeldKeyCount() == 0);
+        }
         aibridge::input::SessionInputPermissions perms{true, true, false, true};
         input_ctrl.SetPermissions(perms);
 
@@ -106,6 +170,13 @@ int main() {
         perms.allow_mouse = false;
         input_ctrl.SetPermissions(perms);
         CHECK(!input_ctrl.MoveMouse(0.5, 0.5, true));
+
+        // F08-07: revoking all permissions (session end) blocks input
+        // again — a stale allow must never survive a disconnect.
+        aibridge::input::SessionInputPermissions denied{false, false, false, false};
+        input_ctrl.SetPermissions(denied);
+        CHECK(!input_ctrl.MoveMouse(0.5, 0.5, true));
+        CHECK(!input_ctrl.KeyEvent(VK_SHIFT, true, false));
     }
 
     std::cout << "[4/7] Testing DXGI Desktop Duplication & Multi-Monitor Enumeration..." << std::endl;
