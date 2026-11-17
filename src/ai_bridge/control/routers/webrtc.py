@@ -58,19 +58,22 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
         device_id: str,
         scale: float = 0.75,
         quality: int = 75,
-        token: str | None = None,
-        session_token: str | None = None,
         x_admin_token: str | None = Header(default=None),
         x_session_token: str | None = Header(default=None),
         authorization: str | None = Header(default=None),
     ):
-        """Return the latest live desktop frame directly as an image/jpeg binary response."""
+        """Return the latest live desktop frame directly as an image/jpeg binary response.
+
+        Wave 6A residual: credentials are accepted ONLY via headers
+        (X-Admin-Token / X-Session-Token / Authorization). The former
+        ``?token=`` / ``?session_token=`` query fallbacks are removed —
+        tokens in query strings leak into logs, browser history and
+        referrers, and the dashboard no longer sends them.
+        """
         import base64
 
-        admin_tok = x_admin_token or token
-        sess_tok = x_session_token or session_token
-        require_role("viewer", admin_tok, sess_tok, authorization)
-        _require_device_tenant(device_id, admin_tok, sess_tok, authorization)
+        require_role("viewer", x_admin_token, x_session_token, authorization)
+        _require_device_tenant(device_id, x_admin_token, x_session_token, authorization)
         frame = _fetch_desktop_frame(device_id, scale, quality)
         if not isinstance(frame, dict) or not frame.get("base64_data"):
             raise HTTPException(status_code=404, detail=frame.get("error") if isinstance(frame, dict) else "No desktop frame available.")
@@ -537,16 +540,15 @@ def create_webrtc_router(ctx: ControlContext) -> APIRouter:
         device_id: str,
         session_id: str,
         since_seq: int = 0,
-        token: str | None = None,
-        session_token: str | None = None,
         x_admin_token: str | None = Header(default=None),
         x_session_token: str | None = Header(default=None),
         authorization: str | None = Header(default=None),
     ):
-        admin_tok = x_admin_token or token
-        sess_tok = x_session_token or session_token
-        require_role("admin", admin_tok, sess_tok, authorization)
-        _require_device_tenant(device_id, admin_tok, sess_tok, authorization)
+        # Wave 6A residual: headers only — the former ``?token=`` /
+        # ``?session_token=`` query fallbacks are removed (tokens in query
+        # strings leak into logs, browser history and referrers).
+        require_role("admin", x_admin_token, x_session_token, authorization)
+        _require_device_tenant(device_id, x_admin_token, x_session_token, authorization)
         sess = terminal_manager.get_terminal_session(session_id)
         if sess is None:
             raise HTTPException(status_code=404, detail="Terminal session not found.")

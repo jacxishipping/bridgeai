@@ -12,6 +12,7 @@ Fields mirror the ``create_app()`` locals by name so a moved handler body
 can keep referring to ``conn``, ``require_role`` etc. after the factory
 binds ``conn = ctx.conn`` and friends.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ class ControlContext:
     audit: Callable[..., Any]
     _install_asset: Callable[..., Any]
     _get_device_live_meta: Callable[..., dict]
+    _get_devices_live_meta: Callable[..., dict]
     expire_pending_approvals: Callable[[], None]
     approval_detail: Callable[..., dict]
     _execute_workflow_step_sync: Callable[..., dict]

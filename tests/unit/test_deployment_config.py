@@ -193,6 +193,22 @@ class TestNginx(unittest.TestCase):
         self.assertIn("proxy_pass http://oauth_gateway/internal/verify;", verify)
         self.assertIn("proxy_set_header Authorization $http_authorization;", verify)
 
+    def test_control_plane_strips_mtls_fingerprint_headers(self):
+        # F-05-06 (Wave 6A): nginx forwards unknown client headers by
+        # default, so a client could spoof X-Client-Cert-Fingerprint
+        # straight through to the plane. The control-plane location must
+        # clear every fingerprint header the plane trusts. (Match on the
+        # comment, not bare "location /" — the :80 server has one too.)
+        plane = _nginx_block(self.text, r"# Proxy to Control Plane API\s*\n\s*location /\s*\{")
+        self.assertIn("proxy_pass http://control_plane;", plane)
+        for header in (
+            "X-Client-Cert-Fingerprint",
+            "X-SSL-Client-Fingerprint",
+            "X-Forwarded-Tls-Client-Cert-Info",
+            "X-Client-Cert",
+        ):
+            self.assertIn(f'proxy_set_header {header} "";', plane)
+
 
 class TestInstallerTls(unittest.TestCase):
     def test_no_insecure_curl_in_magic_install_sh(self):

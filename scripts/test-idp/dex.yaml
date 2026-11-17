@@ -1,0 +1,40 @@
+# Test-only OIDC provider (Dex) for the AI Bridge staging OIDC proof.
+# STAGING ONLY — never use for production auth: one hardcoded test user,
+# in-memory storage, no TLS of its own (Render terminates TLS).
+# The issuer MUST equal this service's public URL. Placeholders are
+# replaced at container start from environment variables (see
+# entrypoint.sh) so NO secret is ever committed to the repo:
+#   __DEX_PORT__           <- $PORT
+#   __CLIENT_SECRET__      <- $DEX_CLIENT_SECRET
+#   __PASSWORD_HASH__      <- $DEX_TEST_PASSWORD_HASH (bcrypt)
+issuer: https://ai-bridge-test-idp.onrender.com
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:__DEX_PORT__
+
+logger:
+  level: info
+
+oauth2:
+  # Skip the consent screen: the scripted proof logs in and the code flows
+  # straight back to the plane's callback.
+  skipApprovalScreen: true
+  responseTypes: ["code"]
+
+enablePasswordDB: true
+
+staticClients:
+  - id: ai-bridge-staging
+    redirectURIs:
+      - https://ai-bridge-staging-plane.onrender.com/api/auth/oidc/callback
+    name: AI Bridge Staging
+    secret: __CLIENT_SECRET__
+
+staticPasswords:
+  - email: test@staging.local
+    hash: __PASSWORD_HASH__
+    username: test
+    userID: test-user-1

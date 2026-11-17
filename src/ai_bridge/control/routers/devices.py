@@ -31,6 +31,7 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
     # Shared control-plane state (mirrors create_app() locals).
     _execute_workflow_step_sync = ctx._execute_workflow_step_sync
     _get_device_live_meta = ctx._get_device_live_meta
+    _get_devices_live_meta = ctx._get_devices_live_meta
     _require_device_tenant = ctx._require_device_tenant
     _require_row_tenant = ctx._require_row_tenant
     _row_tenant = ctx._row_tenant
@@ -119,6 +120,9 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
             (tenant,),
         ).fetchall()
         result = []
+        # Wave 6A (W5E-01): one batched live-meta lookup for the whole
+        # fleet instead of up to 2 task-history queries per device.
+        live_metas = _get_devices_live_meta([r["id"] for r in rows])
         for r in rows:
             d = dict(r)
             d["group"] = d.pop("group_name", None) or ""
@@ -130,7 +134,7 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
                 parsed_p = {}
             d["has_custom_policy"] = bool(parsed_p)
             d["policy"] = parsed_p
-            live_meta = _get_device_live_meta(d["id"])
+            live_meta = live_metas.get(d["id"]) or {}
             if live_meta.get("ip_address"):
                 d["ip_address"] = live_meta["ip_address"]
             result.append(d)

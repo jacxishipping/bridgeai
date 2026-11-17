@@ -40,6 +40,75 @@ def test_check_expr_normalization_tier_range():
     assert mod._normalize_check_expr(pg) == mod._normalize_check_expr(sqlite)
 
 
+def test_check_expr_normalization_tier_range_real_pg_rendering():
+    """Gate 16 CI failure (run 44127496573): pg_get_constraintdef wraps
+    EVERY AND/OR operand in parens, not just the whole expression —
+    ``(TIER IS NULL)OR((TIER >= 1)AND(TIER <= 4))``. The old test used a
+    guessed rendering and passed locally while CI failed. This pins the
+    real rendering against the SQLite spelling."""
+    mod = _load_parity()
+    pg = "(TIER IS NULL)OR((TIER >= 1)AND(TIER <= 4))"
+    sqlite = "TIER IS NULL OR (TIER >= 1 AND TIER <= 4)"
+    assert mod._normalize_check_expr(pg) == mod._normalize_check_expr(sqlite)
+    assert mod._normalize_check_expr(sqlite) == "TIER IS NULL OR TIER >= 1 AND TIER <= 4"
+
+
+def test_check_expr_normalization_in_list_parens_kept():
+    """The paren stripper must never eat an IN (...) list."""
+    mod = _load_parity()
+    assert mod._normalize_check_expr("status IN ('a', 'b')") == "STATUS IN('A','B')"
+    # An OR-chain inside AND keeps its parens (they are load-bearing).
+    assert mod._normalize_check_expr("a AND (b OR c)") == "A AND(B OR C)"
+
+
+def test_canonical_default_epoch_now():
+    """Gate 16: the two dialects spell 'epoch seconds now' differently."""
+    mod = _load_parity()
+    assert mod._canonical_default("strftime('%s','now')") == "epoch_now()"
+    assert mod._canonical_default("strftime('%s', 'now')") == "epoch_now()"
+    assert mod._canonical_default("EXTRACT(epoch FROM now())") == "epoch_now()"
+    assert mod._canonical_default("extract(epoch from now())") == "epoch_now()"
+
+
+def test_pg_index_cols_strip_direction():
+    """Gate 16: pg_get_indexdef renders DESC; SQLite's index_info does
+    not report direction, so the comparison must ignore it."""
+    mod = _load_parity()
+    assert mod._pg_index_cols(
+        "CREATE INDEX idx ON public.agent_runs USING btree (agent_id, started_at DESC)"
+    ) == "agent_id,started_at"
+    assert mod._pg_index_cols(
+        'CREATE UNIQUE INDEX idx ON public.t USING btree ("a", "b" ASC)'
+    ) == "a,b"
+    assert mod._pg_index_cols(None) == ""
+
+
+def test_render_struct_column_order_insensitive():
+    """Gate 16: PG appends tenant via ALTER TABLE (last), SQLite has it
+    inline — column order must not count as drift."""
+    mod = _load_parity()
+    a = {"t": ["id|TEXT|1||1", "tenant|TEXT|1|'default'|0", "name|TEXT|1||0"]}
+    b = {"t": ["id|TEXT|1||1", "name|TEXT|1||0", "tenant|TEXT|1|'default'|0"]}
+    assert mod._render_struct(a, set(), set(), set(), set()) == mod._render_struct(
+        b, set(), set(), set(), set()
+    )
+
+
+def test_migration_016_approvals_task_index(tmp_path):
+    """Gate 16: migration 016 adds the idx_approvals_task_id index the
+    PG path was missing (015's PG block only adds the FK constraint;
+    PG does not auto-index FK columns)."""
+    mod = _load_parity()
+    db_b = tmp_path / "mig.db"
+    applied = mod.build_migrations_db(db_b)
+    assert "016" in applied, applied
+    snap = mod.snapshot_struct_sqlite(db_b)
+    assert any(
+        i.startswith("idx_approvals_task_id|approvals|task_id|0")
+        for i in snap["indexes"]
+    ), snap["indexes"]
+
+
 def test_canonical_types_and_defaults():
     mod = _load_parity()
     assert mod._canonical_type("DOUBLE PRECISION") == "REAL"

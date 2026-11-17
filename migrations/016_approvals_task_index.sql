@@ -1,0 +1,15 @@
+-- Migration 016: create idx_approvals_task_id on PostgreSQL (Wave 6A, Gate 16).
+--
+-- The inline SCHEMA (src/ai_bridge/control/db.py) declares this index, and
+-- migration 015's SQLite block recreates it after rebuilding the approvals
+-- table — but 015's PostgreSQL block only adds the FK constraint, and
+-- PostgreSQL does NOT auto-create an index for a foreign-key column. So
+-- every PostgreSQL boot (CI postgres-boot, staging, fresh installs) lacked
+-- an index the SQLite path has always had; the cross-dialect parity check
+-- caught it (Gate 16 CI failure on 973273a7: PG PARITY FAILED, indexes).
+--
+-- CREATE INDEX IF NOT EXISTS is valid on both engines and a no-op where
+-- the index already exists (SQLite boots, and any PostgreSQL database that
+-- got it another way), so this migration is safe on existing databases:
+-- staging picks it up on the next plane boot.
+CREATE INDEX IF NOT EXISTS idx_approvals_task_id ON approvals(task_id);

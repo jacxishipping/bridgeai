@@ -427,6 +427,33 @@ class Poller:
                     flush=True,
                 )
                 return
+        # Wave 6A (F07-05, remainder): no sealed store is configured, so the
+        # token can only persist as a plaintext file (0600) — that is what
+        # keeps the agent enrolled across restarts on platforms without a
+        # saver, and re-enrollment here is manual. That write must NEVER be
+        # silent: warn loudly every time it happens, and honour an explicit
+        # opt-out — AI_BRIDGE_ALLOW_PLAINTEXT_TOKEN_FILE=0 refuses the
+        # plaintext write entirely (memory-only for this run, operator must
+        # configure a saver or re-enroll after a restart).
+        if os.environ.get("AI_BRIDGE_ALLOW_PLAINTEXT_TOKEN_FILE", "1").strip().lower() in ("0", "false", "no"):
+            print(
+                "[SECURITY] AI_BRIDGE_ALLOW_PLAINTEXT_TOKEN_FILE=0: refusing to "
+                f"write the device token to {self.token_file} in plaintext. "
+                "The token is kept in memory only for this run — configure a "
+                "sealed token store or re-enroll after a restart.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        print(
+            "[SECURITY] No sealed token store is configured: writing the "
+            f"device token to {self.token_file} in PLAINTEXT (0600). Anyone "
+            "who can read this file can impersonate this device. Configure a "
+            "sealed token store, or set AI_BRIDGE_ALLOW_PLAINTEXT_TOKEN_FILE=0 "
+            "to refuse plaintext persistence.",
+            file=sys.stderr,
+            flush=True,
+        )
         try:
             self.token_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_file = self.token_file.with_name(f"{self.token_file.name}.tmp")

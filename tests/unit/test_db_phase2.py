@@ -249,7 +249,7 @@ def test_015_down_migration_preserves_rows_and_reapplies(conn):
     assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
 
 
-def test_minimal_pre013_db_applies_013_014_015(tmp_path):
+def test_minimal_pre013_db_applies_013_014_015_016(tmp_path):
     raw = sqlite3.connect(str(tmp_path / "min.db"))
     raw.execute(
         "CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,"
@@ -285,7 +285,9 @@ def test_minimal_pre013_db_applies_013_014_015(tmp_path):
     )
     raw.commit()
     applied = migrations.run_migrations(raw)
-    assert applied == ["013", "014", "015"]
+    # 016 (Wave 6A, Gate 16) also applies: it creates idx_approvals_task_id,
+    # which the PostgreSQL path was missing.
+    assert applied == ["013", "014", "015", "016"]
     assert raw.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
     raw.close()
 

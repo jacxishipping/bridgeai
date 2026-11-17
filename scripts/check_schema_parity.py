@@ -6,7 +6,7 @@ Builds two SQLite databases and compares their schemas:
 * DB-A: ``db.connect()`` — the fresh-install path (inline ``SCHEMA`` in
   ``src/ai_bridge/control/db.py`` + ``migrations.run_migrations``).
 * DB-B: migrations alone — an empty database with only
-  ``migrations/001``-``015`` applied (the PostgreSQL path, where the
+  ``migrations/001``-``016`` applied (the PostgreSQL path, where the
   schema comes from migrations and ``SCHEMA`` is never executed).
 
 Both must produce identical tables, columns, indexes, foreign keys and
@@ -87,6 +87,12 @@ def _canonical_default(raw: object) -> str:
     if out.startswith("nextval("):
         return ""
     out = re.sub(r"::[A-Za-z ]+", "", out)
+    # Dialect-specific "epoch seconds now": SQLite spells it
+    # strftime('%s','now'), PostgreSQL EXTRACT(epoch FROM now()).
+    # Same value, different spelling — canonicalize (Gate 16).
+    squashed = re.sub(r"\s+", "", out).lower()
+    if squashed in ("strftime('%s','now')", "extract(epochfromnow())"):
+        return "epoch_now()"
     return out
 
 
@@ -110,6 +116,42 @@ def _strip_outer_parens(s: str) -> str:
     return s
 
 
+def _strip_redundant_check_parens(expr: str) -> str:
+    """Drop parens that only group a single comparison or an AND-chain.
+
+    PostgreSQL's pg_get_constraintdef parenthesizes every AND/OR operand
+    (``(TIER IS NULL) OR ((TIER >= 1) AND (TIER <= 4))``) while SQLite
+    stores the expression as written (``TIER IS NULL OR (TIER >= 1 AND
+    TIER <= 4)``). Removing parens around a single comparison, or around
+    an AND-chain, is semantics-preserving: AND binds tighter than OR, so
+    an AND-group needs no parens as an OR operand and a lone comparison
+    needs none anywhere. Parens around an OR-chain are NEVER stripped
+    (they matter inside an AND), and the parens of an IN (...) list are
+    never touched (guarded by the IN lookbehind). Runs to a fixpoint
+    because stripping inner groups can expose an outer strippable group.
+    """
+    out = expr
+
+    def _strip_once(text: str) -> str:
+        def _repl(m: re.Match[str]) -> str:
+            inner = m.group(1)
+            if re.search(r"\bOR\b", inner, re.IGNORECASE):
+                return m.group(0)  # OR-chain: parens may be load-bearing
+            # Pad with spaces: the input may already be tight
+            # (``)OR(``), and unwrapping without a boundary would fuse
+            # words (``NULLOR``). The later whitespace collapse removes
+            # the padding.
+            return " " + inner + " "
+
+        return re.sub(r"(?<!IN )(?<!IN)\(([^()]+)\)", _repl, text, flags=re.IGNORECASE)
+
+    prev = None
+    while out != prev:
+        prev = out
+        out = _strip_once(out)
+    return out
+
+
 def _normalize_check_expr(expr: str) -> str:
     """Normalize a CHECK expression for cross-dialect comparison.
 
@@ -122,7 +164,12 @@ def _normalize_check_expr(expr: str) -> str:
     out = re.sub(r"::(TEXT|INTEGER|BIGINT|DOUBLE PRECISION|BOOLEAN|SMALLINT)", "", out)
     out = re.sub(r"=\s*ANY\s*\(ARRAY\[(.*?)\]\)", r"IN (\1)", out)
     out = _strip_outer_parens(out)
-    out = re.sub(r"\((\w+)\)", r"\1", out)  # redundant parens around one column
+    # Strip redundant inner parens BEFORE whitespace is tightened: the
+    # spaces around parens are word boundaries (``)OR(`` would otherwise
+    # fuse into ``OR`` glued to its neighbours). A second outer strip
+    # follows because unwrapping inner groups can expose a new outer wrap.
+    out = _strip_redundant_check_parens(out)
+    out = _strip_outer_parens(out)
     out = re.sub(r"\s+", " ", out)
     out = re.sub(r"\s*([(),])\s*", r"\1", out)
     return out
@@ -213,7 +260,12 @@ def snapshot_struct_sqlite(db_path: Path) -> dict[str, list[str]]:
             for _cid, name, ctype, notnull, dflt, pk in conn.execute(
                 f"PRAGMA table_info({table})"
             ).fetchall():
-                cols.append(f"{name}|{_canonical_type(ctype)}|{notnull}|{_canonical_default(dflt)}|{pk}")
+                # SQLite's table_info reports NOT NULL = 0 for PRIMARY KEY
+                # columns unless NOT NULL was spelled out (a TEXT/INTEGER
+                # PRIMARY KEY is still effectively NOT NULL); PostgreSQL
+                # reports 1 for every PK column. Normalize: PK implies
+                # NOT NULL (Gate 16).
+                cols.append(f"{name}|{_canonical_type(ctype)}|{1 if pk else notnull}|{_canonical_default(dflt)}|{pk}")
             tables[table] = cols
             for _seq, idx_name, unique, origin, _partial in conn.execute(
                 f"PRAGMA index_list({table})"
@@ -252,8 +304,43 @@ def _render_struct(tables: dict[str, list[str]], uniques: set[str],
                                  "checks": sorted(checks)}
     for table in sorted(tables):
         out["tables"].append(f"{table}:")
-        out["tables"].extend(f"  {c}" for c in tables[table])
+        # Column order is cosmetic (all access is by name): the PG
+        # dialect adds tenant columns via ALTER TABLE (appended last)
+        # while the SQLite dialect has them inline, so the two engines
+        # legitimately disagree on ordinal position. Compare columns as
+        # a name-keyed set (Gate 16).
+        out["tables"].extend(
+            f"  {c}" for c in sorted(tables[table], key=lambda ln: ln.split("|", 1)[0])
+        )
     return out
+
+
+def _pg_index_cols(indexdef: str | None) -> str:
+    """Column list of a pg_get_indexdef() string, direction stripped.
+
+    PostgreSQL renders ``(agent_id, started_at DESC)`` for indexes the
+    migration spells with DESC; SQLite's PRAGMA index_info reports only
+    column names, so the SQLite side is direction-blind by construction.
+    Strip ASC/DESC so the comparison is about the indexed columns, not
+    their sort order (both engines store the same DESC indexes — the
+    migration SQL spells DESC and both honor it). Gate 16.
+    Known limitation (6B audit): stripping direction means an ASC-vs-
+    DESC divergence between the two dialect blocks would NOT be caught
+    here. Both sides derive from the same migration SQL in practice, so
+    they agree; a future migration that spells direction differently
+    per dialect would need a direction-aware check (SQLite would need
+    PRAGMA index_xinfo, which reports the desc flag).
+    """
+    m = re.search(r"\(([^)]+)\)\s*$", indexdef or "")
+    if not m:
+        return ""
+    cols = []
+    for c in m.group(1).split(","):
+        # Strip the direction BEFORE the quotes: '"b" ASC' must lose the
+        # ASC first, or the trailing quote survives the strip.
+        c = re.sub(r"\s+(ASC|DESC)$", "", c.strip(), flags=re.IGNORECASE)
+        cols.append(c.strip().strip('"'))
+    return ",".join(cols)
 
 
 def snapshot_struct_pg(dsn: str) -> dict[str, list[str]]:
@@ -284,9 +371,13 @@ def snapshot_struct_pg(dsn: str) -> dict[str, list[str]]:
                 "WHERE table_schema='public' ORDER BY table_name, ordinal_position"
             )
             for table, col, dtype, nullable, dflt, _ord in cur.fetchall():
+                pk = pk_pos.get((table, col), 0)
+                # PK implies NOT NULL on both engines (see the SQLite
+                # snapshot's comment); normalize here too for symmetry.
+                nn = 1 if pk else (0 if nullable == "YES" else 1)
                 tables.setdefault(table, []).append(
-                    f"{col}|{_canonical_type(dtype)}|{0 if nullable == 'YES' else 1}|"
-                    f"{_canonical_default(dflt)}|{pk_pos.get((table, col), 0)}"
+                    f"{col}|{_canonical_type(dtype)}|{nn}|"
+                    f"{_canonical_default(dflt)}|{pk}"
                 )
             # Indexes: separate constraint-backed ones (PK/unique) from
             # explicit CREATE INDEX ones via pg_constraint.conindid.
@@ -302,8 +393,7 @@ def snapshot_struct_pg(dsn: str) -> dict[str, list[str]]:
             cur.execute("SELECT conindid FROM pg_constraint WHERE contype IN ('p','u')")
             constraint_indexes = {r[0] for r in cur.fetchall()}
             for table, idx_name, is_unique, is_primary, indexdef in idx_rows:
-                m = re.search(r"\(([^)]+)\)\s*$", indexdef or "")
-                cols = ",".join(c.strip().strip('"') for c in m.group(1).split(",")) if m else ""
+                cols = _pg_index_cols(indexdef)
                 # Re-resolve the index oid for the constraint check.
                 if is_unique and not is_primary:
                     uniques.add(f"{table}|{cols}")
@@ -319,8 +409,7 @@ def snapshot_struct_pg(dsn: str) -> dict[str, list[str]]:
             for oid, table, idx_name, is_unique, indexdef in cur.fetchall():
                 if oid in constraint_indexes:
                     continue
-                m = re.search(r"\(([^)]+)\)\s*$", indexdef or "")
-                cols = ",".join(c.strip().strip('"') for c in m.group(1).split(",")) if m else ""
+                cols = _pg_index_cols(indexdef)
                 indexes.add(f"{idx_name}|{table}|{cols}|{1 if is_unique else 0}")
             # Foreign keys + actions.
             cur.execute(

@@ -646,7 +646,10 @@ def dispatch(tool: str, args: dict, *, policy: Policy | None = None, approval_gr
             label=str(a.get("label", "")),
             risk_tier=str(a.get("risk_tier", "tier2_workspace")),
             countdown_ms=int(a.get("countdown_ms", 2000)),
-            approval_granted=True,
+            # Wave 6A (F-05-12): pass the caller's real approval state like
+            # every sibling tool — the previous hardcoded True pre-authorised
+            # this tool regardless of the approval decision.
+            approval_granted=approval_granted,
             policy=policy,
         ),
     }

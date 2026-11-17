@@ -6,6 +6,17 @@ When ``AI_BRIDGE_DEVICE_MTLS=1``:
 - Proxy-forwarded cert headers (``X-Client-Cert-Fingerprint`` / ``X-SSL-Client-Fingerprint``)
   are accepted when the edge already terminated TLS.
 
+TRUST BOUNDARY (F-05-06, Wave 6A): these headers are attacker-controlled
+unless the edge strips them. The bundled nginx config
+(``deployment/docker/nginx.conf``) clears all fingerprint headers on the
+control-plane location, so a client cannot spoof them through the proxy —
+but it also does NOT set them: enabling mTLS requires the deployer to add
+``ssl_verify_client on`` (or ``optional``) to the nginx server block and
+set ``X-Client-Cert-Fingerprint`` from the VERIFIED
+``$ssl_client_fingerprint`` variable. Deploying the plane directly
+(without a stripping edge) with AI_BRIDGE_DEVICE_MTLS=1 trusts any client
+that can send the header — do not do that.
+
 This does not replace terminating TLS at nginx; it binds a device identity to a
 certificate fingerprint checked by the plane.
 """

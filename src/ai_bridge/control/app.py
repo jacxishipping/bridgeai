@@ -1279,42 +1279,72 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
 
     app.state.device_live_meta = {}
 
+    def _get_devices_live_meta(dev_ids: list) -> dict:
+        """Live telemetry enrichment for many devices with ONE tasks query.
+
+        Wave 6A (W5E-01): the old per-device ``_get_device_live_meta``
+        ran up to 2 task-history queries per device behind the single DB
+        lock, so ``GET /api/devices`` did ~2N queries and degraded to
+        ~3.7 s/request at 20 concurrent VUs. This runs a single window-
+        function query for the latest completed ``get_resource_usage`` /
+        ``get_network_info`` result per (device, tool) across all ids that
+        still need the data, then applies the same parsing as before.
+        """
+        metas: dict = {}
+        need_resource: list = []
+        need_network: list = []
+        for dev_id in dev_ids:
+            meta = dict(app.state.device_live_meta.get(dev_id) or {})
+            metas[dev_id] = meta
+            if not meta.get("memory_total_gb") or not meta.get("disk_total_gb"):
+                need_resource.append(dev_id)
+            if not meta.get("ip_address"):
+                need_network.append(dev_id)
+        wanted = sorted(set(need_resource) | set(need_network))
+        if wanted:
+            try:
+                placeholders = ",".join("?" for _ in wanted)
+                rows = conn.execute(
+                    "SELECT device_id, tool, result FROM ("
+                    "SELECT device_id, tool, result, "
+                    "ROW_NUMBER() OVER (PARTITION BY device_id, tool "
+                    "ORDER BY updated_at DESC) AS rn FROM tasks "
+                    "WHERE device_id IN (" + placeholders + ") "
+                    "AND tool IN ('get_resource_usage', 'get_network_info') "
+                    "AND status='completed') WHERE rn = 1",
+                    tuple(wanted),
+                ).fetchall()
+                for row in rows:
+                    dev_id, tool, result = row["device_id"], row["tool"], row["result"]
+                    meta = metas.get(dev_id)
+                    if meta is None or not result:
+                        continue
+                    try:
+                        data = json.loads(result)
+                    except Exception:
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    if tool == "get_resource_usage":
+                        if data.get("memory_total_bytes") and not meta.get("memory_total_gb"):
+                            meta["memory_total_gb"] = round(float(data["memory_total_bytes"]) / (1024**3), 1)
+                        if data.get("disk_total_bytes") and not meta.get("disk_total_gb"):
+                            meta["disk_total_gb"] = round(float(data["disk_total_bytes"]) / (1024**3), 1)
+                        if data.get("uptime_seconds") and not meta.get("uptime_hours"):
+                            meta["uptime_hours"] = round(float(data["uptime_seconds"]) / 3600.0, 1)
+                    elif tool == "get_network_info":
+                        if not meta.get("ip_address"):
+                            for iface in data.get("interfaces") or []:
+                                addr = iface.get("ip") or iface.get("address")
+                                if addr and not str(addr).startswith("127."):
+                                    meta["ip_address"] = str(addr)
+                                    break
+            except Exception:
+                pass
+        return metas
+
     def _get_device_live_meta(dev_id: str) -> dict:
-        meta = dict(app.state.device_live_meta.get(dev_id) or {})
-        if not meta.get("memory_total_gb") or not meta.get("disk_total_gb"):
-            try:
-                r_row = conn.execute(
-                    "SELECT result FROM tasks WHERE device_id=? AND tool='get_resource_usage' AND status='completed' ORDER BY updated_at DESC LIMIT 1",
-                    (dev_id,),
-                ).fetchone()
-                if r_row and r_row["result"]:
-                    rp = json.loads(r_row["result"])
-                    if isinstance(rp, dict):
-                        if rp.get("memory_total_bytes") and not meta.get("memory_total_gb"):
-                            meta["memory_total_gb"] = round(float(rp["memory_total_bytes"]) / (1024**3), 1)
-                        if rp.get("disk_total_bytes") and not meta.get("disk_total_gb"):
-                            meta["disk_total_gb"] = round(float(rp["disk_total_bytes"]) / (1024**3), 1)
-                        if rp.get("uptime_seconds") and not meta.get("uptime_hours"):
-                            meta["uptime_hours"] = round(float(rp["uptime_seconds"]) / 3600.0, 1)
-            except Exception:
-                pass
-        if not meta.get("ip_address"):
-            try:
-                n_row = conn.execute(
-                    "SELECT result FROM tasks WHERE device_id=? AND tool='get_network_info' AND status='completed' ORDER BY updated_at DESC LIMIT 1",
-                    (dev_id,),
-                ).fetchone()
-                if n_row and n_row["result"]:
-                    np_data = json.loads(n_row["result"])
-                    if isinstance(np_data, dict):
-                        for iface in np_data.get("interfaces") or []:
-                            addr = iface.get("ip") or iface.get("address")
-                            if addr and not str(addr).startswith("127."):
-                                meta["ip_address"] = str(addr)
-                                break
-            except Exception:
-                pass
-        return meta
+        return _get_devices_live_meta([dev_id]).get(dev_id, {})
 
     def expire_pending_approvals() -> None:
         now = dbmod.now()
@@ -2181,6 +2211,7 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         audit=audit,
         _install_asset=_install_asset,
         _get_device_live_meta=_get_device_live_meta,
+        _get_devices_live_meta=_get_devices_live_meta,
         expire_pending_approvals=expire_pending_approvals,
         approval_detail=approval_detail,
         _execute_workflow_step_sync=_execute_workflow_step_sync,

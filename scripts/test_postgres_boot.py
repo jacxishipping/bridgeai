@@ -58,6 +58,7 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(f'DROP DATABASE IF EXISTS "{args.db}"')
             cur.execute(f'CREATE DATABASE "{args.db}"')
+    app = None
     try:
         conn = dbmod.connect(database_url=boot_dsn)
         try:
@@ -66,7 +67,7 @@ def main() -> int:
             ).fetchall()]
         finally:
             conn.close()
-        assert len(versions) == 15, f"expected 15 migrations, got {versions}"
+        assert len(versions) == 16, f"expected 16 migrations, got {versions}"
         print(f"migrations applied on Postgres: {len(versions)}")
 
         app = create_app(admin_token="test", database_url=boot_dsn)
@@ -121,9 +122,25 @@ def main() -> int:
         print("POSTGRES BOOT OK")
         return 0
     finally:
+        # The TestClient leaves the app's database connection open; DROP
+        # DATABASE refuses while any session is attached ("database is
+        # being accessed by other users"). Close the app's connection,
+        # then terminate any stray backends on the scratch DB before
+        # dropping it. (Gate 16: without this the script exits 1 even
+        # though every boot check passed.)
+        if app is not None:
+            try:
+                app.state.conn.close()
+            except Exception:
+                pass
         if not args.keep:
             with psycopg.connect(args.base_dsn, autocommit=True) as conn:
                 with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()",
+                        (args.db,),
+                    )
                     cur.execute(f'DROP DATABASE IF EXISTS "{args.db}"')
 
 
