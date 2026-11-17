@@ -136,6 +136,63 @@ Pass = every flow completes and returns a usable token.
 - OIDC: every cross-worker flow completes.
 - Backup/restore: restore verifies, core-table counts match.
 
+## 5A. Results — 17 Nov 2026 (live, staging plane 4 × Starter)
+
+- **4 instances running, `/health` 200 throughout** — PASS. Plan flipped
+  free → Starter in the dashboard (Render API cannot change free↔paid
+  plans); `POST /scale` 202; all 4 instances verified RUNNING.
+- **Scheduler (DIST-01)** — PASS. Exactly 1 task per firing; still 1
+  after the schedule was deleted and 30 s passed.
+- **Fan-out (DIST-03)** — PASS. 10/10 cancels delivered cross-worker,
+  median 337 ms, max 622 ms (rules out same-worker coincidence ≈0.25^10).
+- **Rate limit shared (PERF-02)** — PASS. 1,199 requests allowed in
+  60 s (≈1,193/min), then 429s — matches the configured 1,200/min
+  token-bucket limit; a per-worker fallback would have allowed ≈4,800/min.
+- **Soak (gate 15)** — THRESHOLDS FAILED, but the failure is the rate
+  limiter, not the plane. k6 VUS=20, 5 min: 13,901 iterations, claim p95
+  201 ms (threshold < 5,000 ms — PASSED); http_req_failed 91.41%
+  (25,556/27,956), all 429 'Rate limit exceeded' — the soak drove
+  ~93 req/s through one admin token capped at 1,200/min, so it measured
+  the limiter, not plane capacity. A proper re-soak needs one token per
+  VU (or a raised test limit).
+- **Rate-limiter lockout defect — FOUND LIVE, new P1.** `durable_ratelimit.py`
+  `_redis_allow` / `_async_redis_allow` both `zadd` the current request's
+  timestamp into the Redis sliding window BEFORE counting, even when the
+  request is rejected — rejected requests are recorded, so under
+  sustained overload the window never drains. Confirmed with a
+  discriminating test: drain 70 s → single request 200 → k6 hammer
+  60 s, 20 VUs, 5,917 requests (~98/s; 1,199 admitted, 4,718 rejected)
+  → 30 s of complete silence → single request **429**. Fix: only record
+  admitted requests (prune → count → add only if under limit, ideally
+  atomic via Lua). James's decision on fix + re-soak pending.
+- **OIDC cross-worker (DIST-05)** — NOT LIVE-TESTABLE. Staging reports
+  OIDC as not configured (`GET /api/auth/oidc/configured` →
+  `{"enabled":false}`), so authorize → exchange cannot run end-to-end.
+  Code/config verified instead: `bind_oidc_store(conn)` runs at app
+  startup, so pending logins and single-use exchange codes live in the
+  shared Postgres `settings` table — cross-worker safe by construction.
+  Recorded as code verification, NOT a live pass.
+- **Backup/restore drill (DB-01)** — PASS, after three real bugs found
+  and fixed in the drill tooling (all fixed in the repo, tests green):
+  (1) distro `postgresql-client` is PG 17, staging Postgres is PG 18 and
+  pg_dump refuses the mismatch — Dockerfile now installs
+  `postgresql-client-18` from PGDG; (2) `createdb`/`dropdb` take a
+  literal DB name, not a DSN (they connected to the local socket) —
+  `backup_restore.py` now parses the DSN into `-h`/`-p`/`-U` +
+  `PGPASSWORD` and has a `drop` subcommand; (3) the dump carries
+  `ALTER DEFAULT PRIVILEGES` for the live-DB owner role, which the
+  drill user cannot impersonate — pg_restore now runs `--no-privileges`
+  (backup file stays full-fidelity). Final run 09:06 UTC: dump OK,
+  restore OK, verify **migrations = 15**, devices = 6, users = 0,
+  drill DB dropped, "DRILL OK", "Cron job run finished successfully".
+  The DSN redaction in the drill logs also verified working (`***:***`).
+
+Gate 15 therefore stays NOT MET (soak thresholds failed on the limiter;
+OIDC not live-proven), but the distributed mechanisms it was meant to
+prove — scheduler-once, fan-out, shared rate limit — all passed live,
+and the backup/restore drill (DB-01) is now proven, closing that part
+of gate 16.
+
 ## 6. Cost (Render list prices, checked Oct 2026; verify on the pricing page before spending)
 
 | Item | Price | Phase cost |
