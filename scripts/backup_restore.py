@@ -89,11 +89,25 @@ def restore_sqlite(backup_path: Path, db_path: Path) -> dict[str, int]:
     return _verify_sqlite(db_path)
 
 
+def _redact(cmd: list[str]) -> str:
+    """Join a command for logging with any DSN password masked.
+
+    pg_dump/pg_restore/psql take the DSN as an argument; printing it
+    verbatim would leak the database password into logs. Mask the
+    userinfo (``://user:password@``) — the command actually executed is
+    unaffected.
+    """
+    import re
+
+    text = " ".join(cmd)
+    return re.sub(r"://[^:/\s]+:[^@\s]+@", "://***:***@", text)
+
+
 def _run(cmd: list[str]) -> None:
-    print("+ " + " ".join(cmd))
+    print("+ " + _redact(cmd))
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
-        raise SystemExit(f"command failed (exit {result.returncode}): {' '.join(cmd)}")
+        raise SystemExit(f"command failed (exit {result.returncode}): {_redact(cmd)}")
 
 
 def backup_postgres(dsn: str, out_path: Path, fmt: str = "c") -> None:
@@ -116,7 +130,7 @@ def _createdb(dsn: str) -> None:
     """
     if shutil.which("createdb") is None:
         raise SystemExit("createdb not found on PATH")
-    print("+ createdb " + dsn)
+    print("+ createdb " + _redact([dsn]))
     result = subprocess.run(["createdb", dsn], capture_output=True, text=True)
     if result.returncode != 0 and "already exists" not in (result.stderr or ""):
         raise SystemExit(f"createdb failed: {result.stderr.strip()}")

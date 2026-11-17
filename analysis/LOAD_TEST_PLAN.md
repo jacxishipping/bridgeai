@@ -17,7 +17,7 @@ the Postgres backup/restore drill (DB-01).
 | 1 | Scheduler fires each due job exactly once across workers | DIST-01, gate 15 | One due schedule, count executions = 1 per tick |
 | 2 | Cancels / task availability reach agents on other workers | DIST-03, gate 15 | Cancel issued via public URL arrives promptly on an agent WS connected to a different worker, repeated trials |
 | 3 | OIDC completes when authorize and exchange land on different workers | DIST-05, gate 15 | Full authorize → exchange flow via public URL, repeated |
-| 4 | Effective rate limit = configured limit, not 4× | PERF-02, gate 15 | Probe: allowed request rate ≈ 120/min across all 4 workers combined |
+| 4 | Effective rate limit = configured limit, not 4× | PERF-02, gate 15 | Probe: allowed request rate ≈ 1200/min across all 4 workers combined (the middleware's token-bucket limit; see §4.D) |
 | 5 | 4 workers sustain the claim/cancel soak within thresholds | Gate 15 | k6 soak: claim p95 < 5 s, failed requests < 5% |
 | 6 | Postgres backup restores into a fresh DB and verifies | DB-01 | `scripts/backup_restore.py` PG path run on Render: dump → new DB → restore → core-table counts |
 
@@ -84,10 +84,15 @@ the Postgres backup/restore drill (DB-01).
 
 1. Small probe script (new, ~50 lines): N parallel clients hammer a
    rate-limited API route for 60 s, counting 200s vs 429s.
-2. Configured limit is 120/min per key (default in `_rate_limit`).
-   Pass = the allowed rate across all 4 workers combined is ≈120/min,
-   not ≈480/min. Validate first which routes the async middleware limiter
-   actually covers, so the probe hits a limited route.
+2. The limit the middleware actually enforces for a token-authenticated
+   caller is **1200/min** (`rate_limit_middleware` in `app.py`: token bucket
+   1200/min, anonymous-IP bucket 300/min, auth-endpoint bucket 30/min).
+   The 120/min figure is the default of the sync `_rate_limit` helper, not
+   the middleware. Pass = the allowed rate across all 4 workers combined
+   is ≈1200/min, not ≈4800/min (4 × 1200, the per-worker-memory outcome).
+   The probe uses one admin token for every request (the bucket key is the
+   token hash) against `GET /api/devices`, which passes through the
+   middleware before the handler.
 
 ### E. Load soak (gate 15)
 
