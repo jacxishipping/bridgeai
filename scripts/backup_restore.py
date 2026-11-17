@@ -193,7 +193,16 @@ def restore_postgres(dump_path: Path, dsn: str, fmt: str = "c") -> None:
         if shutil.which("pg_restore") is None:
             raise SystemExit("pg_restore not found on PATH")
         _createdb(dsn)
-        _run(["pg_restore", "--dbname", dsn, "--clean", "--if-exists", str(dump_path)])
+        # --no-privileges: the dump carries ALTER DEFAULT PRIVILEGES for
+        # the role that owns the live DB; restoring as the drill user
+        # (a non-superuser that cannot impersonate that role) fails
+        # those 4 statements with "permission denied to change default
+        # privileges" and pg_restore exits 1. The backup file itself
+        # stays full-fidelity; only the drill restore skips replaying
+        # privilege changes. The data and schema are what the drill
+        # verifies.
+        _run(["pg_restore", "--dbname", dsn, "--clean", "--if-exists",
+              "--no-privileges", str(dump_path)])
     else:
         if shutil.which("psql") is None:
             raise SystemExit("psql not found on PATH")
