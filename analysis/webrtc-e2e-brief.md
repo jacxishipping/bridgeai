@@ -305,10 +305,23 @@ reasons unrelated to the plane:
   loaded but rendered as raw text — jsDelivr serves `.html` as `text/plain`,
   so the script never ran.
 The probe page itself is committed at `analysis/ws-probe.html` (GitHub main
-`8bc86c2`). The question stays open; the two remaining routes are (a) a WS
-probe from farhan (different network, needs the production admin token
-re-supplied for one MCP call) or (b) James running the one-line probe in his
-own browser's DevTools console (see the 5C close-out message, 17 Nov 2026).
+`8bc86c2`).
+- **Decisive probe from farhan (17 Nov 2026 13:27 UTC):** James re-supplied
+  the production admin token and the parent ran a stdlib-only raw TLS WS
+  handshake from farhan (Windows Server 2022, a different network) to the
+  same garbage-ticket URL. Result: **`HTTP/1.1 403 Forbidden`,
+  `Server: cloudflare`, `CF-RAY: a5bf125ffab99fe9-SIN`,
+  `cf-cache-status: DYNAMIC`, empty body** — the identical 403 the parent's
+  VM got from a different Cloudflare PoP (`…-MIA`). Two networks, two PoPs,
+  same 403. **Conclusion: Cloudflare blocks WebSocket upgrades to this host
+  generally, not just for this VM's egress.** The plane's WS behaviour
+  (4401 rejects, snapshot/pong, replay rejection) is therefore unverified
+  from every external vantage because the handshake never reaches the plane.
+  This is a staging-deployment finding: live desktop streaming via browser
+  peers is unreachable on this Render deployment as configured. Fixing it
+  would need a deployment change (e.g. custom domain / Cloudflare settings)
+  — a user decision, not taken here. Probe script left on farhan at
+  `C:\Users\Administrator\ws-probe.py`.
 
 ### 7.4 What 5C actually proves, and what stays open
 PROVEN (real browser peer, real plane): signalling plane over HTTPS works
@@ -322,10 +335,11 @@ PASS) — still impossible on staging with no Windows agent attached.
 The WS criteria are therefore **NOT VERIFIED (environment/deployment
 blocked)**, not "the plane failed" — the harness records them as FAIL
 because its verdict logic cannot distinguish the two, and this addendum is
-the correction. 5C closes with the WS criteria unverified; they can be
-re-opened if a farhan probe or a browser run by James clears the plane, or
-if a general Cloudflare block is confirmed, the WS gate needs a different
-deployment or network path to verify.
+the correction. 5C closes with the WS criteria unverified; the farhan probe
+settled the cause as a general Cloudflare block (see §7.3), so verifying WS
+behaviour needs a different deployment or network path — e.g. a custom
+domain in front of the plane, or a direct-to-origin route that bypasses
+Cloudflare — which is a user decision for 5E/5F, not a code fix.
 
 ### 7.5 Still unverified after this run
 - Everything the harness does inside a real browser: `RTCPeerConnection`
