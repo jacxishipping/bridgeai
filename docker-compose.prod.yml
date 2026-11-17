@@ -34,6 +34,12 @@ services:
       # Required here (compose fails fast if unset); generate it with
       # deployment/linux/deploy-production.sh (openssl rand -hex 32).
       - AI_BRIDGE_CSRF_SECRET=${AI_BRIDGE_CSRF_SECRET:?Set AI_BRIDGE_CSRF_SECRET in .env}
+      # F-05-05 (Wave 2A): the legacy shared admin token is OFF by
+      # default — AI_BRIDGE_ADMIN_TOKEN alone does not enable it. The
+      # operator opts in with AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN=1
+      # (staging verification / bootstrap admin); production keeps the
+      # session-based admin path. Passed through from .env, default 0.
+      - AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN=${AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN:-0}
       # R-P0-15 follow-up (EC2 deploy): the production readiness check
       # (production_readiness.turn_credentials_configured, gated by
       # /health/ready) reads AI_BRIDGE_TURN_SECRET inside the control-api

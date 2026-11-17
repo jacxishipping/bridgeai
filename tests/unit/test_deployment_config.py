@@ -190,6 +190,20 @@ class TestNoDefaultSecrets(unittest.TestCase):
             "docker-compose.prod.yml must fail fast without AI_BRIDGE_TURN_SECRET",
         )
 
+    def test_control_api_declares_legacy_admin_flag(self):
+        # F-05-05 (Wave 2A): AI_BRIDGE_ADMIN_TOKEN alone does not enable
+        # the legacy admin token; the operator must opt in with
+        # AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN=1. The control-api
+        # service must pass the flag through (default off) or a staging
+        # operator cannot enable it from .env.production at all.
+        env = _compose_env(PROD_COMPOSE)
+        self.assertIn("AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN", env)
+        self.assertIn(
+            ":-0}",
+            env["AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN"],
+            "legacy admin flag must default to 0 (off) in compose",
+        )
+
 
 class TestNginx(unittest.TestCase):
     def setUp(self):
