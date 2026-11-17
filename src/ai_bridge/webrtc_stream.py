@@ -1,0 +1,1748 @@
+"""WebRTC desktop streaming with H.264 Hardware/Software Acceleration, Stage-by-Stage Telemetry,
+STUN/TURN Support, and Permission-Gated DataChannel Input with Disconnect Safety.
+
+Architecture (compatible with the agent's outbound-only model & v1.0 specification):
+
+* Separate video transport, input transport, AI execution, and device management.
+* Video Track: Streams desktop frames at 1920x1080 @ 30 FPS (configurable up to 60 FPS),
+  preferring H.264 (Hardware Media Foundation / PyAV H.264 with software fallback).
+* DataChannel ('input'): Carries low-latency mouse movement, clicks, scroll wheel,
+  and independent key-down / key-up events, plus ping/pong latency probes.
+* Disconnect Safety: Tracks all held virtual keys and mouse buttons and automatically
+  releases them via Win32 SendInput / native C++ controller if the DataChannel or
+  PeerConnection disconnects.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import logging
+import os
+import platform
+import threading
+import time
+from typing import Any
+
+import httpx
+
+logger = logging.getLogger("ai_bridge.webrtc")
+
+SESSION_TTL_SECONDS = 600
+# F13-10: ICE-gathering gate. An offer is never posted until gathering
+# reaches "complete" (or this timeout expires, in which case the offer
+# is NOT posted and the session errors — see wait_for_ice_gathering_complete).
+ICE_GATHERING_TIMEOUT_SECONDS = 5.0
+DEFAULT_ICE_SERVERS = [{"urls": "stun:stun.l.google.com:19302"}]
+
+_STREAMERS: dict[str, "AgentStreamer"] = {}
+_STREAM_TELEMETRY: dict[str, dict[str, Any]] = {}
+_AGENT_CONTEXT: dict[str, str] = {}
+_SESSION_DEVICES: dict[str, str] = {}
+_HELD_KEYS_LOCK = threading.Lock()
+_HELD_KEYS: set[str] = set()
+# F13-08: mouse buttons held down via the DataChannel, tracked in BOTH
+# input paths. Wave 1B tracked keys only (_HELD_KEYS); a mousedown with
+# no matching mouseup left the button held after disconnect in the
+# fallback (non-DLL) path, which has no release of its own. Buttons are
+# tracked here in Python regardless of whether the native DLL is loaded,
+# and released by release_all_held_keys() (native DLL first, then a
+# Win32 mouse_event button-up per held button, mirroring the key
+# release below). Values are "left" | "right" | "middle".
+_HELD_MOUSE_BUTTONS: set[str] = set()
+_MOUSE_BUTTON_UP_FLAGS = {"left": 0x0004, "right": 0x0010, "middle": 0x0040}
+
+
+def dev_simulate_intent_enabled() -> bool:
+    """F13-06: True only with the explicit dev flag ``AI_BRIDGE_DEV_SIMULATE_INTENT=1``.
+
+    Default is OFF. The ``simulate_agent_intent`` DataChannel action is a
+    demo hook that injects a fake tier-3 intent into the viewer's UI; it
+    must never run on a production path unless a developer opts in
+    explicitly for a local demo.
+    """
+    return os.environ.get("AI_BRIDGE_DEV_SIMULATE_INTENT", "").strip() == "1"
+
+
+def is_stale_session_state(sess: dict | None, now: float | None = None) -> tuple[bool, str]:
+    """F13-09: decide whether a polled session state belongs to a dead incarnation.
+
+    Returns (True, reason) only on positive evidence of staleness; an
+    absent/empty state is (False, "") — "unknown", not stale — so a
+    transient poll failure never kills a live session. Stale when:
+    * status is "ended" or "error" (terminated by the plane/viewer), or
+    * created_at is older than SESSION_TTL_SECONDS (expired), or
+    * status is "answered"/"connected" AND the session already carries
+      both an offer and an answer — i.e. a previous streamer incarnation
+      negotiated it. A fresh session is "waiting" with neither; reusing
+      such an id after a server/agent restart would resume a dead
+      session, so the caller must mint a fresh session id instead.
+    """
+    if not isinstance(sess, dict) or not sess:
+        return False, ""
+    status = str(sess.get("status") or "").lower()
+    if status in ("ended", "error"):
+        return True, f"session_{status}"
+    created_at = sess.get("created_at")
+    if isinstance(created_at, (int, float)):
+        if (now if now is not None else time.time()) - float(created_at) > SESSION_TTL_SECONDS:
+            return True, "session_expired"
+    if status in ("answered", "connected") and sess.get("offer") and sess.get("answer"):
+        return True, "session_already_negotiated"
+    return False, ""
+
+
+def reconcile_session_before_start(signaling, session_id: str) -> dict[str, Any]:
+    """F13-09: reconcile a session id before a streamer is started on it.
+
+    After a server/agent restart the in-process registry (_STREAMERS) is
+    empty but the plane's signalling row may still say "answered" /
+    "connected" for the old incarnation. Starting a new streamer on that
+    id would accept input on an orphaned session. This checks the live
+    session dict (DictSignaling) or one poll (HttpSignaling) and reports
+    {"ok": False, "stale": True, "reason": ...} for a stale id; the
+    caller (start_stream) refuses it and the operator must create a
+    fresh session id. A poll failure is NOT treated as stale — the
+    _run() loop re-checks before posting its offer.
+    """
+    sess = getattr(signaling, "session", None)
+    if isinstance(sess, dict):
+        stale, reason = is_stale_session_state(sess)
+        return {"ok": not stale, "stale": stale, "reason": reason, "session_id": session_id}
+    try:
+        polled = signaling.poll_session()
+    except Exception:
+        return {"ok": True, "stale": False, "reason": "poll_unavailable", "session_id": session_id}
+    stale, reason = is_stale_session_state(polled if isinstance(polled, dict) else None)
+    return {"ok": not stale, "stale": stale, "reason": reason, "session_id": session_id}
+
+
+async def wait_for_ice_gathering_complete(pc, timeout_seconds: float = ICE_GATHERING_TIMEOUT_SECONDS, poll_interval: float = 0.05) -> bool:
+    """F13-10: wait until pc.iceGatheringState == "complete" (or timeout).
+
+    Pure polling over the aiortc attribute so it is testable with a fake
+    peer connection; returns False on timeout — the caller must then NOT
+    post the offer (see AgentStreamer._run).
+    """
+    deadline = time.monotonic() + float(timeout_seconds)
+    while time.monotonic() < deadline:
+        if getattr(pc, "iceGatheringState", None) == "complete":
+            return True
+        await asyncio.sleep(poll_interval)
+    return getattr(pc, "iceGatheringState", None) == "complete"
+
+
+def describe_adaptive_bitrate() -> dict[str, Any]:
+    """F13-07: honest description of the adaptive-bitrate mechanism.
+
+    The real mechanism is RTCP receiver reports read via
+    aiortc ``RTCRtpSender.getStats()`` (remote-inbound-rtp:
+    roundTripTime / packetsLost) — see AgentStreamer._poll_rtcp_stats().
+    There is NO synthesised bitrate: when no RTCP stats are available
+    the per-session telemetry reports ``abr_source="none"`` and leaves
+    rtt_ms / packet_loss_pct unset instead of inventing figures.
+    Viewer-supplied ``network_quality`` messages are labelled
+    ``abr_source="viewer_reported"`` — unverified client reports, not
+    RTCP measurements. And ``apply_stream_params`` only changes the
+    frame-pacing / bitrate *target* label (plus a best-effort native-DLL
+    bitrate request); it does NOT reconfigure the aiortc/PyAV encoder
+    mid-stream, so ``bitrate_kbps_target`` is a target, never a measured
+    encoder output.
+    """
+    return {
+        "mechanism": "rtcp_receiver_reports_via_aiortc_sender_getStats",
+        "encoder_reconfigured": False,
+        "bitrate_kbps_target_is": "target_label_not_measured_output",
+        "abr_sources": ["rtcp", "viewer_reported", "viewer_requested", "none"],
+        "note": (
+            "Without RTCP stats abr_source is 'none' and no rtt/loss figures "
+            "are reported. Viewer-reported values are client-supplied, not "
+            "RTCP measurements."
+        ),
+    }
+
+
+def generate_ephemeral_turn_credentials(
+    username_prefix: str = "aibridge_client",
+    ttl_seconds: int = 86400,
+    turn_host: str | None = None,
+    secret: str | None = None,
+) -> list[dict[str, Any]]:
+    """Generate RFC 5766 / REST API ephemeral TURN credentials using HMAC-SHA1 for symmetric NAT traversal."""
+    turn_secret = secret or os.environ.get("AI_BRIDGE_TURN_SECRET", "").strip()
+    if not turn_secret:
+        profile = os.environ.get("AI_BRIDGE_PROFILE", os.environ.get("RENDER", "")).strip().lower()
+        prodish = profile in ("production", "prod", "1", "true") or bool(os.environ.get("RENDER"))
+        if prodish:
+            raise RuntimeError(
+                "AI_BRIDGE_TURN_SECRET must be set in production; refusing default shared secret."
+            )
+        turn_secret = "aibridge_turn_shared_secret_2026"
+    host = turn_host or os.environ.get("AI_BRIDGE_TURN_HOST", "jxiptvplayer.app")
+    expiry = int(time.time()) + ttl_seconds
+    username = f"{expiry}:{username_prefix}"
+
+    key = turn_secret.encode("utf-8")
+    msg = username.encode("utf-8")
+    credential = base64.b64encode(hmac.new(key, msg, hashlib.sha1).digest()).decode("ascii")
+
+    return [
+        {"urls": ["stun:stun.l.google.com:19302", f"stun:{host}:3478"]},
+        {
+            "urls": [f"turn:{host}:3478?transport=udp", f"turn:{host}:3478?transport=tcp"],
+            "username": username,
+            "credential": credential,
+        },
+    ]
+
+
+def get_configured_ice_servers() -> list[dict[str, Any]]:
+    """Build STUN + TURN ICE server list from environment variables or ephemeral credentials."""
+    custom_json = os.environ.get("AI_BRIDGE_ICE_SERVERS", "").strip()
+    if custom_json:
+        try:
+            parsed = json.loads(custom_json)
+            if isinstance(parsed, list) and parsed:
+                return parsed
+        except Exception:
+            pass
+
+    turn_url = os.environ.get("AI_BRIDGE_TURN_URL", "").strip()
+    if turn_url:
+        turn_entry: dict[str, Any] = {"urls": turn_url}
+        turn_user = os.environ.get("AI_BRIDGE_TURN_USERNAME", "").strip()
+        turn_cred = os.environ.get("AI_BRIDGE_TURN_CREDENTIAL", "").strip()
+        if turn_user:
+            turn_entry["username"] = turn_user
+        if turn_cred:
+            turn_entry["credential"] = turn_cred
+        return [{"urls": "stun:stun.l.google.com:19302"}, turn_entry]
+
+    try:
+        return generate_ephemeral_turn_credentials()
+    except Exception:
+        return list(DEFAULT_ICE_SERVERS)
+
+
+def desktop_audio_opt_in() -> bool:
+    """Return True when desktop audio loopback is explicitly enabled.
+
+    Default is off. Opt in with ``AI_BRIDGE_DESKTOP_AUDIO=1`` (also ``true`` / ``yes``).
+    When opted in, prefers WASAPI loopback via ``soundcard``; otherwise silent PCM.
+    """
+    return os.environ.get("AI_BRIDGE_DESKTOP_AUDIO", "").strip().lower() in ("1", "true", "yes")
+
+
+def desktop_audio_silent_pcm_bytes(samples_per_frame: int = 960, channels: int = 2) -> bytes:
+    """Zero-filled s16le PCM used when live capture is unavailable (honest silent track)."""
+    return bytes(int(samples_per_frame) * int(channels) * 2)
+
+
+def desktop_audio_capture_implemented() -> bool:
+    """True when this host can open WASAPI/speaker loopback (optional soundcard)."""
+    try:
+        from . import desktop_audio
+
+        return bool(desktop_audio.wasapi_capture_available())
+    except Exception:
+        return False
+
+
+def set_agent_context(control_url: str, device_token: str) -> None:
+    """Let dispatch() start a stream: the poller owns the control URL
+    and device token, dispatch() does not receive them as arguments."""
+    _AGENT_CONTEXT["control_url"] = control_url
+    _AGENT_CONTEXT["device_token"] = device_token
+
+
+def release_all_held_keys() -> int:
+    """Release all held keys and mouse buttons across both native C++ SendInput and Python Win32.
+
+    F13-08: also releases mouse buttons tracked in _HELD_MOUSE_BUTTONS
+    (both the native-DLL and the fallback path). The native DLL call
+    releases its own held set; the Win32 mouse_event button-up loop
+    below covers buttons held via the Python fallback path, which has no
+    release of its own (tools.perform_approved_ui_action has no
+    mousedown/mouseup actions). A duplicate button-up is harmless.
+    Called on DataChannel close, PeerConnection disconnect/failure,
+    streamer stop, session teardown (stop_stream), and takeover.
+    """
+    released_count = 0
+    try:
+        from ai_bridge.screen_capture import get_native_dll
+
+        dll = get_native_dll()
+        if dll is not None:
+            released_count += int(dll.aibridge_release_all_keys())
+    except Exception:
+        pass
+
+    with _HELD_KEYS_LOCK:
+        keys = list(_HELD_KEYS)
+        _HELD_KEYS.clear()
+        buttons = list(_HELD_MOUSE_BUTTONS)
+        _HELD_MOUSE_BUTTONS.clear()
+
+    if keys and platform.system() == "Windows":
+        try:
+            import ctypes
+            from ai_bridge.tools import _vk_for_token
+
+            u = ctypes.windll.user32
+            for k in keys:
+                try:
+                    vk = _vk_for_token(k)
+                    u.keybd_event(vk, 0, 0x0002, 0)  # KEYEVENTF_KEYUP
+                    released_count += 1
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    if buttons and platform.system() == "Windows":
+        try:
+            import ctypes
+
+            u = ctypes.windll.user32
+            for b in buttons:
+                flag = _MOUSE_BUTTON_UP_FLAGS.get(b)
+                if flag is None:
+                    continue
+                try:
+                    u.mouse_event(flag, 0, 0, 0, 0)
+                    released_count += 1
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    return released_count
+
+
+def track_mouse_button_state(button: str, is_down: bool = True) -> None:
+    """F13-08: track a held/released mouse button so disconnect can release it."""
+    norm = (button or "").strip().lower()
+    if norm not in _MOUSE_BUTTON_UP_FLAGS:
+        return
+    with _HELD_KEYS_LOCK:
+        if is_down:
+            _HELD_MOUSE_BUTTONS.add(norm)
+        else:
+            _HELD_MOUSE_BUTTONS.discard(norm)
+
+
+def get_held_mouse_buttons() -> list[str]:
+    """F13-08: mouse buttons currently tracked as held down."""
+    with _HELD_KEYS_LOCK:
+        return sorted(_HELD_MOUSE_BUTTONS)
+
+
+def track_key_state(key: str, is_down: bool = True) -> None:
+    """Track held or released key state so disconnect can safely synthesize keyup events."""
+    norm = (key or "").strip().lower()
+    if not norm:
+        return
+    with _HELD_KEYS_LOCK:
+        if is_down:
+            _HELD_KEYS.add(norm)
+        else:
+            _HELD_KEYS.discard(norm)
+
+
+def get_held_keys() -> list[str]:
+    with _HELD_KEYS_LOCK:
+        return sorted(_HELD_KEYS)
+
+
+def get_session_telemetry(session_id: str) -> dict[str, Any]:
+    """Return real-time capture, encoding, and streaming telemetry for a session."""
+    return dict(_STREAM_TELEMETRY.get(session_id) or {})
+
+
+def list_active_stream_health() -> list[dict[str, Any]]:
+    """Summarize in-process WebRTC streamers for fleet health APIs."""
+    out: list[dict[str, Any]] = []
+    for session_id, streamer in list(_STREAMERS.items()):
+        telem = dict(_STREAM_TELEMETRY.get(session_id) or {})
+        pc_state = None
+        try:
+            pc = getattr(streamer, "pc", None)
+            if pc is not None:
+                pc_state = pc.connectionState
+        except Exception:
+            pc_state = None
+        healthy = pc_state in (None, "connected", "completed", "connecting", "new")
+        if telem.get("packet_loss_pct") is not None and float(telem["packet_loss_pct"]) >= 8.0:
+            healthy = False
+        out.append(
+            {
+                "session_id": session_id,
+                "device_id": _SESSION_DEVICES.get(session_id),
+                "pc_state": pc_state,
+                "healthy": healthy,
+                "telemetry": telem,
+            }
+        )
+    return out
+
+
+def compute_adaptive_stream_params(
+    current_bitrate_kbps: int,
+    current_fps: int,
+    rtt_ms: float = 0.0,
+    packet_loss_pct: float = 0.0,
+) -> dict[str, int]:
+    """Compute adaptive H.264 bitrate (kbps) and frame rate (FPS) from network RTT and packet loss."""
+    kbps = max(500, min(20000, int(current_bitrate_kbps or 4500)))
+    fps = max(10, min(60, int(current_fps or 30)))
+
+    if packet_loss_pct >= 5.0 or rtt_ms >= 250.0:
+        kbps = max(1000, int(kbps * 0.65))
+        fps = max(15, min(fps, 24))
+    elif packet_loss_pct >= 2.0 or rtt_ms >= 150.0:
+        kbps = max(1500, int(kbps * 0.80))
+        fps = max(20, min(fps, 30))
+    elif packet_loss_pct < 0.5 and 0.0 < rtt_ms < 50.0:
+        kbps = min(12000, int(kbps * 1.15))
+
+    return {"bitrate_kbps": kbps, "fps": fps}
+
+
+
+def grab_screen(scale: float = 1.0, monitor_index: int | None = None):
+    """Grab the desktop using hardware-accelerated DXGI / fast capture and scale it."""
+    try:
+        from ai_bridge.screen_capture import capture_desktop
+
+        return capture_desktop(monitor_index=monitor_index, scale=scale)
+    except Exception:
+        from PIL import Image, ImageGrab
+
+        try:
+            shot = ImageGrab.grab()
+        except Exception:
+            if platform.system() == "Windows":
+                from ai_bridge.tools import _grab_windows_desktop_fallback
+
+                shot = _grab_windows_desktop_fallback()
+            else:
+                raise
+        scale = max(0.2, min(1.0, float(scale)))
+        # Video codecs (H.264 / VP8) require even width & height (divisible by 2)
+        target_w = max(120, (int(shot.width * scale) // 2) * 2)
+        target_h = max(120, (int(shot.height * scale) // 2) * 2)
+        if target_w != shot.width or target_h != shot.height:
+            shot = shot.resize((target_w, target_h), Image.Resampling.BILINEAR)
+        if shot.mode in ("RGBA", "P"):
+            shot = shot.convert("RGB")
+        return shot
+
+
+class ScreenTrack:
+    """aiortc video track fed by desktop grabs with stage-by-stage latency telemetry."""
+
+    def __new__(cls, *args, **kwargs):
+        import fractions
+        from aiortc import VideoStreamTrack
+
+        class _Track(VideoStreamTrack):
+            kind = "video"
+
+            def __init__(
+                self,
+                scale: float = 1.0,
+                fps: int = 30,
+                monitor_index: int | None = None,
+                session_id: str = "",
+                bitrate_kbps: int = 4500,
+            ):
+                super().__init__()
+                self._scale = scale
+                self._fps = max(1, min(60, int(fps)))
+                self._monitor_index = monitor_index
+                self._session_id = session_id
+                self._bitrate_kbps = bitrate_kbps
+                self._step = int((1.0 / self._fps) * 90000)
+                self._frames_sent = 0
+                self._dropped_frames = 0
+                self._window_start = time.perf_counter()
+                self._window_frames = 0
+
+            def apply_stream_params(
+                self,
+                *,
+                fps: int | None = None,
+                bitrate_kbps: int | None = None,
+            ) -> dict[str, int]:
+                if fps is not None:
+                    self._fps = max(1, min(60, int(fps)))
+                    self._step = int((1.0 / self._fps) * 90000)
+                if bitrate_kbps is not None:
+                    self._bitrate_kbps = max(500, min(20000, int(bitrate_kbps)))
+                return {"fps": self._fps, "bitrate_kbps": self._bitrate_kbps}
+
+            async def next_timestamp(self) -> tuple[int, fractions.Fraction]:
+                if self.readyState != "live":
+                    from aiortc.mediastreams import MediaStreamError
+
+                    raise MediaStreamError
+
+                if hasattr(self, "_timestamp"):
+                    self._timestamp += self._step
+                    wait = self._start + (self._timestamp / 90000) - time.time()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                else:
+                    self._start = time.time()
+                    self._timestamp = 0
+                return self._timestamp, fractions.Fraction(1, 90000)
+
+            async def recv(self):
+                import av
+
+                pts, time_base = await self.next_timestamp()
+                t_cap_start = time.perf_counter()
+                try:
+                    img = await asyncio.to_thread(grab_screen, self._scale, self._monitor_index)
+                except Exception as exc:
+                    self._dropped_frames += 1
+                    raise RuntimeError(f"Desktop capture unavailable: {exc}") from exc
+                t_cap_end = time.perf_counter()
+                capture_ms = (t_cap_end - t_cap_start) * 1000.0
+
+                t_enc_start = time.perf_counter()
+                # F13-02: the old per-frame native-encode "timing smoke" call
+                # is deleted, not fixed. It passed shifted arguments against
+                # the C ABI (buffer length where width belongs, RGB where
+                # BGRA belongs) and its result was discarded — pure CPU
+                # waste plus a misleading encoder_backend label. The shipping
+                # encode path is PyAV (aiortc); see native_encode.py.
+                native_timing_ran = False
+
+                frame = av.VideoFrame.from_image(img)
+                frame.pts = pts
+                frame.time_base = time_base
+                t_enc_end = time.perf_counter()
+                prep_ms = (t_enc_end - t_enc_start) * 1000.0
+
+                self._frames_sent += 1
+                self._window_frames += 1
+                elapsed = max(0.001, t_enc_end - self._window_start)
+                fps_actual = round(self._window_frames / elapsed, 1)
+                if elapsed >= 2.0:
+                    self._window_start = t_enc_end
+                    self._window_frames = 0
+
+                if self._session_id:
+                    from ai_bridge.native_encode import encoder_backend_label
+                    from ai_bridge.screen_capture import get_last_capture_metrics
+
+                    cap_meta = get_last_capture_metrics()
+                    session_state = {}
+                    try:
+                        from ai_bridge.screen_capture import get_desktop_session_state
+
+                        session_state = get_desktop_session_state()
+                    except Exception:
+                        session_state = {}
+                    # F13-01: encode_time_ms is the real measured value or
+                    # null. The old fallback (max(1.2, prep_ms * 1.4)) was a
+                    # synthetic estimate presented as a measurement; no
+                    # dashboard/SLO may be built on fabricated telemetry.
+                    _enc_ms = cap_meta.get("encode_time_ms")
+                    _STREAM_TELEMETRY[self._session_id] = {
+                        "session_id": self._session_id,
+                        "codec": "H264",
+                        "width": img.width,
+                        "height": img.height,
+                        "fps_target": self._fps,
+                        "fps_actual": fps_actual,
+                        "bitrate_kbps_target": self._bitrate_kbps,
+                        "capture_time_ms": round(cap_meta.get("capture_time_ms") or capture_ms, 2),
+                        "encoder_queue_time_ms": round(prep_ms, 2),
+                        "encode_time_ms": round(_enc_ms, 2)
+                        if isinstance(_enc_ms, (int, float))
+                        else None,
+                        "dropped_frames": self._dropped_frames,
+                        "frames_sent": self._frames_sent,
+                        "capture_backend": cap_meta.get("backend", "dxgi"),
+                        "from_dxgi": bool(cap_meta.get("from_dxgi", False)),
+                        "encoder_backend": cap_meta.get("encoder_name")
+                        or encoder_backend_label(native_timing_ran=native_timing_ran),
+                        "native_encode_timing": native_timing_ran,
+                        "secure_desktop": bool(session_state.get("secure_desktop") or cap_meta.get("secure_desktop")),
+                        "capture_blocked": bool(session_state.get("capture_blocked")),
+                        "desktop_reason": session_state.get("reason") or "",
+                        "desktop_name": session_state.get("desktop_name") or "",
+                        "updated_at": time.time(),
+                    }
+                return frame
+
+        return _Track(*args, **kwargs)
+
+
+class DesktopAudioTrack:
+    """aiortc audio track capturing desktop audio loopback (WASAPI / Opus).
+
+    Prefers live WASAPI loopback when ``soundcard`` can open a device; otherwise
+    emits honest silent PCM so negotiation still succeeds.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        import fractions
+        from aiortc import AudioStreamTrack
+
+        from . import desktop_audio as desktop_audio_mod
+
+        class _AudioTrack(AudioStreamTrack):
+            kind = "audio"
+
+            def __init__(self, sample_rate: int = 48000, channels: int = 2):
+                super().__init__()
+                self.sample_rate = sample_rate
+                self.channels = channels
+                self._samples_per_frame = 960  # 20ms at 48kHz
+                self._step = self._samples_per_frame
+                self._timestamp = 0
+                self._start = time.time()
+                self._silent_bytes = desktop_audio_silent_pcm_bytes(
+                    self._samples_per_frame, self.channels
+                )
+                self._capture = desktop_audio_mod.WasapiLoopbackCapture(
+                    sample_rate=self.sample_rate,
+                    channels=self.channels,
+                    samples_per_frame=self._samples_per_frame,
+                )
+                self._capture_live = bool(self._capture.start())
+                self.audio_backend = self._capture.backend if self._capture_live else "silent_pcm"
+                if not self._capture_live and self._capture.error:
+                    logger.info(
+                        "Desktop audio falling back to silent PCM (%s)",
+                        self._capture.error,
+                    )
+
+            async def recv(self):
+                import av
+
+                if self.readyState != "live":
+                    from aiortc.mediastreams import MediaStreamError
+
+                    raise MediaStreamError
+
+                if hasattr(self, "_timestamp") and self._timestamp > 0:
+                    self._timestamp += self._step
+                    wait = self._start + (self._timestamp / self.sample_rate) - time.time()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                else:
+                    self._start = time.time()
+                    self._timestamp = self._step
+
+                if self._capture_live:
+                    pcm = self._capture.read_pcm(self._silent_bytes)
+                else:
+                    pcm = self._silent_bytes
+
+                frame = av.AudioFrame(format="s16", layout="stereo", samples=self._samples_per_frame)
+                frame.sample_rate = self.sample_rate
+                frame.pts = self._timestamp
+                frame.time_base = fractions.Fraction(1, self.sample_rate)
+                for plane in frame.planes:
+                    plane.update(pcm[: len(plane)])
+                return frame
+
+            def stop(self):
+                try:
+                    self._capture.stop()
+                except Exception:
+                    pass
+                return super().stop()
+
+        return _AudioTrack(*args, **kwargs)
+
+
+class HttpSignaling:
+    """Signaling over the control plane's HTTP endpoints (agent side)."""
+
+    def __init__(self, control_url: str, device_token: str, session_id: str):
+        self.base = control_url.rstrip("/")
+        self.token = device_token
+        self.session_id = session_id
+
+    def _req(self, method: str, path: str, payload: dict | None = None, timeout: int = 15) -> dict:
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.request(
+                    method,
+                    self.base + path,
+                    json=payload,
+                    headers={"X-Device-Token": self.token, "Content-Type": "application/json"},
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"Signaling HTTP {exc.response.status_code} on {path}") from exc
+
+    def post_offer(self, offer: dict) -> None:
+        self._req("POST", f"/api/agent/webrtc/{self.session_id}/offer", {"sdp": offer["sdp"], "type": offer["type"]})
+
+    def poll_session(self) -> dict:
+        return self._req("GET", f"/api/agent/webrtc/{self.session_id}")
+
+    def post_candidate(self, candidate: dict) -> None:
+        self._req("POST", f"/api/agent/webrtc/{self.session_id}/candidates", {"candidate": candidate, "from": "agent"})
+
+    def post_error(self, message: str) -> None:
+        try:
+            self._req("POST", f"/api/agent/webrtc/{self.session_id}/error", {"error": message})
+        except Exception:
+            pass
+
+
+class DictSignaling:
+    """In-process signaling for the local device, where the control
+    plane itself runs the peer connection (same session dict the viewer
+    endpoints read/write)."""
+
+    def __init__(self, session: dict):
+        self.session = session
+
+    def post_offer(self, offer: dict) -> None:
+        self.session["offer"] = offer
+        self.session["status"] = "offered"
+
+    def poll_session(self) -> dict:
+        return dict(self.session)
+
+    def post_candidate(self, candidate: dict) -> None:
+        self.session.setdefault("agent_candidates", []).append(candidate)
+
+    def post_error(self, message: str) -> None:
+        self.session["status"] = "error"
+        self.session["error"] = message
+
+
+class AgentStreamer:
+    """Runs one aiortc peer connection in its own thread/loop with H.264 preference and DataChannel input injection."""
+
+    def __init__(
+        self,
+        session_id: str,
+        signaling,
+        scale: float = 1.0,
+        fps: int = 30,
+        monitor_index: int | None = None,
+        ice_servers: list | None = None,
+        bitrate_kbps: int = 4500,
+    ):
+        self.session_id = session_id
+        self.signaling = signaling
+        self.scale = scale
+        self.fps = fps
+        self.monitor_index = monitor_index
+        self.bitrate_kbps = bitrate_kbps
+        self.ice_servers = ice_servers or get_configured_ice_servers()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self.pc = None
+        self.input_channel = None
+        self._rate_window_start = time.monotonic()
+        self._rate_count = 0
+        # R-P0-13: cached remote session state (mode / permissions /
+        # takeover) refreshed from signaling.poll_session() by _run().
+        # This is the ONLY source of input authorisation for the remote
+        # (HttpSignaling) path: the live session dict exists solely for the
+        # in-process DictSignaling path. Until a poll returns a state dict
+        # carrying a mode, input stays denied (default-deny).
+        self._session_state: dict[str, Any] = {}
+        self._session_state_lock = threading.Lock()
+        # F13-07: RTCP availability is unknown until _poll_rtcp_stats()
+        # runs (None = unknown, True = receiver reports seen, False =
+        # no RTCP stats available — telemetry then reports abr_source
+        # "none" and no fabricated rtt/loss figures).
+        self._rtcp_available: bool | None = None
+        self._abr_source: str = "none"
+
+    def apply_rtcp_feedback(
+        self, rtt_ms: float, packet_loss_pct: float, *, source: str = "rtcp"
+    ) -> dict[str, Any]:
+        """F13-07: apply one RTCP (or labelled non-RTCP) feedback sample.
+
+        Computes adapted params from the pure
+        compute_adaptive_stream_params(), applies them to this streamer
+        and its video track, and records the sample in telemetry WITH
+        ITS SOURCE (``"rtcp"`` for real receiver reports,
+        ``"viewer_reported"`` for unverified client messages). The
+        caller is responsible for passing only measured values; a sample
+        of (0, 0) with source "rtcp" means "no loss/latency measured",
+        not "unknown" — unknown is represented by never calling this
+        and leaving abr_source at "none".
+        """
+        adapted = compute_adaptive_stream_params(self.bitrate_kbps, self.fps, rtt_ms, packet_loss_pct)
+        self.bitrate_kbps = adapted["bitrate_kbps"]
+        self.fps = adapted["fps"]
+        self._abr_source = source
+        track = getattr(self, "video_track", None)
+        if track is not None and hasattr(track, "apply_stream_params"):
+            track.apply_stream_params(fps=self.fps, bitrate_kbps=self.bitrate_kbps)
+        if self.session_id in _STREAM_TELEMETRY:
+            _STREAM_TELEMETRY[self.session_id]["bitrate_kbps_target"] = self.bitrate_kbps
+            _STREAM_TELEMETRY[self.session_id]["fps_target"] = self.fps
+            _STREAM_TELEMETRY[self.session_id]["rtt_ms"] = round(float(rtt_ms), 2)
+            _STREAM_TELEMETRY[self.session_id]["packet_loss_pct"] = round(float(packet_loss_pct), 2)
+            _STREAM_TELEMETRY[self.session_id]["abr_source"] = source
+            _STREAM_TELEMETRY[self.session_id]["abr_available"] = source == "rtcp"
+        return {"bitrate_kbps": self.bitrate_kbps, "fps": self.fps, "abr_source": source}
+
+    async def _poll_rtcp_stats(self) -> dict[str, Any] | None:
+        """F13-07: read real RTCP receiver reports from the aiortc sender.
+
+        Uses ``RTCRtpSender.getStats()`` and looks for a
+        ``remote-inbound-rtp`` report (roundTripTime in seconds,
+        packetsLost / packetsSent). On success the sample is applied via
+        apply_rtcp_feedback(source="rtcp") and returned. When the sender
+        is absent, getStats() is unavailable, or no receiver report
+        exists, returns None and records ``abr_available=False`` /
+        ``abr_source="none"`` — the telemetry then honestly reports
+        that no adaptive-bitrate feedback exists instead of emitting
+        fabricated bitrate/loss figures. Never raises.
+        """
+        try:
+            pc = getattr(self, "pc", None)
+            if pc is None:
+                raise RuntimeError("no peer connection")
+            sender = None
+            for s in pc.getSenders():
+                if getattr(s, "track", None) is getattr(self, "video_track", None):
+                    sender = s
+                    break
+            if sender is None:
+                raise RuntimeError("no video sender")
+            report = await sender.getStats()
+            rtt_ms: float | None = None
+            loss_pct: float | None = None
+            values = report.values() if hasattr(report, "values") else report
+            for st in values:
+                if getattr(st, "type", None) != "remote-inbound-rtp":
+                    continue
+                rtt = getattr(st, "roundTripTime", None)
+                if isinstance(rtt, (int, float)):
+                    rtt_ms = float(rtt) * 1000.0
+                lost = getattr(st, "packetsLost", None)
+                sent = getattr(st, "packetsSent", None)
+                if isinstance(lost, (int, float)) and isinstance(sent, (int, float)) and (lost + sent) > 0:
+                    loss_pct = float(lost) / float(lost + sent) * 100.0
+            if rtt_ms is None and loss_pct is None:
+                raise RuntimeError("no remote-inbound-rtp report")
+            self._rtcp_available = True
+            return self.apply_rtcp_feedback(
+                rtt_ms if rtt_ms is not None else 0.0,
+                loss_pct if loss_pct is not None else 0.0,
+                source="rtcp",
+            )
+        except Exception:
+            self._rtcp_available = False
+            if self.session_id in _STREAM_TELEMETRY:
+                _STREAM_TELEMETRY[self.session_id]["abr_source"] = "none"
+                _STREAM_TELEMETRY[self.session_id]["abr_available"] = False
+            return None
+
+    def _refresh_session_state(self, sess: dict | None) -> None:
+        """Cache the mode/permissions/takeover keys from a polled session.
+
+        Only recognised keys are kept; a poll that carries none of them
+        (today the plane's agent projection omits mode/permissions — see
+        R-P0-13 follow-up in analysis/wave1b-progress.md) leaves the
+        cache empty, which keeps input denied rather than fail-open.
+        """
+        if not isinstance(sess, dict):
+            return
+        update = {
+            k: sess[k]
+            for k in ("mode", "permissions", "human_takeover_active", "human_takeover")
+            if k in sess
+        }
+        if update:
+            with self._session_state_lock:
+                self._session_state.update(update)
+
+    def _session_state_snapshot(self) -> dict[str, Any]:
+        with self._session_state_lock:
+            return dict(self._session_state)
+
+    def _human_takeover_active(self) -> bool:
+        """True when a human has taken over this device/session.
+
+        Sources, in order: the live session dict (DictSignaling), the
+        cached polled session state (HttpSignaling), and — best effort,
+        only meaningful when this process IS the control plane — the
+        plane's takeover registry. Any source saying "takeover" wins.
+        """
+        sess = getattr(self.signaling, "session", None)
+        if isinstance(sess, dict) and (sess.get("human_takeover_active") or sess.get("human_takeover")):
+            return True
+        cached = self._session_state_snapshot()
+        if cached.get("human_takeover_active") or cached.get("human_takeover"):
+            return True
+        try:
+            from ai_bridge.control.v1_routes import is_device_human_takeover_active
+
+            return bool(
+                is_device_human_takeover_active(_SESSION_DEVICES.get(self.session_id))
+            )
+        except Exception:
+            return False
+
+    def start(self) -> None:
+        if self.session_id in _STREAMERS:
+            raise RuntimeError(f"Stream already running for session {self.session_id}")
+        _STREAMERS[self.session_id] = self
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        release_all_held_keys()
+        _STREAMERS.pop(self.session_id, None)
+
+    def _run_loop(self) -> None:
+        try:
+            asyncio.run(self._run())
+        except Exception as exc:
+            logger.error(
+                "WebRTC stream failed for session %s: %s",
+                self.session_id,
+                exc,
+                exc_info=True,
+            )
+            try:
+                self.signaling.post_error(str(exc))
+            except Exception:
+                pass
+        finally:
+            release_all_held_keys()
+            _STREAMERS.pop(self.session_id, None)
+
+    def _check_input_rate_limit(self) -> bool:
+        import os
+
+        from ai_bridge.control.limiter import allow
+
+        limit = int(os.environ.get("AI_BRIDGE_WEBRTC_INPUT_RPS", "250"))
+        key = f"webrtc_input:{self.session_id}"
+        if not allow(key, limit, 1.0):
+            return False
+        # Per-streamer guard when Redis/DB backends are unavailable.
+        now = time.monotonic()
+        if now - self._rate_window_start >= 1.0:
+            self._rate_window_start = now
+            self._rate_count = 0
+        self._rate_count += 1
+        return self._rate_count <= limit
+
+    def _session_allows_input(
+        self,
+        is_mouse: bool = False,
+        is_keyboard: bool = False,
+        *,
+        require_clipboard: bool = False,
+    ) -> bool:
+        """Validate each input event against the active session mode and permissions.
+
+        R-P0-13 default-deny: input is allowed ONLY when a session state
+        dict is available (live DictSignaling dict, or state cached from
+        signaling.poll_session()) and that state permits it. An unknown
+        session shape — notably the remote HttpSignaling path, which has
+        no ``.session`` dict — DENIES input instead of the old fail-open
+        ``return True``. A mid-session switch to ``view_only`` therefore
+        stops input as soon as the next poll refreshes the cache, and a
+        session whose mode was never delivered cannot inject input at all.
+        """
+        sess = getattr(self.signaling, "session", None)
+        if not isinstance(sess, dict):
+            sess = self._session_state_snapshot()
+        if not isinstance(sess, dict) or not sess:
+            return False
+        if sess.get("human_takeover_active") or sess.get("human_takeover"):
+            return False
+        mode = str(sess.get("mode") or "human_control").lower()
+        if mode == "view_only":
+            return False
+        perms = sess.get("permissions")
+        if isinstance(perms, dict):
+            if is_mouse and not perms.get("control_mouse", True):
+                return False
+            if is_keyboard and not perms.get("control_keyboard", True):
+                return False
+            # Clipboard is its own session permission — never implied by keyboard alone.
+            if require_clipboard and not perms.get("clipboard_sync", False):
+                return False
+        elif require_clipboard:
+            return False
+        return True
+
+    def _handle_input_payload(self, raw_message: str | bytes) -> dict[str, Any]:
+        """Execute real-time input received over WebRTC DataChannel (<15ms latency)."""
+        try:
+            if isinstance(raw_message, bytes):
+                raw_message = raw_message.decode("utf-8")
+            data = json.loads(raw_message)
+            action = (data.get("action") or data.get("type") or "").lower()
+
+            from ai_bridge.plane_control_flags import is_emergency_stop
+
+            if is_emergency_stop() and action not in ("ping", "pong", "release_all_keys"):
+                return {"ok": False, "error": "emergency_stop_active"}
+
+            # F13-04: human takeover revokes ALL DataChannel input (mouse,
+            # keyboard, clipboard, file transfer, UI actions) until handed
+            # back. Read-only ping/pong and the safety release_all_keys
+            # stay available during takeover.
+            if action not in ("ping", "pong", "release_all_keys") and self._human_takeover_active():
+                release_all_held_keys()
+                return {"ok": False, "error": "human_takeover_active"}
+
+            if action == "ping":
+                pong = {
+                    "type": "pong",
+                    "client_ts_ms": data.get("client_ts_ms"),
+                    "agent_ts_ms": round(time.time() * 1000, 2),
+                    "telemetry": get_session_telemetry(self.session_id),
+                }
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps(pong))
+                    except Exception:
+                        pass
+                return {"ok": True, "action": "pong"}
+
+            if action == "release_all_keys":
+                released = release_all_held_keys()
+                return {"ok": True, "action": "release_all_keys", "released": released}
+
+            if action in ("get_ui_elements", "som_query"):
+                from ai_bridge import tools
+                res = tools.desktop_get_ui_elements(include_controls=bool(data.get("include_controls", True)))
+                elements = res.get("elements", [])
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps({
+                            "type": "som_elements",
+                            "elements": elements,
+                            "count": len(elements),
+                            "timestamp": time.time(),
+                        }))
+                    except Exception:
+                        pass
+                return {"ok": True, "action": "som_query", "count": len(elements)}
+
+            if action == "veto_agent_action":
+                from ai_bridge import tools
+                iid = str(data.get("intent_id") or "")
+                reason = str(data.get("reason") or "Operator veto")
+                tools.desktop_veto_action(iid, reason)
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps({
+                            "type": "agent_action_vetoed",
+                            "intent_id": iid,
+                            "reason": reason,
+                            "timestamp": time.time(),
+                        }))
+                    except Exception:
+                        pass
+                return {"ok": True, "action": "vetoed", "intent_id": iid}
+
+            if action == "simulate_agent_intent":
+                # F13-06: dev-only demo hook, OFF by default. Without
+                # AI_BRIDGE_DEV_SIMULATE_INTENT=1 this action is refused
+                # and nothing is sent to the viewer — a DataChannel
+                # holder must not be able to inject a fake tier-3
+                # "Deploy Production Build" intent into production UI.
+                # NOTE: apps/dashboard LiveDesktopView still sends this
+                # action; the dashboard side is out of this track's file
+                # set and must stop sending it (or gate it the same way).
+                if not dev_simulate_intent_enabled():
+                    return {"ok": False, "error": "simulate_agent_intent_disabled"}
+                iid = str(data.get("intent_id") or f"intent_{int(time.time() * 1000) % 10000}")
+                payload = {
+                    "type": "agent_intent",
+                    "intent_id": iid,
+                    "action": str(data.get("intent_action") or "click"),
+                    "target_label": str(data.get("target_label") or "Deploy Production Build"),
+                    "x": float(data.get("x", 0.58)),
+                    "y": float(data.get("y", 0.38)),
+                    "risk_tier": str(data.get("risk_tier") or "tier3_shell"),
+                    "countdown_ms": int(data.get("countdown_ms", 3000)),
+                    "timestamp": time.time(),
+                }
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps(payload))
+                    except Exception:
+                        pass
+                return {"ok": True, "action": "simulated_intent", "intent": payload}
+
+            # Phase 3: Bi-Directional File Transfer over DataChannel
+            if action in ("file_start", "file_chunk", "file_end"):
+                if not self._check_rate_limit():
+                    return {"ok": False, "error": "rate_limit_exceeded"}
+                if not self._session_allows_input():
+                    return {"ok": False, "error": "session_is_view_only"}
+
+            if action == "file_start":
+                from ai_bridge import tools
+
+                tid = str(data.get("transfer_id") or f"tx_{int(time.time() * 1000)}")
+                name = str(data.get("name") or "file.bin")
+                size = int(data.get("size") or 0)
+                tot = int(data.get("total_chunks") or 1)
+                tdir = str(data.get("target_dir") or "")
+                res = tools.desktop_handle_file_start(tid, name, size, tot, tdir)
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps({
+                            "type": "file_transfer_init",
+                            "transfer_id": tid,
+                            "filename": name,
+                            "ok": res.get("ok", False),
+                            "error": res.get("error"),
+                        }))
+                    except Exception:
+                        pass
+                return res
+
+            if action == "file_chunk":
+                from ai_bridge import tools
+
+                tid = str(data.get("transfer_id") or "")
+                idx = int(data.get("index") or 0)
+                chunk_b64 = str(data.get("chunk") or "")
+                res = tools.desktop_handle_file_chunk(tid, idx, chunk_b64)
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps({
+                            "type": "file_transfer_progress",
+                            "transfer_id": tid,
+                            "chunk_index": idx,
+                            "percent": res.get("percent", 0),
+                            "received_bytes": res.get("received_bytes", 0),
+                            "expected_bytes": res.get("expected_bytes", 0),
+                            "ok": res.get("ok", False),
+                        }))
+                    except Exception:
+                        pass
+                return res
+
+            if action == "file_end":
+                from ai_bridge import tools
+
+                tid = str(data.get("transfer_id") or "")
+                sha = str(data.get("sha256") or "")
+                res = tools.desktop_handle_file_end(tid, sha)
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps({
+                            "type": "file_transfer_complete",
+                            "transfer_id": tid,
+                            "filename": res.get("filename"),
+                            "saved_path": res.get("saved_path"),
+                            "file_size": res.get("file_size"),
+                            "sha256": res.get("sha256"),
+                            "speed_kbps": res.get("speed_kbps"),
+                            "ok": res.get("ok", False),
+                            "error": res.get("error"),
+                        }))
+                    except Exception:
+                        pass
+                return res
+
+            if action in ("file_list", "list_transfers"):
+                from ai_bridge import tools
+
+                files = tools.desktop_list_transfers()
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps({
+                            "type": "file_list_result",
+                            "files": files,
+                            "count": len(files),
+                        }))
+                    except Exception:
+                        pass
+                return {"ok": True, "files": files, "count": len(files)}
+
+            if action == "file_download_request":
+                from ai_bridge import tools
+
+                path_req = str(data.get("path") or data.get("name") or "")
+                meta = tools.desktop_prepare_file_download(path_req)
+                if not meta.get("ok"):
+                    if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                        try:
+                            self.input_channel.send(json.dumps({
+                                "type": "file_download_error",
+                                "path": path_req,
+                                "error": meta.get("error", "file_not_found"),
+                            }))
+                        except Exception:
+                            pass
+                    return meta
+
+                tid = f"dl_{int(time.time() * 1000)}"
+                if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                    try:
+                        self.input_channel.send(json.dumps({
+                            "type": "file_download_start",
+                            "transfer_id": tid,
+                            "name": meta["name"],
+                            "size": meta["size"],
+                            "total_chunks": meta["total_chunks"],
+                            "sha256": meta["sha256"],
+                        }))
+
+                        target_file = meta["path"]
+                        chunk_idx = 0
+                        with open(target_file, "rb") as f:
+                            while chunk := f.read(65536):
+                                b64_data = base64.b64encode(chunk).decode("ascii")
+                                self.input_channel.send(json.dumps({
+                                    "type": "file_download_chunk",
+                                    "transfer_id": tid,
+                                    "index": chunk_idx,
+                                    "chunk": b64_data,
+                                }))
+                                chunk_idx += 1
+                                time.sleep(0.005)
+
+                        self.input_channel.send(json.dumps({
+                            "type": "file_download_complete",
+                            "transfer_id": tid,
+                            "sha256": meta["sha256"],
+                        }))
+                    except Exception:
+                        pass
+                return {"ok": True, "action": "file_download_streamed", "transfer_id": tid}
+
+            if action in ("network_quality", "set_quality", "adapt_bitrate"):
+                rtt_ms = float(data.get("rtt_ms") or 0.0)
+                loss_pct = float(data.get("packet_loss_pct") or 0.0)
+                req_kbps = data.get("bitrate_kbps")
+                req_fps = data.get("fps")
+                if req_kbps is not None or req_fps is not None:
+                    new_kbps = max(500, min(20000, int(req_kbps or self.bitrate_kbps)))
+                    new_fps = max(10, min(60, int(req_fps or self.fps)))
+                    abr_source = "viewer_requested"
+                    self.bitrate_kbps = new_kbps
+                    self.fps = new_fps
+                    track = getattr(self, "video_track", None)
+                    if track is not None and hasattr(track, "apply_stream_params"):
+                        track.apply_stream_params(fps=new_fps, bitrate_kbps=new_kbps)
+                else:
+                    # F13-07: viewer-supplied rtt/loss are UNVERIFIED client
+                    # reports, not RTCP measurements — labelled as such.
+                    # Real RTCP feedback arrives via _poll_rtcp_stats().
+                    adapted = self.apply_rtcp_feedback(rtt_ms, loss_pct, source="viewer_reported")
+                    new_kbps = adapted["bitrate_kbps"]
+                    new_fps = adapted["fps"]
+                    abr_source = adapted["abr_source"]
+                try:
+                    from ai_bridge.screen_capture import get_native_dll
+
+                    ndll = get_native_dll()
+                    if ndll is not None and hasattr(ndll, "aibridge_set_encoder_bitrate"):
+                        ndll.aibridge_set_encoder_bitrate(int(new_kbps))
+                except Exception:
+                    pass
+                if self.session_id in _STREAM_TELEMETRY:
+                    _STREAM_TELEMETRY[self.session_id]["bitrate_kbps_target"] = new_kbps
+                    _STREAM_TELEMETRY[self.session_id]["fps_target"] = new_fps
+                    _STREAM_TELEMETRY[self.session_id]["rtt_ms"] = round(rtt_ms, 2) if rtt_ms else None
+                    _STREAM_TELEMETRY[self.session_id]["packet_loss_pct"] = round(loss_pct, 2) if loss_pct else None
+                    _STREAM_TELEMETRY[self.session_id]["abr_source"] = abr_source
+                return {"ok": True, "action": "network_quality", "bitrate_kbps": new_kbps, "fps": new_fps, "abr_source": abr_source}
+
+            if action == "switch_monitor":
+                new_mon = int(data.get("monitor_index") or 0)
+                self.monitor_index = new_mon
+                if hasattr(self, "video_track") and self.video_track is not None:
+                    self.video_track._monitor_index = new_mon
+                if self.session_id in _STREAM_TELEMETRY:
+                    _STREAM_TELEMETRY[self.session_id]["monitor_index"] = new_mon
+                return {"ok": True, "action": "switch_monitor", "monitor_index": new_mon}
+
+            if action == "clipboard_sync":
+                if not self._session_allows_input(require_clipboard=True):
+                    return {"ok": False, "error": "clipboard_sync_denied"}
+                direction = str(data.get("direction") or "set").lower()
+                from ai_bridge.tools import perform_approved_ui_action
+
+                if direction == "get":
+                    res = perform_approved_ui_action("clipboard_get", approval_granted=True)
+                    if self.input_channel and getattr(self.input_channel, "readyState", "") == "open":
+                        try:
+                            self.input_channel.send(json.dumps({
+                                "type": "clipboard_data",
+                                "text": res.get("text", ""),
+                            }))
+                        except Exception:
+                            pass
+                    return {"ok": True, "action": "clipboard_get", "text": res.get("text", "")}
+                clip_text = str(data.get("text") or "")
+                perform_approved_ui_action("clipboard_set", text=clip_text, approval_granted=True)
+                return {"ok": True, "action": "clipboard_set", "length": len(clip_text)}
+
+
+            if not self._check_input_rate_limit():
+                return {"ok": False, "error": "rate_limit_exceeded"}
+
+            from ai_bridge.screen_capture import get_monitors, get_native_dll
+            from ai_bridge.tools import perform_approved_ui_action
+
+            mons = get_monitors()
+            mon_idx = int(data.get("monitor_index") if data.get("monitor_index") is not None else (self.monitor_index or 0))
+            mon = mons[mon_idx] if 0 <= mon_idx < len(mons) else mons[0]
+            mon_left = int(mon.get("left", 0))
+            mon_top = int(mon.get("top", 0))
+            screen_w = int(data.get("screen_width") or mon.get("width") or 1920)
+            screen_h = int(data.get("screen_height") or mon.get("height") or 1080)
+
+            x = data.get("x")
+            y = data.get("y")
+            abs_x, abs_y = None, None
+            is_norm = bool(data.get("normalized", False))
+            if x is not None and y is not None:
+                fx, fy = float(x), float(y)
+                if is_norm or (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0 and (fx != 0 or fy != 0)):
+                    abs_x = mon_left + int(round(fx * max(1, screen_w - 1)))
+                    abs_y = mon_top + int(round(fy * max(1, screen_h - 1)))
+                    is_norm = True
+                else:
+                    abs_x = mon_left + int(round(fx))
+                    abs_y = mon_top + int(round(fy))
+
+            delta = int(data.get("delta", data.get("delta_y", -120)))
+            text = str(data.get("text", ""))
+            key = str(data.get("key", ""))
+            state = str(data.get("state", "press")).lower()
+            button = str(data.get("button", "left")).lower()
+
+            dll = get_native_dll()
+
+            # Mouse actions
+            if action in ("click", "double_click", "triple_click", "right_click", "middle_click", "mouse_button", "mousedown", "mouseup"):
+                if not self._session_allows_input(is_mouse=True):
+                    return {"ok": False, "error": "mouse_control_denied"}
+                # F13-08: track held buttons in BOTH paths (native DLL
+                # and Python fallback). Clicks never hold; only an
+                # explicit down holds until its up / disconnect release.
+                _btn_name = "right" if action == "right_click" else ("middle" if action == "middle_click" else button)
+                if action == "mousedown":
+                    track_mouse_button_state(_btn_name, True)
+                elif action == "mouseup":
+                    track_mouse_button_state(_btn_name, False)
+                elif action == "mouse_button":
+                    if state == "down":
+                        track_mouse_button_state(_btn_name, True)
+                    elif state == "up":
+                        track_mouse_button_state(_btn_name, False)
+                if dll is not None and abs_x is not None and abs_y is not None:
+                    btn_name = "right" if action == "right_click" else ("middle" if action == "middle_click" else button)
+                    btn_state = (
+                        "down" if action == "mousedown" else
+                        "up" if action == "mouseup" else
+                        "double_click" if action == "double_click" else
+                        state if action == "mouse_button" else "click"
+                    )
+                    dll.aibridge_send_mouse_button(
+                        btn_name.encode("utf-8"),
+                        btn_state.encode("utf-8"),
+                        float(abs_x - mon_left),
+                        float(abs_y - mon_top),
+                        0,
+                        mon_left,
+                        mon_top,
+                        screen_w,
+                        screen_h,
+                    )
+                    return {"ok": True, "action": action, "x": abs_x, "y": abs_y}
+                act = "right_click" if action == "right_click" else ("middle_click" if action == "middle_click" else ("double_click" if action == "double_click" else "click"))
+                perform_approved_ui_action(act, x=abs_x, y=abs_y, approval_granted=True)
+                return {"ok": True, "action": act, "x": abs_x, "y": abs_y}
+
+            if action in ("move_mouse", "mouse_move", "mousemove"):
+                if not self._session_allows_input(is_mouse=True):
+                    return {"ok": False, "error": "mouse_control_denied"}
+                if dll is not None and abs_x is not None and abs_y is not None:
+                    dll.aibridge_send_mouse_move(
+                        float(abs_x - mon_left),
+                        float(abs_y - mon_top),
+                        0,
+                        mon_left,
+                        mon_top,
+                        screen_w,
+                        screen_h,
+                    )
+                    return {"ok": True, "action": "mouse_move", "x": abs_x, "y": abs_y}
+                perform_approved_ui_action("move_mouse", x=abs_x, y=abs_y, approval_granted=True)
+                return {"ok": True, "action": "mouse_move", "x": abs_x, "y": abs_y}
+
+            if action in ("scroll", "mouse_scroll", "wheel"):
+                if not self._session_allows_input(is_mouse=True):
+                    return {"ok": False, "error": "mouse_control_denied"}
+                if dll is not None:
+                    dll.aibridge_send_mouse_scroll(delta, int(data.get("delta_x", 0)))
+                    return {"ok": True, "action": "scroll", "delta": delta}
+                perform_approved_ui_action("scroll", x=abs_x, y=abs_y, delta=delta, approval_granted=True)
+                return {"ok": True, "action": "scroll", "delta": delta}
+
+            # Keyboard actions (including independent keydown / keyup tracking)
+            if action in ("key_event", "keydown", "keyup", "press_key", "key_press", "hotkey"):
+                if not self._session_allows_input(is_keyboard=True):
+                    return {"ok": False, "error": "keyboard_control_denied"}
+                eff_state = "down" if action == "keydown" else ("up" if action == "keyup" else state)
+                if eff_state == "down" and key:
+                    with _HELD_KEYS_LOCK:
+                        _HELD_KEYS.add(key.lower())
+                elif eff_state == "up" and key:
+                    with _HELD_KEYS_LOCK:
+                        _HELD_KEYS.discard(key.lower())
+
+                if dll is not None and key and "+" not in key:
+                    dll.aibridge_send_key_event(key.encode("utf-8"), eff_state.encode("utf-8"))
+                    return {"ok": True, "action": action, "key": key, "state": eff_state}
+                if eff_state != "up":
+                    perform_approved_ui_action("press_key", key=key, approval_granted=True)
+                return {"ok": True, "action": action, "key": key, "state": eff_state}
+
+            if action in ("type_text", "type"):
+                if not self._session_allows_input(is_keyboard=True):
+                    return {"ok": False, "error": "keyboard_control_denied"}
+                perform_approved_ui_action("type_text", text=text, approval_granted=True)
+                return {"ok": True, "action": "type_text"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": "unsupported_action"}
+
+    def _attach_desktop_audio_if_enabled(self, pc, *, RTCRtpSender=None) -> bool:
+        """Attach DesktopAudioTrack when ``AI_BRIDGE_DESKTOP_AUDIO`` is opted in.
+
+        Returns True when a track was added. Default is off (no live capture).
+        When enabled, the track emits silent PCM until WASAPI loopback is ready.
+        """
+        if not desktop_audio_opt_in():
+            if isinstance(getattr(self.signaling, "session", None), dict):
+                self.signaling.session["audio_enabled"] = False
+            return False
+        try:
+            audio_track = DesktopAudioTrack()
+            pc.addTrack(audio_track)
+            if RTCRtpSender is not None:
+                try:
+                    audio_caps = RTCRtpSender.getCapabilities("audio")
+                    if audio_caps and audio_caps.codecs:
+                        opus_codecs = [c for c in audio_caps.codecs if "OPUS" in c.mimeType.upper()]
+                        if opus_codecs:
+                            for transceiver in pc.getTransceivers():
+                                if transceiver.kind == "audio" and hasattr(transceiver, "setCodecPreferences"):
+                                    transceiver.setCodecPreferences(opus_codecs)
+                except Exception:
+                    pass
+            if isinstance(getattr(self.signaling, "session", None), dict):
+                self.signaling.session["audio_enabled"] = True
+            return True
+        except Exception as exc:
+            if isinstance(getattr(self.signaling, "session", None), dict):
+                self.signaling.session["audio_enabled"] = False
+                self.signaling.session["audio_error"] = str(exc)[:200]
+            return False
+
+    async def _run(self) -> None:
+        try:
+            from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCRtpSender, RTCSessionDescription
+        except ImportError as exc:
+            raise RuntimeError(
+                "WebRTC streaming requires the aiortc package (install the "
+                "'webrtc' extra: pip install ai-bridge[webrtc])."
+            ) from exc
+
+        ice_objs = []
+        for s in self.ice_servers:
+            if isinstance(s, dict) and s.get("urls"):
+                ice_objs.append(
+                    RTCIceServer(
+                        urls=s["urls"],
+                        username=s.get("username"),
+                        credential=s.get("credential"),
+                    )
+                )
+        config = RTCConfiguration(iceServers=ice_objs)
+        pc = RTCPeerConnection(configuration=config)
+        self.pc = pc
+
+        # 1. Video Track (1080p @ 30 FPS, H.264 preferred)
+        track = ScreenTrack(
+            scale=self.scale,
+            fps=self.fps,
+            monitor_index=self.monitor_index,
+            session_id=self.session_id,
+            bitrate_kbps=self.bitrate_kbps,
+        )
+        self.video_track = track
+        sender = pc.addTrack(track)
+
+        # Prefer H.264 codec on the video transceiver per Section 5
+        try:
+            caps = RTCRtpSender.getCapabilities("video")
+            if caps and caps.codecs:
+                h264_codecs = [c for c in caps.codecs if "H264" in c.mimeType.upper()]
+                other_codecs = [c for c in caps.codecs if "H264" not in c.mimeType.upper()]
+                if h264_codecs:
+                    for transceiver in pc.getTransceivers():
+                        if transceiver.kind == "video" and hasattr(transceiver, "setCodecPreferences"):
+                            transceiver.setCodecPreferences(h264_codecs + other_codecs)
+        except Exception:
+            pass
+
+        # 1b. Audio loopback (opt-in). Default off; silent Opus frames keep negotiation honest.
+        self._attach_desktop_audio_if_enabled(pc, RTCRtpSender=RTCRtpSender)
+
+        # 2. DataChannel for Ultra-Low Latency Input Injection & Telemetry
+        try:
+            input_dc = pc.createDataChannel("input", ordered=True)
+            self.input_channel = input_dc
+
+            @input_dc.on("message")
+            def on_dc_message(msg):
+                self._handle_input_payload(msg)
+
+            @input_dc.on("close")
+            def on_dc_close():
+                release_all_held_keys()
+        except Exception:
+            pass
+
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            self.input_channel = channel
+
+            @channel.on("message")
+            def on_message(msg):
+                self._handle_input_payload(msg)
+
+            @channel.on("close")
+            def on_close():
+                release_all_held_keys()
+
+        self._ice_restart_attempts = 0
+
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            if isinstance(getattr(self.signaling, "session", None), dict):
+                self.signaling.session["pc_state"] = pc.connectionState
+                self.signaling.session["ice_state"] = getattr(pc, "iceConnectionState", "")
+            if pc.connectionState in ("disconnected", "failed", "closed"):
+                release_all_held_keys()
+                if pc.connectionState == "failed" and isinstance(getattr(self.signaling, "session", None), dict):
+                    self.signaling.session["status"] = "error"
+                    self.signaling.session["error"] = (
+                        "WebRTC peer connection failed — check STUN/TURN "
+                        "(AI_BRIDGE_ICE_SERVERS / AI_BRIDGE_TURN_URL) and network path."
+                    )
+
+        @pc.on("iceconnectionstatechange")
+        async def on_iceconnectionstatechange():
+            ice_state = getattr(pc, "iceConnectionState", "")
+            if isinstance(getattr(self.signaling, "session", None), dict):
+                self.signaling.session["ice_state"] = ice_state
+            if ice_state == "disconnected" and isinstance(getattr(self.signaling, "session", None), dict):
+                self.signaling.session["status"] = "reconnecting"
+                self.signaling.session["warning"] = "ICE disconnected — attempting restart"
+                if self._ice_restart_attempts < 2 and hasattr(pc, "restartIce"):
+                    self._ice_restart_attempts += 1
+                    try:
+                        pc.restartIce()
+                        self.signaling.session["ice_restart_attempt"] = self._ice_restart_attempts
+                    except Exception as exc:
+                        self.signaling.session["warning"] = f"ICE restart failed: {exc}"
+            if ice_state == "connected" and isinstance(getattr(self.signaling, "session", None), dict):
+                self._ice_restart_attempts = 0
+                if self.signaling.session.get("status") == "reconnecting":
+                    self.signaling.session["status"] = "connected"
+                    self.signaling.session.pop("warning", None)
+            if ice_state == "failed" and isinstance(getattr(self.signaling, "session", None), dict):
+                self.signaling.session["status"] = "error"
+                self.signaling.session["error"] = (
+                    "ICE failed — configure TURN for symmetric NAT "
+                    "(AI_BRIDGE_TURN_URL or AI_BRIDGE_ICE_SERVERS)."
+                )
+                release_all_held_keys()
+
+        # F13-09: reconcile BEFORE posting an offer. After a restart the
+        # plane row may still describe the dead incarnation (answered /
+        # expired / ended); offering on it would resurrect an orphaned
+        # session. A transient poll failure is not staleness — the
+        # answer-wait loop below re-checks every poll.
+        try:
+            _sess0 = await asyncio.to_thread(self.signaling.poll_session)
+            self._refresh_session_state(_sess0 if isinstance(_sess0, dict) else None)
+            _stale, _reason = is_stale_session_state(_sess0 if isinstance(_sess0, dict) else None)
+            if _stale:
+                try:
+                    self.signaling.post_error(f"stale_session:{_reason}")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        # Wait for gathering to complete, then post offer with inline candidates
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        # F13-10: ICE-complete gate. The old code posted the offer after
+        # a 5 s wait even when gathering was incomplete, with only a
+        # warning flag the viewer could ignore; partial-candidate offers
+        # fail opaquely on restrictive networks. Now: no complete
+        # gathering, no offer — the session errors instead.
+        if not await wait_for_ice_gathering_complete(pc):
+            _gather_state = getattr(pc, "iceGatheringState", "unknown")
+            if isinstance(getattr(self.signaling, "session", None), dict):
+                self.signaling.session["ice_gathering"] = _gather_state
+                self.signaling.session["status"] = "error"
+                self.signaling.session["error"] = (
+                    "ice_gathering_incomplete: offer not posted; "
+                    "check STUN/TURN (AI_BRIDGE_ICE_SERVERS / AI_BRIDGE_TURN_URL)"
+                )
+            try:
+                self.signaling.post_error("ice_gathering_incomplete")
+            except Exception:
+                pass
+            return
+        self.signaling.post_offer({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+
+        # Wait for viewer's answer, then apply viewer candidates
+        answer = None
+        seen_viewer_candidates = 0
+        deadline = time.time() + 60
+        while time.time() < deadline and not self._stop.is_set():
+            sess = await asyncio.to_thread(self.signaling.poll_session)
+            self._refresh_session_state(sess)
+            if sess.get("status") in ("ended", "error"):
+                return
+            if sess.get("answer") and answer is None:
+                answer = sess["answer"]
+                await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
+            for cand in sess.get("viewer_candidates", [])[seen_viewer_candidates:]:
+                try:
+                    from aiortc.sdp import candidate_from_sdp
+
+                    raw_cand = cand.get("candidate") if isinstance(cand, dict) else cand
+                    cand_str = ""
+                    sdp_mid = cand.get("sdpMid") if isinstance(cand, dict) else None
+                    sdp_mline_index = cand.get("sdpMLineIndex") if isinstance(cand, dict) else None
+
+                    if isinstance(raw_cand, dict):
+                        cand_str = raw_cand.get("candidate", "")
+                        if not sdp_mid:
+                            sdp_mid = raw_cand.get("sdpMid")
+                        if sdp_mline_index is None:
+                            sdp_mline_index = raw_cand.get("sdpMLineIndex")
+                    elif isinstance(raw_cand, str):
+                        cand_str = raw_cand
+
+                    if cand_str:
+                        clean_str = cand_str.replace("a=candidate:", "").replace("candidate:", "")
+                        parsed = candidate_from_sdp(clean_str)
+                        if sdp_mid is not None:
+                            parsed.sdpMid = sdp_mid
+                        if sdp_mline_index is not None:
+                            parsed.sdpMLineIndex = sdp_mline_index
+                        await pc.addIceCandidate(parsed)
+                except Exception:
+                    pass
+                seen_viewer_candidates += 1
+            if answer is not None and pc.connectionState in ("connected", "completed"):
+                if isinstance(getattr(self.signaling, "session", None), dict):
+                    self.signaling.session["status"] = "connected"
+                break
+            await asyncio.sleep(0.25)
+
+        # Keep streaming until session ends or expires
+        while not self._stop.is_set():
+            try:
+                sess = await asyncio.to_thread(self.signaling.poll_session)
+                self._refresh_session_state(sess)
+                if sess.get("status") in ("ended", "error"):
+                    break
+                if time.time() - float(sess.get("created_at", time.time())) > SESSION_TTL_SECONDS:
+                    break
+            except Exception:
+                # Transient HTTP error (e.g. 429 or network glitch) should not terminate live stream
+                pass
+            # F13-07: real RTCP receiver-report feedback, once per
+            # keep-alive interval. Absent stats are recorded as absent
+            # (abr_source "none"), never fabricated.
+            try:
+                await self._poll_rtcp_stats()
+            except Exception:
+                pass
+            if pc.connectionState in ("failed", "closed"):
+                break
+            await asyncio.sleep(2.5)
+        release_all_held_keys()
+        try:
+            await pc.close()
+        except Exception:
+            pass
+
+
+def start_stream(
+    session_id: str,
+    signaling,
+    scale: float = 1.0,
+    fps: int = 30,
+    monitor_index: int | None = None,
+    bitrate_kbps: int = 4500,
+) -> dict:
+    sess_meta = getattr(signaling, "session", None)
+    if isinstance(sess_meta, dict) and sess_meta.get("device_id"):
+        _SESSION_DEVICES[session_id] = str(sess_meta["device_id"])
+    elif hasattr(signaling, "device_id") and getattr(signaling, "device_id"):
+        _SESSION_DEVICES[session_id] = str(getattr(signaling, "device_id"))
+    # F13-09: refuse to start on a stale session id left over from a
+    # previous server/agent incarnation (answered/expired/ended row with
+    # no live streamer). The caller must mint a fresh session id; a new
+    # session always gets a fresh id, never a recycled one.
+    reconciliation = reconcile_session_before_start(signaling, session_id)
+    if not reconciliation.get("ok"):
+        raise RuntimeError(
+            f"Stale WebRTC session {session_id} ({reconciliation.get('reason')}): "
+            "refusing to resume a previous incarnation after restart; "
+            "create a fresh session id."
+        )
+    streamer = AgentStreamer(
+        session_id,
+        signaling,
+        scale=scale,
+        fps=fps,
+        monitor_index=monitor_index,
+        bitrate_kbps=bitrate_kbps,
+    )
+    streamer.start()
+    return {
+        "session_id": session_id,
+        "status": "started",
+        "codec": "H264",
+        "fps": fps,
+        "scale": scale,
+        "bitrate_kbps": bitrate_kbps,
+    }
+
+
+def stop_stream(session_id: str) -> dict:
+    release_all_held_keys()
+    streamer = _STREAMERS.get(session_id)
+    if streamer:
+        streamer.stop()
+        return {"session_id": session_id, "status": "stopped"}
+    return {"session_id": session_id, "status": "not_running"}

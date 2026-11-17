@@ -1,0 +1,43 @@
+"""Local user accounts, sessions, and roles for the control plane.
+
+Passwords are stored as PBKDF2-HMAC-SHA256 (200k iterations) with a
+per-user salt — never plaintext, never reversible. Sessions are random
+tokens whose SHA-256 hash is stored; the raw token is shown once at
+login, like device tokens.
+
+Roles: viewer (read) < operator (submit/cancel tasks) < admin (everything).
+The legacy shared admin token (AI_BRIDGE_ADMIN_TOKEN) is OFF by default
+and only works when AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN=1 is set
+explicitly (F-05-05); an admin_token passed explicitly to create_app()
+still enables it for that app instance. Session-based admin users are
+the supported admin path.
+
+OIDC login is implemented on the control plane (`/api/auth/oidc/*` via
+`control/oidc.py` + `app.py`) and activates when `AI_BRIDGE_OIDC_*` provider
+env is configured. This module owns local passwords/sessions only — not the
+OIDC HTTP routes. Device mTLS is plane-side fingerprint gated
+(`control/device_mtls.py`, `AI_BRIDGE_DEVICE_MTLS`) in addition to optional
+reverse-proxy client certs (see docs/threat-model.md).
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import secrets
+
+ROLES = {"viewer": 1, "operator": 2, "admin": 3}
+
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000).hex()
+
+def verify_password(password: str, salt: str, expected: str) -> bool:
+    return hmac.compare_digest(hash_password(password, salt), expected)
+
+def new_salt() -> str:
+    return secrets.token_hex(16)
+
+def legacy_admin_enabled() -> bool:
+    # F-05-05: the legacy shared admin token is OFF by default; it only
+    # works when explicitly enabled.
+    return os.environ.get("AI_BRIDGE_ENABLE_LEGACY_ADMIN_TOKEN", "0") == "1"

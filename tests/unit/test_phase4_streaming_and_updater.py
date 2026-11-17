@@ -1,0 +1,413 @@
+import json
+import os
+import platform
+import time
+import pytest
+from fastapi.testclient import TestClient
+
+from ai_bridge import tools
+from ai_bridge import updates as updates_mod
+from ai_bridge.control.app import create_app
+from ai_bridge.policy import Policy
+
+
+def test_capture_desktop_frame_primitives(monkeypatch):
+    try:
+        import PIL
+        has_pil = True
+    except ImportError:
+        has_pil = False
+
+    if not has_pil or (platform.system() != "Windows" and "DISPLAY" not in os.environ):
+        monkeypatch.setattr(tools, "capture_desktop_frame", lambda **kw: {
+            "available": True,
+            "width": 400,
+            "height": 300,
+            "orig_width": 800,
+            "orig_height": 600,
+            "scale": 0.5,
+            "mime_type": "image/jpeg",
+            "base64_data": "dGVzdA==",
+            "timestamp": time.time(),
+        })
+
+    p = Policy(allow_tier3=True, desktop_enabled=True)
+    frame = tools.capture_desktop_frame(scale=0.5, quality=60, approval_granted=True, policy=p)
+    assert frame["available"] is True
+    assert frame["width"] > 0
+    assert frame["height"] > 0
+    assert frame["orig_width"] >= frame["width"]
+    assert frame["mime_type"] == "image/jpeg"
+    assert frame["scale"] == 0.5
+    assert len(frame["base64_data"]) > 0
+
+
+def test_desktop_streaming_endpoint(tmp_path, monkeypatch):
+    try:
+        import PIL
+        has_pil = True
+    except ImportError:
+        has_pil = False
+
+    if not has_pil or (platform.system() != "Windows" and "DISPLAY" not in os.environ):
+        monkeypatch.setattr(tools, "capture_desktop_frame", lambda **kw: {
+            "available": True,
+            "width": 400,
+            "height": 300,
+            "orig_width": 800,
+            "orig_height": 600,
+            "scale": 0.5,
+            "mime_type": "image/jpeg",
+            "base64_data": "dGVzdA==",
+            "timestamp": time.time(),
+        })
+
+    admin_token = "adm-tok-p4"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control.db")
+    client = TestClient(app)
+
+    # Fetch local desktop frame
+    res = client.get("/api/devices/local/desktop/frame?scale=0.5&quality=50", headers={"X-Admin-Token": admin_token})
+    assert res.status_code == 200
+    frame_data = res.json()
+    assert frame_data["available"] is True
+    assert "base64_data" in frame_data
+    assert frame_data["width"] > 0
+
+
+def test_dual_control_desktop_input_normalized(tmp_path, monkeypatch):
+    # Desktop automation is an explicit opt-in (AI_BRIDGE_DESKTOP_ENABLED=1)
+    # and desktop input is a Tier-3 tool (AI_BRIDGE_ALLOW_TIER3=1); the old
+    # silent admin bypass in _execute_workflow_step_sync is gone (R-P0-11).
+    monkeypatch.setenv("AI_BRIDGE_DESKTOP_ENABLED", "1")
+    monkeypatch.setenv("AI_BRIDGE_ALLOW_TIER3", "1")
+    admin_token = "adm-tok-p4"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control.db")
+    client = TestClient(app)
+
+    captured_inputs = []
+
+    def fake_mouse_click(x, y, button="left", clicks=1, **kw):
+        captured_inputs.append({"tool": "mouse_click", "x": x, "y": y, "button": button, "clicks": clicks})
+        return {"action": "click", "x": x, "y": y}
+
+    def fake_press_hotkey(combo, **kw):
+        captured_inputs.append({"tool": "press_hotkey", "combo": combo})
+        return {"action": "hotkey", "combo": combo}
+
+    def fake_keyboard_type(text, **kw):
+        captured_inputs.append({"tool": "keyboard_type", "text": text})
+        return {"action": "type", "length": len(text)}
+
+    monkeypatch.setattr(tools, "mouse_click", fake_mouse_click)
+    monkeypatch.setattr(tools, "press_hotkey", fake_press_hotkey)
+    monkeypatch.setattr(tools, "perform_approved_ui_action", lambda act, **kw: {"action": act, **kw})
+
+    # 1. Click with normalized coordinates (0.5, 0.25 on 1920x1080 -> 960, 270)
+    input_payload = {
+        "action": "click",
+        "x": 0.5,
+        "y": 0.25,
+        "normalized": True,
+        "screen_width": 1920,
+        "screen_height": 1080,
+    }
+    click_res = client.post("/api/devices/local/desktop/input", json=input_payload, headers={"X-Admin-Token": admin_token})
+    assert click_res.status_code == 200
+    assert click_res.json()["ok"] is True
+    assert click_res.json()["x"] == 960
+    assert click_res.json()["y"] == 270
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0]["x"] == 960
+    assert captured_inputs[0]["y"] == 270
+
+    # 2. Hotkey shortcut
+    hk_payload = {"action": "hotkey", "key": "win+r"}
+    hk_res = client.post("/api/devices/local/desktop/input", json=hk_payload, headers={"X-Admin-Token": admin_token})
+    assert hk_res.status_code == 200
+    assert hk_res.json()["ok"] is True
+    assert captured_inputs[-1]["tool"] == "press_hotkey"
+    assert captured_inputs[-1]["combo"] == "win+r"
+
+
+def test_fleet_version_endpoint(tmp_path):
+    admin_token = "adm-tok-p4"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control.db")
+    client = TestClient(app)
+
+    v_res = client.get("/api/fleet/version", headers={"X-Admin-Token": admin_token})
+    assert v_res.status_code == 200
+    v_data = v_res.json()
+    assert v_data["control_plane_version"] == "1.30.0"
+    assert "git_commit" in v_data
+    assert "git_branch" in v_data
+
+
+def test_fleet_update_endpoints(tmp_path, monkeypatch):
+    # R-P0-16: fleet updates refuse unless a signed release is configured.
+    # Build one: keypair + signed manifest pinning a commit SHA.
+    key_dir = tmp_path / "keys"
+    priv_path, pub_path = updates_mod.generate_keypair(key_dir)
+    manifest = {"name": "ai-bridge", "version": "9.9.9-test", "commit": "a" * 40, "files": []}
+    manifest_path = tmp_path / "release.json"
+    manifest_path.write_text(json.dumps(manifest))
+    sig_path = tmp_path / "release.sig"
+    sig_path.write_text(updates_mod.sign_manifest(manifest, priv_path))
+    monkeypatch.setenv("AI_BRIDGE_UPDATE_MANIFEST_PATH", str(manifest_path))
+    monkeypatch.setenv("AI_BRIDGE_UPDATE_SIGNATURE_PATH", str(sig_path))
+    monkeypatch.setenv("AI_BRIDGE_UPDATE_PUBLIC_KEY", str(pub_path))
+    # update_fleet_agent is Tier 3: allow it globally (local branch).
+    monkeypatch.setenv("AI_BRIDGE_ALLOW_TIER3", "1")
+    admin_token = "adm-tok-p4"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control.db")
+    client = TestClient(app)
+
+    # Enroll a device
+    dev = client.post("/api/devices/enroll", json={"name": "test-node", "os": "Linux Ubuntu"}, headers={"X-Admin-Token": admin_token}).json()
+    dev_id = dev["device_id"]
+    pol = client.put(
+        f"/api/devices/{dev_id}/policy",
+        json={"inherit_global": False, "allow_writes": True, "allow_tier3": True,
+              "max_tier_unattended": 4, "denied_tools": []},
+        headers={"X-Admin-Token": admin_token},
+    )
+    assert pol.status_code == 200, pol.text
+
+    # Mock tools.update_fleet_agent
+    monkeypatch.setattr(tools, "update_fleet_agent", lambda **kw: {"ok": True, "returncode": 0, "stdout": "abc1234"})
+
+    # Update remote device (queues task)
+    u_res = client.post(f"/api/devices/{dev_id}/update", headers={"X-Admin-Token": admin_token})
+    assert u_res.status_code == 200
+    assert u_res.json()["status"] == "queued"
+    assert "task_id" in u_res.json()
+
+    # Update local control plane
+    loc_res = client.post("/api/devices/local/update", headers={"X-Admin-Token": admin_token})
+    assert loc_res.status_code == 200
+    assert loc_res.json()["status"] == "updated"
+
+    # Broadcast update across fleet
+    b_res = client.post("/api/fleet/update", headers={"X-Admin-Token": admin_token})
+    assert b_res.status_code == 200
+    assert b_res.json()["device_count"] == 1
+    assert "batch_id" in b_res.json()
+
+
+
+def test_webrtc_session_endpoints(tmp_path):
+    admin_token = "adm-tok-p4"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control.db")
+    client = TestClient(app)
+
+    # Enroll a device
+    dev = client.post("/api/devices/enroll", json={"name": "stream-node", "os": "Windows"}, headers={"X-Admin-Token": admin_token}).json()
+    dev_id = dev["device_id"]
+    dev_token = dev["device_token"]
+
+    # 1. Create WebRTC session for enrolled device
+    create_res = client.post(
+        f"/api/devices/{dev_id}/desktop/webrtc/session",
+        json={"scale": 0.5, "fps": 15},
+        headers={"X-Admin-Token": admin_token},
+    )
+    assert create_res.status_code == 200, f"Error: {create_res.text}"
+    data = create_res.json()
+    assert "session_id" in data
+    sess_id = data["session_id"]
+    assert data["status"] == "waiting"
+    assert create_res.headers.get("Deprecation", "").lower() in ("true", "1")
+
+    # Verify task was queued for the agent
+    task_res = client.get("/api/agent/tasks/next", headers={"X-Device-Token": dev_token})
+    assert task_res.status_code == 200
+    task_data = task_res.json()
+    assert task_data["task"]["tool"] == "start_webrtc_stream"
+    assert json.loads(task_data["task"]["args_json"])["session_id"] == sess_id
+
+    # 2. Agent fetches session
+    agent_sess = client.get(f"/api/agent/webrtc/{sess_id}", headers={"X-Device-Token": dev_token})
+    assert agent_sess.status_code == 200
+    assert agent_sess.json()["id"] == sess_id
+
+    # 3. Agent posts offer
+    offer_res = client.post(
+        f"/api/agent/webrtc/{sess_id}/offer",
+        json={"sdp": "v=0\r\no=...", "type": "offer"},
+        headers={"X-Device-Token": dev_token},
+    )
+    assert offer_res.status_code == 200
+
+    # 4. Viewer reads session and checks offer
+    viewer_sess = client.get(f"/api/devices/{dev_id}/desktop/webrtc/{sess_id}", headers={"X-Admin-Token": admin_token})
+    assert viewer_sess.status_code == 200
+    assert viewer_sess.json()["status"] == "offered"
+    assert viewer_sess.json()["offer"]["type"] == "offer"
+
+    # 5. Viewer posts answer
+    ans_res = client.post(
+        f"/api/devices/{dev_id}/desktop/webrtc/{sess_id}/answer",
+        json={"sdp": "v=0\r\n...", "type": "answer"},
+        headers={"X-Admin-Token": admin_token},
+    )
+    assert ans_res.status_code == 200
+
+    # 6. End session
+    del_res = client.delete(f"/api/devices/{dev_id}/desktop/webrtc/{sess_id}", headers={"X-Admin-Token": admin_token})
+    assert del_res.status_code == 200
+    assert del_res.json()["status"] == "ended"
+
+
+def test_v1_webrtc_session_endpoints(tmp_path):
+    """Canonical Live Desktop path: POST /api/v1/sessions (not legacy device webrtc routes)."""
+    admin_token = "adm-tok-v1-webrtc"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control-v1.db")
+    client = TestClient(app)
+
+    dev = client.post(
+        "/api/devices/enroll",
+        json={"name": "v1-stream-node", "os": "Windows"},
+        headers={"X-Admin-Token": admin_token},
+    ).json()
+    dev_id = dev["device_id"]
+    dev_token = dev["device_token"]
+
+    create_res = client.post(
+        "/api/v1/sessions",
+        json={
+            "device_id": dev_id,
+            "mode": "human_control",
+            "fps": 30,
+            "scale": 0.5,
+            "monitor_index": 0,
+            "bitrate_kbps": 4500,
+        },
+        headers={"X-Admin-Token": admin_token},
+    )
+    assert create_res.status_code == 200, create_res.text
+    data = create_res.json()
+    sess_id = data["session_id"]
+    assert data["status"] == "waiting"
+    assert data["video"]["fps"] == 30
+    assert "control_mouse" in (data.get("permissions") or {})
+
+    task_res = client.get("/api/agent/tasks/next", headers={"X-Device-Token": dev_token})
+    assert task_res.status_code == 200
+    task = task_res.json()["task"]
+    assert task["tool"] == "start_webrtc_stream"
+    args = json.loads(task["args_json"])
+    assert args["session_id"] == sess_id
+    assert args["fps"] == 30
+    assert args.get("monitor_index") == 0
+    assert args.get("bitrate_kbps") == 4500
+
+    offer_res = client.post(
+        f"/api/v1/sessions/{sess_id}/offer",
+        json={"sdp": "v=0\r\no=agent", "type": "offer"},
+        headers={"X-Device-Token": dev_token},
+    )
+    assert offer_res.status_code == 200
+
+    viewer = client.get(f"/api/v1/sessions/{sess_id}", headers={"X-Admin-Token": admin_token})
+    assert viewer.status_code == 200
+    assert viewer.json()["status"] == "offered"
+    assert viewer.json()["offer"]["type"] == "offer"
+
+    ans = client.post(
+        f"/api/v1/sessions/{sess_id}/answer",
+        json={"sdp": "v=0\r\no=viewer", "type": "answer"},
+        headers={"X-Admin-Token": admin_token},
+    )
+    assert ans.status_code == 200
+    assert ans.json()["status"] == "answered"
+
+    term = client.post(
+        f"/api/v1/sessions/{sess_id}/terminate",
+        headers={"X-Admin-Token": admin_token},
+    )
+    assert term.status_code == 200
+    assert term.json()["status"] in ("ended", "terminated")
+
+
+def test_v1_session_create_rejects_linux_and_macos(tmp_path):
+    """Platform honesty gate: do not queue start_webrtc_stream for non-Windows devices."""
+    admin_token = "adm-tok-v1-gate"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control-v1-gate.db")
+    client = TestClient(app)
+    headers = {"X-Admin-Token": admin_token}
+
+    linux = client.post(
+        "/api/devices/enroll",
+        json={"name": "lin-node", "os": "Linux"},
+        headers=headers,
+    ).json()
+    mac = client.post(
+        "/api/devices/enroll",
+        json={"name": "mac-node", "os": "Darwin"},
+        headers=headers,
+    ).json()
+
+    # Persist check: gate must read enrolled OS from devices table.
+    assert app.state.conn.execute(
+        "SELECT os FROM devices WHERE id=?", (linux["device_id"],)
+    ).fetchone()[0] == "Linux"
+    assert app.state.conn.execute(
+        "SELECT os FROM devices WHERE id=?", (mac["device_id"],)
+    ).fetchone()[0] == "Darwin"
+
+    for device_id, family in (
+        (linux["device_id"], "Linux"),
+        (mac["device_id"], "Darwin"),
+    ):
+        res = client.post(
+            "/api/v1/sessions",
+            json={"device_id": device_id, "mode": "view_only", "fps": 15},
+            headers=headers,
+        )
+        assert res.status_code == 400, f"{family} expected 400, got {res.status_code}: {res.text}"
+        detail = str(res.json().get("detail") or "").lower()
+        assert "unavailable" in detail or "windows" in detail
+        assert family.lower() in detail or (family == "Darwin" and ("darwin" in detail or "macos" in detail))
+
+    # No start_webrtc_stream task should have been queued for either device.
+    for token in (linux["device_token"], mac["device_token"]):
+        task_res = client.get("/api/agent/tasks/next", headers={"X-Device-Token": token})
+        assert task_res.status_code == 200
+        assert task_res.json().get("task") is None
+
+
+def test_fleet_desktop_frames_endpoint(tmp_path):
+    admin_token = "adm-tok-p4"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control.db")
+    client = TestClient(app)
+
+    # Enroll Windows device and Linux device
+    win_dev = client.post("/api/devices/enroll", json={"name": "win-box", "os": "Windows 11 Pro"}, headers={"X-Admin-Token": admin_token}).json()
+    lin_dev = client.post("/api/devices/enroll", json={"name": "lin-srv", "os": "Ubuntu 24.04 LTS"}, headers={"X-Admin-Token": admin_token}).json()
+
+    # Pre-populate cached frame for win_dev
+    app.state.latest_frames[win_dev["device_id"]] = {
+        "available": True,
+        "width": 1024,
+        "height": 576,
+        "base64_data": "dGVzdF93aW5kb3dz",
+        "timestamp": time.time(),
+    }
+
+    # 1. Query all devices
+    res_all = client.get("/api/fleet/desktop/frames", headers={"X-Admin-Token": admin_token})
+    assert res_all.status_code == 200
+    data_all = res_all.json()
+    assert data_all["count"] == 2
+    dev_ids = [d["device_id"] for d in data_all["devices"]]
+    assert win_dev["device_id"] in dev_ids
+    assert lin_dev["device_id"] in dev_ids
+
+    # 2. Query Windows-only filter
+    res_win = client.get("/api/fleet/desktop/frames?os=windows", headers={"X-Admin-Token": admin_token})
+    assert res_win.status_code == 200
+    data_win = res_win.json()
+    assert data_win["count"] == 1
+    assert data_win["devices"][0]["device_id"] == win_dev["device_id"]
+    assert data_win["devices"][0]["frame"] is not None
+    assert data_win["devices"][0]["frame"]["width"] == 1024

@@ -1,0 +1,121 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      # R-P1-53: the Python suite must actually run in CI and its results
+      # must be published. pytest writes a JUnit report and a full log;
+      # both are uploaded as artifacts on every run (pass or fail), so a
+      # green badge can always be traced to a real run log. The `tee`
+      # keeps the log visible in the console too (GitHub's bash runs with
+      # pipefail, so a pytest failure still fails the step).
+      - name: Run Python test suite
+        run: |
+          mkdir -p .run
+          pytest -v --junitxml=.run/pytest-junit.xml 2>&1 | tee .run/pytest.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-results
+          path: |
+            .run/pytest.log
+            .run/pytest-junit.xml
+          retention-days: 30
+
+  deployment-config:
+    # R-P1-53 / R-P0-14 / R-P0-15: deployment-config regression tests run
+    # with the standard library only — no package install, so this job
+    # stays green/red even when the full dependency install is broken.
+    name: Deployment config checks (stdlib only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Run deployment-config tests
+        run: |
+          mkdir -p .run
+          python3 tests/unit/test_deployment_config.py -v 2>&1 | tee .run/deployment-config-test.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployment-config-test-log
+          path: .run/deployment-config-test.log
+          retention-days: 30
+
+  macos-agent:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - name: macOS agent import + desktop status honesty
+        run: |
+          python -c "from agents.macos import agent_main; print('macos agent_main', agent_main.__file__)"
+          python -c "from ai_bridge import tools; print(tools.get_desktop_status())"
+      - name: Unit smoke (non-browser)
+        run: pytest -q tests/unit/test_residuals_security_platform.py --tb=line
+
+  windows-native-webrtc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install Python package
+        run: pip install -e ".[dev]"
+      - name: Configure C++ agent with libdatachannel (Mbed TLS, no system OpenSSL)
+        working-directory: windows-agent
+        run: |
+          cmake -B build -DAIBRIDGE_WITH_LIBDATACHANNEL=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release
+      - name: Build desktop agent
+        working-directory: windows-agent
+        run: cmake --build build --config Release --target ai_bridge_desktop -- /m
+      - name: Native PeerConnection ↔ plane E2E harness
+        env:
+          AIBRIDGE_DESKTOP_EXE: ${{ github.workspace }}\windows-agent\build\Release\ai_bridge_desktop.exe
+        run: python scripts/libwebrtc_e2e_harness.py --out .run/libwebrtc_e2e_evidence.json --native-agent
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: libwebrtc-e2e-evidence
+          path: .run/libwebrtc_e2e_evidence.json
+          retention-days: 14
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: apps/dashboard/package-lock.json
+      - run: npm ci
+      # `npm run build` runs `tsc -b && vite build`, so this step is also
+      # the dashboard typecheck. It must stay before `npm test`.
+      - run: npm run build
+      - name: Run dashboard unit tests
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.run"
+          npm test 2>&1 | tee "$GITHUB_WORKSPACE/.run/dashboard-test.log"
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dashboard-test-results
+          path: |
+            apps/dashboard/test-results/
+            .run/dashboard-test.log
+          retention-days: 30

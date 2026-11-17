@@ -1,0 +1,72 @@
+# Render Blueprint for AI Bridge (test deployment).
+# How to use: push this repo to GitHub/GitLab, connect it in Render, and
+# create a Blueprint from render.yaml. Set AI_BRIDGE_ADMIN_TOKEN in the
+# Render dashboard (marked sync: false, so it is never in this file).
+# Postgres is provisioned below and wired via fromDatabase. Override
+# DATABASE_URL in the dashboard only if you use an external Timescale URL.
+databases:
+  - name: ai-bridge-db
+    plan: basic-256mb
+    region: frankfurt
+    databaseName: aibridge
+    user: aibridge
+
+services:
+  - type: web
+    name: ai-bridge-control
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -e .
+    startCommand: python -m ai_bridge.control
+    healthCheckPath: /health
+    envVars:
+      - key: AI_BRIDGE_ADMIN_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-bridge-db
+          property: connectionString
+      - key: AI_BRIDGE_PUBLIC_URL
+        value: "https://ai-bridge-control.onrender.com"
+      # Alias also accepted as AI_BRIDGE_PUBLIC_BASE_URL (same resolution order).
+      - key: AI_BRIDGE_PROFILE
+        value: "production"
+      - key: AI_BRIDGE_PUBLIC_BASE_URL
+        value: "https://ai-bridge-control.onrender.com"
+      - key: AI_BRIDGE_OAUTH_ISSUER
+        value: "https://ai-bridge-control.onrender.com"
+      - key: AI_BRIDGE_CONTROL_URL
+        value: "https://ai-bridge-control.onrender.com"
+      - key: AI_BRIDGE_EMBED_MCP
+        value: "1"
+      - key: AI_BRIDGE_MCP_ALLOWED_HOSTS
+        value: "ai-bridge-control.onrender.com,ai-bridge-control.onrender.com:*,localhost:*,127.0.0.1:*"
+      - key: AI_BRIDGE_CORS_ORIGINS
+        value: "https://ai-bridge-dashboard.onrender.com"
+      - key: AI_BRIDGE_DASHBOARD_URL
+        value: "https://ai-bridge-dashboard.onrender.com"
+      # Tier 3 (shell/desktop control) is OFF by default (R-P0-14).
+      # Explicit opt-in only: set to "1" to enable.
+      - key: AI_BRIDGE_ALLOW_TIER3
+        value: "0"
+      - key: AI_BRIDGE_DEVICE_TOKEN_TTL_DAYS
+        value: "7"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHON_VERSION
+        value: "3.12.10"
+  - type: web
+    name: ai-bridge-dashboard
+    runtime: static
+    buildCommand: cd apps/dashboard && npm install && npm run build
+    staticPublishPath: ./apps/dashboard/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      # Baked into the static build. Keep in sync with AI_BRIDGE_PUBLIC_URL /
+      # the control service hostname after any rename.
+      - key: VITE_API_URL
+        value: "https://ai-bridge-control.onrender.com"

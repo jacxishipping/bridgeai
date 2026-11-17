@@ -1,0 +1,24 @@
+[Unit]
+Description=AI Bridge Linux Server Agent (autonomous server maintenance & orchestration)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ai-bridge
+EnvironmentFile=-/etc/ai-bridge/agent.env
+ExecStart=/opt/ai-bridge/.venv/bin/python agents/linux/agent_main.py run
+# A revoked/expired device exits 2 (agents/linux/agent_main.py) and needs
+# re-enrollment — restarting it would loop forever. SuccessExitStatus=2
+# treats that exit as clean, and Restart=on-failure (not `always`, under
+# which SuccessExitStatus is inert) restarts only genuine failures.
+Restart=on-failure
+RestartSec=5
+SuccessExitStatus=2
+KillMode=process
+LimitNOFILE=65536
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target
