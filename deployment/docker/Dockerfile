@@ -1,4 +1,8 @@
 FROM python:3.12-slim AS base
+# Postgres client tools for the backup/restore drill (scripts/backup_restore.py
+# needs pg_dump/psql/pg_restore/createdb on PATH).
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src

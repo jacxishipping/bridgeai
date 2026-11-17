@@ -1,0 +1,163 @@
+# Load-Test Phase Plan — AI Bridge Staging on Render
+
+**Date:** 17 Nov 2026
+**Status:** Plan — not yet executed. Nothing in this document spends money or
+changes infrastructure; execution needs the approvals in §7.
+**Context:** the staging plane is live at
+https://ai-bridge-staging-plane.onrender.com (deploy `dep-dbu0ujmk1f9s73a0g2pg`,
+free plan, 1 instance). The Postgres boot drill passed (migrations 001–015
+applied, `/health` 200). This phase closes the remaining live-verification
+items: gate 15 (4-worker load test), the two-worker Redis fan-out check, and
+the Postgres backup/restore drill (DB-01).
+
+## 1. What this phase must prove
+
+| # | Claim | Gate / register | How it is proven |
+|---|-------|-----------------|------------------|
+| 1 | Scheduler fires each due job exactly once across workers | DIST-01, gate 15 | One due schedule, count executions = 1 per tick |
+| 2 | Cancels / task availability reach agents on other workers | DIST-03, gate 15 | Cancel issued via public URL arrives promptly on an agent WS connected to a different worker, repeated trials |
+| 3 | OIDC completes when authorize and exchange land on different workers | DIST-05, gate 15 | Full authorize → exchange flow via public URL, repeated |
+| 4 | Effective rate limit = configured limit, not 4× | PERF-02, gate 15 | Probe: allowed request rate ≈ 120/min across all 4 workers combined |
+| 5 | 4 workers sustain the claim/cancel soak within thresholds | Gate 15 | k6 soak: claim p95 < 5 s, failed requests < 5% |
+| 6 | Postgres backup restores into a fresh DB and verifies | DB-01 | `scripts/backup_restore.py` PG path run on Render: dump → new DB → restore → core-table counts |
+
+## 2. Current state
+
+- Plane: `ai-bridge-staging-plane` (`srv-dbu0rc8jo6nc73fs5r40`), free plan,
+  1 instance, Oregon, Docker from `jacxishipping/bridgeai` main.
+- Postgres `ai-bridge-staging-db`: free, PG 18, **expires 2026-12-17**.
+- Key Value `ai-bridge-staging-redis`: free, Redis 8.1.10, persistence off.
+- Free services cannot scale past 1 instance and sleep after 15 min idle.
+- The staging admin token was generated at service creation and is known
+  only to Render (it was never stored anywhere else). Any test that needs
+  admin auth needs a known token first — see §3.
+
+## 3. Prerequisites (before any spend)
+
+1. **Known staging admin token.** Rotate/set the service env var
+   `AI_BRIDGE_ADMIN_TOKEN` to a fresh value recorded only in a 0600 file for
+   the test run (same handling as creation: generate, use, delete the file).
+   Without this, the soak, schedule and fan-out checks cannot authenticate.
+   The service restarts when an env var changes.
+2. **Confirm manual scaling is available** on workspace "The's workspace"
+   (Hobby $0). Manual `numInstances` scaling is a paid-instance feature, not
+   autoscaling (autoscaling needs Pro). If the dashboard/API refuses the
+   scale, the fallback is a Pro workspace at $25/mo flat, prorated — decide
+   then, do not pre-pay it.
+3. **k6 on this VM** (the repo's soak is `scripts/k6/claim_cancel_soak.js`;
+   neither k6 nor locust is currently installed). k6 is a single static
+   binary; install it locally for the run. The locust alternative
+   (`scripts/locust/claim_cancel_soak.py`) needs `pip install locust`.
+4. **Postgres client in the image** (backup drill only): add
+   `postgresql-client` to `deployment/docker/Dockerfile` (one `apt-get`
+   line). pg_dump/psql/pg_restore/createdb are required by
+   `scripts/backup_restore.py` and are absent from `python:3.12-slim`.
+
+## 4. Execution steps
+
+### A. Scale to 4 × Starter
+
+1. `PATCH /v1/services/srv-dbu0rc8jo6nc73fs5r40` → `{"plan": "starter"}`.
+2. `POST /v1/services/srv-dbu0rc8jo6nc73fs5r40/scale` → `{"numInstances": 4}`.
+3. Verify: `GET /v1/services/{id}/instances` shows 4 running instances;
+   `/health` still 200. Render load-balances across them.
+
+### B. Two-worker Redis fan-out check
+
+1. Enroll 2 test devices via `POST /api/devices/enroll` (admin token).
+2. Open an agent WebSocket for each; confirm the two connections land on
+   different workers (Render instance ids in the service logs).
+3. From the public URL (random worker), create a task for device 1, then
+   cancel it; record whether the cancel arrives on device 1's WS promptly.
+4. Repeat 10 times. With 4 workers, a same-worker coincidence is 25% per
+   trial; 10/10 prompt deliveries rules it out (0.25^10). Log the evidence.
+
+### C. Scheduler-fires-once check (DIST-01)
+
+1. `POST /api/schedules` with a short `interval_seconds` and `next_run_at`
+   in the past (due immediately), tool `get_system_info`, target test device.
+2. Over several ticks, count the tasks the scheduler created for that
+   schedule. Pass = exactly 1 per due tick, no duplicates across 4 workers.
+3. Delete the schedule afterwards.
+
+### D. Rate-limit check (PERF-02)
+
+1. Small probe script (new, ~50 lines): N parallel clients hammer a
+   rate-limited API route for 60 s, counting 200s vs 429s.
+2. Configured limit is 120/min per key (default in `_rate_limit`).
+   Pass = the allowed rate across all 4 workers combined is ≈120/min,
+   not ≈480/min. Validate first which routes the async middleware limiter
+   actually covers, so the probe hits a limited route.
+
+### E. Load soak (gate 15)
+
+`k6 run -e BASE_URL=https://ai-bridge-staging-plane.onrender.com
+-e ADMIN_TOKEN=<known staging token> -e VUS=20 -e DURATION=5m
+scripts/k6/claim_cancel_soak.js`
+
+Thresholds (from the script): claim p95 < 5 s, failed requests < 5%.
+Watch Render metrics for instance CPU/memory and error rate during the run.
+Keep the soak short (5 min) — it is a gate check, not a stress-to-failure
+run. Record the k6 summary verbatim in the test-results report.
+
+### F. OIDC across workers
+
+Run the authorize → exchange-code flow against the public URL several
+times (each request may land on a different worker; the exchange code is
+DB-backed, so it must succeed regardless of which worker serves each step).
+Pass = every flow completes and returns a usable token.
+
+### G. Backup / restore drill (DB-01)
+
+1. Deploy the Dockerfile change from §3.4 (image rebuild).
+2. Create a Render cron job `ai-bridge-staging-backup-drill` from the same
+   repo/image, command:
+   `python scripts/backup_restore.py backup --pg-dsn "$DATABASE_URL" --out /tmp/staging-dump.sql`
+   then restore into a fresh DB on the same server and verify core tables
+   (`users`, `devices`, `tasks`, `sessions`, `approvals`).
+   The script's PG path already does this (dump → `createdb` → restore →
+   verify); the job runs it with the internal DSN from env vars.
+3. Read the job logs as evidence. The dump is verification-only and is
+   discarded with the job's ephemeral disk; it contains credential hashes,
+   so it must never be copied off Render.
+
+## 5. Success criteria (gate 15 closes when all hold)
+
+- 4 instances running, `/health` 200 throughout.
+- Scheduler: exactly 1 execution per due tick.
+- Fan-out: 10/10 cancels delivered promptly cross-worker.
+- Rate limit: effective allowed rate ≈ configured limit (not 4×).
+- Soak: claim p95 < 5 s, failed < 5%, no worker crashes.
+- OIDC: every cross-worker flow completes.
+- Backup/restore: restore verifies, core-table counts match.
+
+## 6. Cost (Render list prices, checked Oct 2026; verify on the pricing page before spending)
+
+| Item | Price | Phase cost |
+|------|-------|-----------|
+| Plane 4 × Starter (512 MB, 0.5 CPU) | $7/mo per instance, prorated by the second | ≈ $0.04/hr for all 4; a full day ≈ $0.92 |
+| Backup-drill cron job, Starter | $7/mo prorated | minutes of runtime ≈ a few cents |
+| Workspace | Hobby $0 (Pro $25/mo only if manual scaling is refused — see §3.2) | $0 expected |
+| Postgres / Key Value | free (Postgres expires 2026-12-17) | $0 |
+| **Expected total if scaled back promptly** | | **under $2** |
+| Worst case (forgotten, left running a month) | 4 × $7 + $7 job | ≈ $35/mo until scaled down |
+
+**Scale-back is part of the phase, not an afterthought:** after the checks,
+`POST /scale {"numInstances": 1}` and `PATCH {"plan": "free"}`, delete the
+cron job, and verify the service is back to 1 × free.
+
+## 7. Approvals needed to execute
+
+1. Scale the plane to 4 × Starter (paid compute, §6).
+2. Rotate/set a known staging admin token (§3.1).
+3. Dockerfile change adding `postgresql-client` + the backup-drill cron job.
+4. Run the k6 soak against the public staging URL (load test traffic only;
+   staging data only, no production systems).
+
+## 8. What this phase does NOT do
+
+- No production deployment, no real enrolled devices (test devices only),
+  no WebRTC E2E (needs a real browser peer — separate item), no 10-step E2E
+  workflow tests, no closing of the open P1s, no independent re-audit.
+  Those remain open after this phase; the verdict stays NO-GO until they
+  are done.
