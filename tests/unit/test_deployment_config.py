@@ -204,6 +204,22 @@ class TestNoDefaultSecrets(unittest.TestCase):
             "legacy admin flag must default to 0 (off) in compose",
         )
 
+    def test_control_api_declares_turn_host(self):
+        # F-04-18 / F13-11 (EC2 WebRTC): the ice-servers endpoint mints
+        # ephemeral TURN credentials from AI_BRIDGE_TURN_SECRET +
+        # AI_BRIDGE_TURN_HOST. The secret was wired but the host was
+        # never passed, so the plane returned STUN-only and
+        # restrictive-NAT peers had no relay path. The control-api
+        # environment must declare the host, defaulting to the plane
+        # domain (the coturn service runs on this host).
+        env = _compose_env(PROD_COMPOSE)
+        self.assertIn("AI_BRIDGE_TURN_HOST", env)
+        self.assertIn(
+            "AI_BRIDGE_DOMAIN",
+            env["AI_BRIDGE_TURN_HOST"],
+            "TURN host must default to the plane domain in compose",
+        )
+
 
 class TestNginx(unittest.TestCase):
     def setUp(self):
