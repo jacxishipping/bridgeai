@@ -223,15 +223,107 @@ of this task.)
 `git status` at handover: 2 modified files + 2 new untracked files; nothing
 committed, nothing pushed, no production system touched, no farhan contact.
 
-## 7. UNVERIFIED — pending the parent's browser run
+## 7. Parent browser run — DONE 17 Nov 2026 (headless Chromium on the host VM)
 
+The cloud browser could not open the locally served harness (its loopback is a
+different VM), so the parent ran the harness in headless Chromium
+(156.0.8078.4) on the host VM itself via a Playwright driver
+(`/tmp/webrtc-run.js`; results in `~/workspace/tmp/webrtc-e2e/`:
+`results.json`, `log.txt`, `criteria.txt`, `verdict.txt`, `page.png`,
+`console.txt`, `meta.txt`). Device used: `sched-test` (`333b3848cf3a`).
+Duration 3.1 s. **Verdict from the harness: `FAIL — see failing criteria
+above`** — NOT the expected no-source PASS, for two distinct reasons, one a
+known defect and one an environment/deployment block (see below). The token
+was never pasted or printed: the harness auto-fills it from a local
+same-origin endpoint (`analysis/serve_harness.py`, also serving the harness
+on 127.0.0.1:5173).
+
+### 8.1 Criteria (4 PASS, 1 known-defect FAIL, 3 WS FAIL)
+- `health` PASS (200 `{"status":"ok","version":"0.3.0","emergency_stop":false}`).
+- `devices_list` PASS — 6 devices, all Linux/offline, all synthetic
+  (fanout-a ×2, fanout-b ×2, k6-0, sched-test), matching the worker's probe.
+- `ice_servers_endpoint` FAIL — HTTP 404 `{"detail":"Session not found."}`
+  — the KNOWN DEFECT (§5). Expected on this run; fix is committed
+  (`a928f7e`, GitHub `099188f9`) but NOT yet deployed to staging.
+- `session_create_gate` PASS — POST /api/v1/sessions → HTTP 400 with the
+  honest Windows-only message; no session, no offer, no fabricated stream.
+- `ticket_mint` PASS — HTTP 200, `expires_in: 60`, ticket redacted (len 43).
+- `ws_rejects_unknown_session`, `ws_rejects_bad_ticket`, `ws_rejects_no_auth`
+  — all FAIL with `opened=false closeCode=1006`. The WebSocket handshake
+  never completed (see §7.3).
+
+### 8.2 Environment workarounds needed to run the harness at all (this VM)
+- Headless Chromium could not reach the public internet: its CONNECT to the
+  sandbox egress proxy got `HTTP/1.1 403 Forbidden` (net-log: TCP connect to
+  the proxy succeeded, CONNECT sent, proxy answered 403 JSON, 81 bytes;
+  Chromium maps it to `ERR_TUNNEL_CONNECTION_FAILED`), while curl/Python
+  raw CONNECTs with byte-identical headers got 200. `--no-proxy-server`
+  also failed (direct TLS is intercepted: `SSL: WRONG_VERSION_NUMBER`).
+  Fix used: a local logging TCP relay on 127.0.0.1:18080
+  (`/tmp/relay.py`, forwards CONNECTs to the egress proxy — its CONNECTs
+  get 200) as Chromium's `--proxy-server`, plus
+  `--ignore-certificate-errors` (Chromium does not trust the sandbox egress
+  CA that MITMs TLS; the CA is `Hatch Sandbox Egress CA`). Both are
+  test-only measures; the harness still talks to the real staging plane
+  over real HTTPS and the token travels only inside the TLS tunnel.
+- The cloud-browser attempt was abandoned for the same reason in reverse:
+  it cannot reach this VM's loopback, and the plane's CORS only allows the
+  `http://localhost:5173` origin, so no public harness URL would work.
+
+### 7.3 The WebSocket 403 — Cloudflare in front of Render (not the plane code)
+The three WS criteria fail because the WS handshake gets **HTTP 403 from
+Cloudflare** (`Server: cloudflare`, `CF-RAY: …-MIA`, `cf-cache-status:
+DYNAMIC`, empty body), proven independently of the browser:
+- Browser console: `WebSocket connection to 'wss://…/api/v1/ws/sessions/…'
+  failed: Error during WebSocket handshake: Unexpected response code: 403`
+  (all three probes).
+- Python `websockets` client, via the egress proxy AND via the local relay:
+  `InvalidStatus server rejected WebSocket connection: HTTP 403`.
+- Raw TLS handshake (Python, CONNECT via egress proxy, then a manual WS
+  upgrade request): `HTTP/1.1 403 Forbidden` with Cloudflare headers —
+  for a minimal handshake AND a full browser-like handshake (UA, Origin,
+  extensions). Regular HTTPS to the same host works (all fetch calls).
+- A WS handshake to a different public host (`ws.postman-echo.com`) timed
+  out at the TLS handshake; direct (no-proxy) TLS fails with
+  `SSL: WRONG_VERSION_NUMBER` (transparent interception).
+
+So from this VM no WebSocket to the plane is possible, and the 403 is issued
+by Cloudflare's edge in front of Render, not by the plane's FastAPI code
+(which would answer 4401 after accepting, per the protocol in §2) and not
+by the sandbox egress proxy (its own CONNECT 403 has a different signature:
+JSON, 81 bytes). Whether Cloudflare blocks WS upgrades to this host for
+everyone or only for datacenter-egress IPs is NOT settled from this VM: a
+cloud-browser WS probe (different egress) is running to decide it — if it
+gets 4401, the plane's ticket auth works and the block is this VM's egress;
+if it also gets 403/1006, Cloudflare blocks WS to this host generally,
+which would be a staging-deployment finding (live desktop streaming would
+be unreachable for all browser peers).
+
+### 7.4 What 5C actually proves, and what stays open
+PROVEN (real browser peer, real plane): signalling plane over HTTPS works
+from a browser origin; device list is honest; session creation is honestly
+gated for non-Windows devices (400, no fabricated stream); stream tickets
+mint (200, 60 s). The known ice-servers defect is confirmed live on the
+deployed staging code (fix committed, awaiting a deploy in 5E).
+NOT PROVEN: any WebSocket behaviour (4401 rejects, snapshot/pong, replay
+rejection) — blocked by the Cloudflare 403 above; and real video (FULL
+PASS) — still impossible on staging with no Windows agent attached.
+The WS criteria are therefore **NOT VERIFIED (environment/deployment
+blocked)**, not "the plane failed" — the harness records them as FAIL
+because its verdict logic cannot distinguish the two, and this addendum is
+the correction. If the cloud-browser probe clears the plane, 5C can close
+with the WS criteria verified from that vantage point; if it confirms a
+general Cloudflare block, the WS gate needs a different deployment or
+network path to verify, and 5C stays partially open.
+
+### 7.5 Still unverified after this run
 - Everything the harness does inside a real browser: `RTCPeerConnection`
   construction, `setRemoteDescription`/`createAnswer`, ICE gathering/trickle,
   WS handshake + snapshot/pong/replay from a browser origin, `requestVideoFrameCallback`
-  frame counting. (No browser was available to this worker; curl/TestClient
-  cannot do any of these.)
+  frame counting. (No offer arrived, so no peer connection was constructed;
+  curl/TestClient cannot do any of these.)
 - Whether the current staging deploy still 404s `ice-servers` from a browser
-  origin (curl says 404; the browser run re-confirms it through the harness).
+  origin — **CONFIRMED by this run: yes, 404 (§7.1)**.
 - Full video E2E (`FULL PASS`) — **not provable on staging as it stands** and
   not claimed: it needs a real Windows agent attached to staging, which does
   not exist. If the gate ever needs a true FULL PASS, the prerequisite is
