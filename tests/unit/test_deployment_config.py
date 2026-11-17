@@ -164,6 +164,16 @@ class TestNoDefaultSecrets(unittest.TestCase):
         self.assertIn("TURN_SECRET=$(openssl rand -hex 32)", text)
         self.assertIn('chmod 600 "$ENV_FILE"', text)
 
+    def test_deploy_script_writes_ai_bridge_domain(self):
+        # EC2 deploy: docker-compose.prod.yml reads AI_BRIDGE_DOMAIN
+        # (NGINX_DOMAIN, AI_BRIDGE_PUBLIC_URL/BASE_URL, CORS/DASHBOARD
+        # URLs), but the deploy script only wrote DOMAIN — so a deploy
+        # with DOMAIN=clideos.us silently left nginx and the plane
+        # thinking the domain was jxiptvplayer.app. The generated
+        # .env.production must carry AI_BRIDGE_DOMAIN from DOMAIN.
+        text = _read(DEPLOY_PROD)
+        self.assertIn('AI_BRIDGE_DOMAIN="${DOMAIN:-jxiptvplayer.app}"', text)
+
     def test_control_api_receives_turn_secret(self):
         # R-P0-15 follow-up (EC2 deploy): the production readiness check
         # reads AI_BRIDGE_TURN_SECRET inside the control-api process

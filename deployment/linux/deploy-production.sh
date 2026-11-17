@@ -86,6 +86,11 @@ if [ ! -f "$ENV_FILE" ]; then
 
 # Domain & Edge Routing
 DOMAIN="${DOMAIN:-jxiptvplayer.app}"
+# AI_BRIDGE_DOMAIN is what docker-compose.prod.yml actually reads
+# (NGINX_DOMAIN, AI_BRIDGE_PUBLIC_URL/BASE_URL, CORS/DASHBOARD URLs);
+# without it the compose defaults silently fall back to jxiptvplayer.app
+# even when DOMAIN is set to something else (EC2 deploy).
+AI_BRIDGE_DOMAIN="${DOMAIN:-jxiptvplayer.app}"
 ACME_EMAIL="${ACME_EMAIL:-admin@jxiptvplayer.app}"
 
 # Database & Cache Credentials
