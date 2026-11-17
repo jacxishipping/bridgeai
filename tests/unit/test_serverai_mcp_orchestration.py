@@ -81,6 +81,8 @@ def test_verify_binding_cache(monkeypatch):
     hits = {"n": 0}
 
     class FakeResp:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 

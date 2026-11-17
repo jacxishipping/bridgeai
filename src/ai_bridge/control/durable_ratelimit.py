@@ -20,7 +20,6 @@ Backend selection (Wave 2A / PERF-02):
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import secrets
@@ -220,40 +219,101 @@ def _redis_allow(key: str, limit: int, window: float) -> bool | None:
         return None
 
 
+# F-05-08: DB-backend counter encoding. One decimal integer
+# ``N = t0_ms * _DB_COUNT_MODULUS + count`` stored as TEXT (see
+# _db_allow); six digits of count, so the supported limit is < 1e6.
+_DB_COUNT_MODULUS = 1_000_000
+
+# F-05-08: single-statement conditional UPSERT for _db_allow. Six
+# parameters, in order: (key, fresh_value, now_ms - window_ms,
+# fresh_value, limit, legacy_reset_value). Portable across SQLite and
+# Postgres — the ``%`` modulo becomes ``%%`` under to_pg_sql and
+# psycopg collapses it back to ``%``; every other construct
+# (substr/length/ABS/CAST/BETWEEN/||/CASE/RETURNING) exists in both.
+# ``RETURNING value`` carries the decision: a leading '-' means this
+# statement denied (counter unchanged), anything else admitted.
+_DB_ALLOW_SQL = (
+    "INSERT INTO settings (key, value) VALUES (?, ?) "
+    "ON CONFLICT(key) DO UPDATE SET value = CASE "
+    "WHEN substr(settings.value, 1, 1) BETWEEN '0' AND '9' "
+    "OR (substr(settings.value, 1, 1) = '-' "
+    "AND length(settings.value) > 1 "
+    "AND substr(settings.value, 2, 1) BETWEEN '0' AND '9') "
+    "THEN CASE "
+    "WHEN ABS(CAST(settings.value AS BIGINT)) / 1000000 <= ? "
+    "THEN ? "
+    "WHEN ABS(CAST(settings.value AS BIGINT)) % 1000000 >= ? "
+    "THEN '-' || CAST(ABS(CAST(settings.value AS BIGINT)) AS TEXT) "
+    "ELSE CAST(ABS(CAST(settings.value AS BIGINT)) + 1 AS TEXT) "
+    "END "
+    "ELSE ? END "
+    "RETURNING value"
+)
+
+
 def _db_allow(conn: Any, key: str, limit: int, window: float) -> bool:
-    setting_key = f"ratelimit.{key}"
-    now = time.time()
-    row = conn.execute("SELECT value FROM settings WHERE key=?", (setting_key,)).fetchone()
-    raw = None
-    if row is not None:
-        raw = row["value"] if hasattr(row, "keys") else row[0]
-    data: dict[str, Any] = {"t0": now, "count": 0}
-    if raw:
-        try:
-            data = json.loads(str(raw))
-        except json.JSONDecodeError:
-            data = {"t0": now, "count": 0}
-    t0 = float(data.get("t0") or now)
-    count = int(data.get("count") or 0)
-    if now - t0 >= window:
-        t0 = now
-        count = 0
-    if count >= limit:
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (setting_key, json.dumps({"t0": t0, "count": count})),
-        )
-        conn.commit()
+    """Fixed-window allow via ONE conditional UPSERT (F-05-08).
+
+    The old code did SELECT -> parse -> INSERT in three statements, so
+    two workers racing on the same key both read ``count = limit - 1``
+    and both admitted, overshooting the limit. This version issues a
+    single ``INSERT ... ON CONFLICT DO UPDATE`` whose ``CASE`` decides
+    admit/deny from the stored row, and the row lock the UPSERT takes
+    serialises concurrent writers on both engines (SQLite's write lock
+    / Postgres's row lock). The decision comes back via ``RETURNING``,
+    so no second read is needed.
+
+    Row encoding (one portable dialect, no JSON functions — SQLite's
+    ``json_extract`` and Postgres's ``->>`` do not overlap, and the
+    ``settings.value`` column is TEXT on both engines):
+
+    * ``value`` is the decimal text of ``N = t0_ms * 1_000_000 + count``
+      (``t0_ms`` = window-start epoch ms, ``count`` in [0, 999999]).
+      ``t0_ms`` is recovered as ``N / 1000000``, ``count`` as
+      ``N % 1000000`` — integer division / modulo behave identically in
+      SQLite and Postgres, as do ``substr``, ``length``, ``ABS``,
+      ``CAST(x AS BIGINT)`` / ``CAST(x AS TEXT)`` and ``||``.
+    * A leading ``-`` means THIS statement denied the request: the
+      stored counter is unchanged, only the sign marks the outcome, so
+      the caller can tell admit from deny even when the count equals
+      the limit (``RETURNING`` sees only the new row).
+    * Rows in the pre-fix JSON format (``{"t0": ..., "count": ...}``) or
+      otherwise malformed are denied once and reset to a fresh window
+      with count 0 (negative), so the next call re-admits under the new
+      format. Fail-closed on upgrade, exactly one request per key.
+
+    Bounds: ``limit`` must be in [1, 999999] — the count field is six
+    decimal digits, and a larger limit would carry into the timestamp
+    field. ``limit < 1`` denies (as before); ``limit > 999999`` raises
+    ``ValueError`` instead of silently corrupting the encoding.
+    """
+    if limit < 1:
         return False
-    count += 1
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (setting_key, json.dumps({"t0": t0, "count": count})),
-    )
+    if limit > _DB_COUNT_MODULUS - 1:
+        raise ValueError(f"durable_ratelimit: DB limit {limit} exceeds supported maximum {_DB_COUNT_MODULUS - 1}")
+    setting_key = f"ratelimit.{key}"
+    now_ms = int(time.time() * 1000)
+    window_ms = int(window * 1000)
+    fresh_value = str(now_ms * _DB_COUNT_MODULUS + 1)
+    # Legacy/malformed row: deny this call, reset to a fresh window
+    # with count 0 (negative sign = denied) in the new encoding.
+    legacy_reset_value = "-" + str(now_ms * _DB_COUNT_MODULUS)
+    row = conn.execute(
+        _DB_ALLOW_SQL,
+        (
+            setting_key,
+            fresh_value,
+            now_ms - window_ms,
+            fresh_value,
+            limit,
+            legacy_reset_value,
+        ),
+    ).fetchone()
     conn.commit()
-    return True
+    if row is None:
+        raise RuntimeError("durable_ratelimit: DB allow UPSERT returned no row")
+    new_value = row["value"] if hasattr(row, "keys") else row[0]
+    return not str(new_value).startswith("-")
 
 
 def allow(key: str, limit: int, window: float = 60.0, *, conn: Any | None = None) -> bool:

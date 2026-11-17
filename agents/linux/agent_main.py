@@ -875,20 +875,49 @@ def enroll_cmd(control_url: str, admin_token: str, name: str) -> None:
 # Codebase Self-Update
 # -----------------------------------------------------------------------------
 def update_cmd() -> None:
-    """Pull latest changes from git, update virtualenv, and restart systemd service."""
+    """Update the agent checkout to a SIGNED, pinned release commit.
+
+    Gate 13 (Wave 7): the old unsigned ``git fetch origin main &&
+    git pull --ff-only origin main`` path is deleted. A signed release
+    manifest must be configured (AI_BRIDGE_UPDATE_MANIFEST_PATH /
+    AI_BRIDGE_UPDATE_SIGNATURE_PATH / AI_BRIDGE_UPDATE_PUBLIC_KEY); the
+    Ed25519 signature is verified BEFORE any checkout and exactly the
+    pinned commit is checked out (with rollback on failure — see
+    ai_bridge.updates.apply_pinned_git_update). If no signed release is
+    configured, or verification fails, the update is REFUSED (exit 1)
+    and no unsigned code is pulled: configure a signed release and
+    re-run, or reinstall from scratch.
+    """
     repo_root = Path(__file__).resolve().parents[2]
     log_info(f"Updating AI Bridge repository at {repo_root}...")
 
-    # Git pull (only when running inside a git checkout)
-    if (repo_root / ".git").exists():
-        try:
-            subprocess.run(["git", "fetch", "origin", "main"], cwd=repo_root, check=True)
-            subprocess.run(["git", "pull", "--ff-only", "origin", "main"], cwd=repo_root, check=True)
-            log_ok("Git repository updated cleanly to latest origin/main.")
-        except Exception as exc:
-            log_warn(f"Git update warning: {exc}")
-    else:
+    # Signed update only (only when running inside a git checkout).
+    if not (repo_root / ".git").exists():
         log_info("No .git checkout found; skipping git update.")
+        return
+    try:
+        from ai_bridge import updates
+
+        if not updates.signed_update_configured():
+            raise PermissionError(
+                "Refusing unsigned agent update: a signed release pin is required. "
+                "Set AI_BRIDGE_UPDATE_MANIFEST_PATH, AI_BRIDGE_UPDATE_SIGNATURE_PATH "
+                "and AI_BRIDGE_UPDATE_PUBLIC_KEY to a signed release manifest."
+            )
+        manifest, signature_b64 = updates.load_signed_manifest()
+        public_key_path = Path(os.environ[updates.UPDATE_PUBLIC_KEY_ENV])
+        result = updates.apply_pinned_git_update(
+            repo_root, manifest, signature_b64, public_key_path
+        )
+        log_ok(f"Signed update applied: HEAD is now {result['commit'][:12]}.")
+    except Exception as exc:  # noqa: BLE001 - refusal must never pull unsigned code
+        log_error(f"Signed update refused or failed; no code was pulled: {exc}")
+        log_error(
+            "Configure a signed release (AI_BRIDGE_UPDATE_MANIFEST_PATH, "
+            "AI_BRIDGE_UPDATE_SIGNATURE_PATH, AI_BRIDGE_UPDATE_PUBLIC_KEY) "
+            "and re-run, or reinstall from scratch."
+        )
+        sys.exit(1)
 
     # Virtualenv update
     exec_pip = repo_root / ".venv" / "bin" / "pip"
@@ -1030,7 +1059,7 @@ def main() -> None:
     p_enr.add_argument("--name", default="", help="Device name (defaults to hostname)")
 
     # Subcommand: update
-    subparsers.add_parser("update", help="Update codebase from git and restart service")
+    subparsers.add_parser("update", help="Update codebase to a signed release and restart service")
 
     args = parser.parse_args()
 

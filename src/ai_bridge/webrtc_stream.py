@@ -170,17 +170,30 @@ def generate_ephemeral_turn_credentials(
     turn_host: str | None = None,
     secret: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Generate RFC 5766 / REST API ephemeral TURN credentials using HMAC-SHA1 for symmetric NAT traversal."""
-    turn_secret = secret or os.environ.get("AI_BRIDGE_TURN_SECRET", "").strip()
+    """Generate RFC 5766 / REST API ephemeral TURN credentials using HMAC-SHA1 for symmetric NAT traversal.
+
+    F-04-18 / F13-11: FAIL CLOSED. There is no default shared secret
+    and no default TURN host anywhere in this code path — in ANY
+    profile, not just production. The old non-prod fallback minted
+    credentials with a hard-coded secret for ``jxiptvplayer.app:3478``,
+    so anyone with the source could mint TURN credentials for the
+    default host. Callers must configure ``AI_BRIDGE_TURN_SECRET``
+    (or pass ``secret``) AND ``AI_BRIDGE_TURN_HOST`` (or pass
+    ``turn_host``); otherwise this raises ``RuntimeError`` and the
+    caller falls back to STUN-only (see :func:`get_configured_ice_servers`).
+    """
+    turn_secret = (secret or os.environ.get("AI_BRIDGE_TURN_SECRET", "")).strip()
     if not turn_secret:
-        profile = os.environ.get("AI_BRIDGE_PROFILE", os.environ.get("RENDER", "")).strip().lower()
-        prodish = profile in ("production", "prod", "1", "true") or bool(os.environ.get("RENDER"))
-        if prodish:
-            raise RuntimeError(
-                "AI_BRIDGE_TURN_SECRET must be set in production; refusing default shared secret."
-            )
-        turn_secret = "aibridge_turn_shared_secret_2026"
-    host = turn_host or os.environ.get("AI_BRIDGE_TURN_HOST", "jxiptvplayer.app")
+        raise RuntimeError(
+            "AI_BRIDGE_TURN_SECRET must be set to mint TURN credentials; "
+            "refusing to use a default shared secret."
+        )
+    host = (turn_host or os.environ.get("AI_BRIDGE_TURN_HOST", "")).strip()
+    if not host:
+        raise RuntimeError(
+            "AI_BRIDGE_TURN_HOST must be set to mint TURN credentials; "
+            "refusing to use a default TURN host."
+        )
     expiry = int(time.time()) + ttl_seconds
     username = f"{expiry}:{username_prefix}"
 
@@ -222,7 +235,16 @@ def get_configured_ice_servers() -> list[dict[str, Any]]:
 
     try:
         return generate_ephemeral_turn_credentials()
-    except Exception:
+    except Exception as exc:
+        # F-04-18 / F13-11: no TURN secret/host configured means no
+        # TURN credentials are minted at all — degrade to STUN-only
+        # rather than falling back to a shared default secret. A
+        # deployment that needs TURN must set AI_BRIDGE_TURN_SECRET +
+        # AI_BRIDGE_TURN_HOST (or AI_BRIDGE_TURN_URL / AI_BRIDGE_ICE_SERVERS).
+        logger.warning(
+            "TURN credentials unavailable (%s); returning STUN-only ICE servers",
+            exc,
+        )
         return list(DEFAULT_ICE_SERVERS)
 
 

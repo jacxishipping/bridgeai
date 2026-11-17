@@ -43,6 +43,18 @@ from typing import Any
 
 from .policy_simulation import is_demo_mode as _is_demo_mode
 
+# P-12 (Wave 7): the ONE canonical default control-plane URL for every
+# user-facing path (SDK, shell installer, Windows wizard). This is the
+# production host. The shell installer (magic-install.sh) and the
+# Windows wizard (deployment/windows/installer_gui.py) mirror this
+# value as a literal — bash and the frozen onefile installer cannot
+# import this module at install time — and
+# tests/unit/test_deployment_config.py locks all three to the same
+# value. localhost is NOT a default anywhere user-facing: it is only
+# reachable as an explicit dev override (explicit base_url argument,
+# or the AI_BRIDGE_URL / AI_BRIDGE_CONTROL_URL env vars).
+DEFAULT_CONTROL_URL = "https://jxiptvplayer.app"
+
 # ---------------------------------------------------------------------------
 # FR-03 — task result projection (list path returns metadata, not full text)
 # ---------------------------------------------------------------------------
@@ -147,7 +159,11 @@ class AIBridgeClient:
 
         Args:
             base_url: Control plane URL (e.g. 'https://jxiptvplayer.app' or 'http://localhost:8000').
-                      Defaults to AI_BRIDGE_URL or AI_BRIDGE_CONTROL_URL or http://127.0.0.1:8000.
+                      Defaults to AI_BRIDGE_URL or AI_BRIDGE_CONTROL_URL or
+                      DEFAULT_CONTROL_URL ('https://jxiptvplayer.app', P-12).
+                      Localhost is an explicit dev override only — pass it
+                      as base_url or set one of those env vars; it is never
+                      the silent default.
             token: Admin token, user session token, or OAuth bearer token.
                    Defaults to AI_BRIDGE_TOKEN_FILE (0600 file, read-only),
                    then AI_BRIDGE_ADMIN_TOKEN or AI_BRIDGE_TOKEN.
@@ -163,7 +179,7 @@ class AIBridgeClient:
             base_url
             or os.environ.get("AI_BRIDGE_URL")
             or os.environ.get("AI_BRIDGE_CONTROL_URL")
-            or "http://127.0.0.1:8000"
+            or DEFAULT_CONTROL_URL
         )
         self.base_url = raw_url.rstrip("/")
         self.token = token or self._load_token_from_env_or_file()

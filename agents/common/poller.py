@@ -44,6 +44,18 @@ from .spool import TaskSpooler
 MAX_RESULT_CHARS = 512_000
 ROTATE_THRESHOLD_SECONDS = 2 * 86400  # Rotate when < 48h remaining
 
+# PERF-08 (Wave 7): the cancel poller used to GET `execution-state`
+# every 0.5 s per running task (2 req/s/task) AND every `_cancelled()`
+# call — invoked by the task runtime on every cooperative-cancel check —
+# cost a further HTTP round-trip each. The WS side-channel already
+# delivers `cancel` / `emergency_stop` messages, so cancellation is now
+# WS-driven when the channel is connected and HTTP is only a fallback:
+# at most one `execution-state` GET per CANCEL_POLL_INTERVAL_S, and no
+# HTTP at all while the WS is up. Worst-case cancel latency is therefore
+# ~instant on WS, and one poll interval (default 5 s) with the WS down —
+# the price of the 10x request reduction in the degraded path.
+CANCEL_POLL_INTERVAL_S = 5.0
+
 # Operators sometimes paste the static dashboard URL; agents must hit the control plane API.
 _DASHBOARD_TO_CONTROL = {
     "https://ai-bridge-dashboard.onrender.com": "https://ai-bridge-control.onrender.com",
@@ -245,6 +257,7 @@ class Poller:
         heartbeat_interval: float = 30.0,
         drain_timeout: float = 60.0,
         progress_interval: float = 60.0,
+        cancel_poll_interval: float = CANCEL_POLL_INTERVAL_S,
     ):
         self.control_url = normalize_control_url(control_url)
         self.device_token = device_token
@@ -272,6 +285,16 @@ class Poller:
         self._ws_connected = threading.Event()
         self._ws_stop = threading.Event()
         self._active_cancel_event: threading.Event | None = None
+        # PERF-08: throttled fallback cancel checks. `_last_cancel_state`
+        # is the cached result of the most recent `execution-state` GET;
+        # `_last_cancel_check_at` (monotonic) gates re-checks to at most
+        # one per `cancel_poll_interval`. Both are reset at every task
+        # claim — a cached "cancelled" from a previous task must never
+        # leak into the next one.
+        self.cancel_poll_interval = float(cancel_poll_interval)
+        self._cancel_check_lock = threading.Lock()
+        self._last_cancel_check_at = 0.0
+        self._last_cancel_state = False
         self._ws_thread: threading.Thread | None = None
         # --- Wave 3C reliability state (F07-09/F07-10/F07-12, DIST-08) ---
         # Graceful shutdown: set by request_shutdown() (signal handlers);
@@ -670,8 +693,10 @@ class Poller:
         tolerated gracefully — logged once, the endpoint is marked missing
         for the rest of this run, and the agent keeps running. (Until the
         server side lands, progress is still recorded implicitly: the
-        cancel-poller GETs ``execution-state`` every 0.5 s during a task,
-        and the plane's handler bumps the task row on each call.)
+        heartbeat loop's progress reports (DIST-08, default every 60 s)
+        bump the task row, and the throttled `execution-state` fallback
+        poll (PERF-08, default every 5 s, WS-down only) bumps it on each
+        check via the plane's `record_task_progress`.)
         Returns True when the plane accepted the report.
         """
         if self._progress_endpoint_missing:
@@ -839,12 +864,30 @@ class Poller:
         task_id = task["id"]
         cancel_stop = threading.Event()
         self._active_cancel_event = cancel_stop
+        # PERF-08: fresh cancel-check cache for this task (see the
+        # constructor comment — a stale "cancelled" must never leak
+        # from the previous task into this one).
+        with self._cancel_check_lock:
+            self._last_cancel_check_at = 0.0
+            self._last_cancel_state = False
         with self._ws_cancel_lock:
             if self._ws_cancel_task_id == task_id:
                 cancel_stop.set()
                 self._ws_cancel_task_id = None
 
         def _cancelled() -> bool:
+            """True when the plane cancelled/timed-out this task.
+
+            PERF-08: cancellation is WS-driven when the side-channel is
+            connected — a `cancel` / `emergency_stop` WS message sets
+            `cancel_stop` (via `_handle_ws_message`) with no HTTP at
+            all. Only when the WS is down does this fall back to polling
+            `execution-state`, throttled to at most one GET per
+            `cancel_poll_interval` no matter how often the task runtime
+            calls this predicate (previously every call was a round-trip).
+            The emergency-stop mirror is refreshed by the fallback fetch
+            and, on the WS path, by WS messages and the heartbeat.
+            """
             if cancel_stop.is_set():
                 return True
             with self._ws_cancel_lock:
@@ -852,22 +895,41 @@ class Poller:
                     cancel_stop.set()
                     self._ws_cancel_task_id = None
                     return True
+            if self._ws_connected.is_set():
+                return False
+            now = time.monotonic()
+            with self._cancel_check_lock:
+                if now - self._last_cancel_check_at < self.cancel_poll_interval:
+                    return self._last_cancel_state
+                self._last_cancel_check_at = now
             try:
                 st = self._req("GET", f"/api/agent/tasks/{task_id}/execution-state", timeout=8)
                 if st.get("emergency_stop"):
                     set_emergency_stop(True)
-                    return True
-                set_emergency_stop(bool(st.get("emergency_stop")))
-                return str(st.get("status") or "") in {"cancelled", "timed_out"}
+                    cancelled = True
+                else:
+                    set_emergency_stop(bool(st.get("emergency_stop")))
+                    cancelled = str(st.get("status") or "") in {"cancelled", "timed_out"}
             except Exception:
-                return False
+                return self._last_cancel_state
+            with self._cancel_check_lock:
+                self._last_cancel_state = cancelled
+            return cancelled
 
         def _cancel_poller() -> None:
+            # PERF-08: was `time.sleep(0.5)` + an HTTP GET per cycle
+            # (2 req/s per running task). Now the thread blocks on
+            # `cancel_stop` for up to `cancel_poll_interval`: a WS
+            # cancel wakes it instantly (the event is set by
+            # `_handle_ws_message`), and without a WS the next
+            # `_cancelled()` call is the throttled fallback fetch.
+            # Worst-case cancel latency is therefore ~instant on WS and
+            # one poll interval with the WS down.
             while not cancel_stop.is_set():
                 if _cancelled():
                     cancel_stop.set()
                     return
-                time.sleep(0.5)
+                cancel_stop.wait(timeout=self.cancel_poll_interval)
 
         poll_thread = threading.Thread(target=_cancel_poller, daemon=True)
         set_execution_context(task_id, _cancelled, device_id=str(task.get("device_id") or ""))

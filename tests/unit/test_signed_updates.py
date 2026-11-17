@@ -42,6 +42,10 @@ def _make_repo(tmp_path: Path) -> tuple[Path, str, str]:
     repo = tmp_path / "repo"
     repo.mkdir()
     assert _git(repo, "init", "-b", "main").returncode == 0
+    # Gate 13 (Wave 7): update_fleet_agent() only updates directories that
+    # provably are AI Bridge checkouts (.git + pyproject.toml named
+    # ai-bridge), so the scratch repos must look like real checkouts.
+    (repo / "pyproject.toml").write_text('[project]\nname = "ai-bridge"\nversion = "0.3.0"\n')
     (repo / "a.txt").write_text("one\n")
     assert _git(repo, "add", ".").returncode == 0
     assert _git(repo, "commit", "-m", "first").returncode == 0
@@ -158,6 +162,51 @@ def test_short_commit_refused(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="40-hex"):
         updates.apply_pinned_git_update(repo, manifest, sig_path.read_text().strip(), pub)
     assert _head(repo) == sha1
+
+
+# --- Gate 13 (Wave 7): repo_dir resolution must never silently use an
+# arbitrary process working directory. ---
+
+
+def test_non_checkout_repo_dir_refused(tmp_path, monkeypatch):
+    repo, sha1, sha2 = _make_repo(tmp_path)
+    assert _git(repo, "checkout", "-f", sha1).returncode == 0
+    manifest = {"name": "ai-bridge", "version": "0.3.0", "commit": sha2, "files": []}
+    manifest_path, sig_path, pub = _write_signed(tmp_path, manifest)
+    _configure(monkeypatch, tmp_path, manifest_path, sig_path, pub)
+    # A git repo that is NOT an ai-bridge checkout (no pyproject.toml).
+    other = tmp_path / "other"
+    other.mkdir()
+    assert _git(other, "init", "-b", "main").returncode == 0
+    (other / "a.txt").write_text("x\n")
+    assert _git(other, "add", ".").returncode == 0
+    assert _git(other, "commit", "-m", "x").returncode == 0
+    with pytest.raises(ValueError, match="not an AI Bridge checkout"):
+        tools.update_fleet_agent(approval_granted=True, policy=POLICY, repo_dir=other)
+    assert _head(repo) == sha1
+
+
+def test_repo_dir_from_env_var(tmp_path, monkeypatch):
+    repo, sha1, sha2 = _make_repo(tmp_path)
+    assert _git(repo, "checkout", "-f", sha1).returncode == 0
+    manifest = {"name": "ai-bridge", "version": "0.3.0", "commit": sha2, "files": []}
+    manifest_path, sig_path, pub = _write_signed(tmp_path, manifest)
+    _configure(monkeypatch, tmp_path, manifest_path, sig_path, pub)
+    monkeypatch.setenv("AI_BRIDGE_AGENT_REPO_DIR", str(repo))
+    result = tools.update_fleet_agent(approval_granted=True, policy=POLICY)
+    assert result["ok"] is True
+    assert _head(repo) == sha2
+
+
+def test_cwd_fallback_refused_when_not_a_checkout(tmp_path, monkeypatch):
+    repo, sha1, sha2 = _make_repo(tmp_path)
+    manifest = {"name": "ai-bridge", "version": "0.3.0", "commit": sha2, "files": []}
+    manifest_path, sig_path, pub = _write_signed(tmp_path, manifest)
+    _configure(monkeypatch, tmp_path, manifest_path, sig_path, pub)
+    monkeypatch.delenv("AI_BRIDGE_AGENT_REPO_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)  # not a checkout: no .git / pyproject.toml
+    with pytest.raises(ValueError, match="not an AI Bridge checkout"):
+        tools.update_fleet_agent(approval_granted=True, policy=POLICY, repo_dir=None)
 
 
 def test_child_env_contains_only_allowlist(monkeypatch):

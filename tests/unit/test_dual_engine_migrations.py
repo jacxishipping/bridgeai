@@ -75,6 +75,20 @@ def test_to_pg_sql_translation():
     assert "import re\n" not in module_src
 
 
+def test_to_pg_sql_ratelimit_atomic_upsert():
+    """F-05-08: the single-statement DB rate-limit UPSERT must survive
+    to_pg_sql — six placeholders, the ``%`` modulo escaped as ``%%``
+    (psycopg collapses it back), ON CONFLICT + RETURNING intact."""
+    from ai_bridge.control.durable_ratelimit import _DB_ALLOW_SQL
+
+    pg = dbmod.to_pg_sql(_DB_ALLOW_SQL)
+    assert pg.count("%s") == 6
+    assert "%%" in pg
+    assert "ON CONFLICT(key)" in pg
+    assert "RETURNING value" in pg
+    assert "?" not in pg
+
+
 def test_row_dict_access():
     rd = dbmod.RowDict({"id": "d-123", "name": "srv-prod"}, ["id", "name"])
     # By name

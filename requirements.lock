@@ -1,0 +1,73 @@
+# requirements.lock — pinned dependency tree for AI Bridge 0.3.0.
+#
+# HOW THIS FILE WAS GENERATED (read before regenerating):
+#   pip-tools is NOT installed in the repo venv (`python -m piptools`
+#   -> "No module named piptools", 2026-11-17), so `pip-compile` was
+#   unavailable. This file was therefore generated with the fallback the
+#   P-07 fix prescribes:
+#       .venv/bin/python -m pip freeze > requirements.lock
+#   on 2026-11-17T20:14:40Z, from the repo venv (.venv) that runs the
+#   test suite. It pins the exact tree that tree was tested against,
+#   INCLUDING dev/test packages (pytest, ruff, Pillow) — it is a
+#   reproducibility record of the tested environment, not a minimal
+#   production install set.
+#
+# KNOWN GAPS (do not mistake this file for a complete production lock):
+#   - No per-artifact hashes: `pip freeze` emits no hashes. A hashed
+#     lock (`pip-compile --generate-hashes`) still requires pip-tools.
+#   - gunicorn and prometheus-client are NOT in this file: neither is
+#     installed in the repo venv (the Docker image installs them at
+#     build time). They are pinned exactly in pyproject.toml
+#     [project.optional-dependencies] `prod` instead.
+#   - The editable `-e .` line above was an absolute local path in the
+#     raw freeze output; it is normalised here so the file is portable.
+#
+# REGENERATE with: .venv/bin/python -m pip freeze (then re-apply this
+# header and the `-e .` normalisation), or preferably with
+# `pip-compile --generate-hashes pyproject.toml` once pip-tools is
+# available, which supersedes this file.
+-e .  # local editable install of ai-bridge itself (was an absolute path in the raw freeze)
+annotated-doc==0.0.6
+annotated-types==0.8.0
+anyio==4.16.0
+attrs==26.1.0
+bcrypt==5.0.0
+certifi==2026.10.23
+cffi==2.1.1
+click==8.5.1
+cryptography==50.0.2
+fastapi==0.163.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+httpx-sse==0.4.3
+idna==3.20
+iniconfig==2.3.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==1.30.0
+opentelemetry-api==1.45.2
+packaging==26.3
+pluggy==1.7.0
+psutil==7.2.2
+psycopg==3.3.9
+psycopg-binary==3.3.9
+pycparser==3.12
+pydantic==2.14.3
+pydantic-settings==2.16.3
+pydantic_core==2.50.4
+Pygments==2.21.0
+PyJWT==2.15.1
+pytest==9.2.0
+python-dotenv==1.2.4
+python-multipart==0.0.34
+redis==8.1.0
+referencing==0.37.0
+rpds-py==2026.9.1
+ruff==0.17.5
+sse-starlette==3.7.0
+starlette==1.10.0
+typing-inspection==0.4.5
+typing_extensions==4.16.0
+uvicorn==0.54.0
+websockets==15.0.1

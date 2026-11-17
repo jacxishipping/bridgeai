@@ -801,9 +801,30 @@ cmd_rotate_token() {
 
 cmd_update() {
     log_header "Updating AI Bridge Agent"
-    log_info "Fetching latest code from Git..."
+    # Gate 13 (Wave 7): signed updates only — the old bare `git pull` is
+    # deleted. A signed release manifest must be configured
+    # (AI_BRIDGE_UPDATE_MANIFEST_PATH / AI_BRIDGE_UPDATE_SIGNATURE_PATH /
+    # AI_BRIDGE_UPDATE_PUBLIC_KEY); ai_bridge.updates verifies the Ed25519
+    # signature BEFORE any checkout and checks out exactly the pinned
+    # commit (with rollback on failure). If the signed update is not
+    # configured, or the helper cannot run, the update is REFUSED —
+    # re-run with a signed release configured, or reinstall from scratch.
+    log_info "Applying a signed update..."
     cd "$REPO_ROOT"
-    git pull
+    if [ ! -x "$PYTHON_BIN" ]; then
+        log_error "Refusing unsigned update: no venv Python at $PYTHON_BIN, so the signed-update helper cannot run."
+        log_error "Re-install from scratch, or restore $REPO_ROOT/.venv, and configure a signed release (AI_BRIDGE_UPDATE_MANIFEST_PATH, AI_BRIDGE_UPDATE_SIGNATURE_PATH, AI_BRIDGE_UPDATE_PUBLIC_KEY)."
+        exit 1
+    fi
+    PYTHONPATH="$REPO_ROOT/src" "$PYTHON_BIN" - <<'PYEOF' || { log_error "Signed update failed or was refused; $REPO_ROOT left unchanged."; exit 1; }
+import os
+from pathlib import Path
+from ai_bridge.updates import apply_pinned_git_update, load_signed_manifest
+manifest, signature = load_signed_manifest()  # verifies Ed25519 signature first
+public_key = Path(os.environ["AI_BRIDGE_UPDATE_PUBLIC_KEY"])
+result = apply_pinned_git_update(Path.cwd(), manifest, signature, public_key)
+print(f"Signed update applied: HEAD={result['commit']} (was {result['previous_commit']}); rollback: {result['rollback_file']}")
+PYEOF
 
     log_info "Updating Python dependencies..."
     ensure_dependencies

@@ -295,9 +295,30 @@ if ((Test-Path "$CurrentDir\pyproject.toml") -and (Test-Path "$CurrentDir\src\ai
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     git clone "https://github.com/jacxishipping/ai-bridge.git" $InstallDir
 } else {
+    # Signed updates only (gate 13, Wave 7): a re-run NEVER does an
+    # unsigned `git fetch origin main` / `git reset --hard origin/main`.
+    # A release is a signed manifest configured via
+    # AI_BRIDGE_UPDATE_MANIFEST_PATH, AI_BRIDGE_UPDATE_SIGNATURE_PATH
+    # and AI_BRIDGE_UPDATE_PUBLIC_KEY; ai_bridge.updates verifies the
+    # Ed25519 signature BEFORE any checkout and checks out exactly the
+    # pinned commit (with rollback on failure). If the signed update is
+    # not configured, or the helper cannot run (no venv Python / missing
+    # cryptography), the re-run REFUSES to update rather than applying
+    # unsigned code — re-install from scratch or configure a release.
+    Write-Host "[PROVISION] Existing install found. Applying a signed update..." -ForegroundColor Cyan
     Set-Location $InstallDir
-    git fetch origin main 2>$null
-    git reset --hard origin/main 2>$null
+    $ExistingVenvPython = Join-Path $InstallDir ".venv\Scripts\python.exe"
+    if (-not (Test-Path $ExistingVenvPython)) {
+        Write-Host "[ERROR] Refusing unsigned re-run: no installed venv Python at $ExistingVenvPython, so the signed-update helper cannot run." -ForegroundColor Red
+        Write-Host "[ERROR] Re-install from scratch, or restore $InstallDir\.venv, and configure a signed release (AI_BRIDGE_UPDATE_MANIFEST_PATH, AI_BRIDGE_UPDATE_SIGNATURE_PATH, AI_BRIDGE_UPDATE_PUBLIC_KEY)." -ForegroundColor Red
+        exit 1
+    }
+    $env:PYTHONPATH = "$InstallDir\src"
+    & $ExistingVenvPython -c 'import os; from pathlib import Path; from ai_bridge.updates import apply_pinned_git_update, load_signed_manifest; manifest, signature = load_signed_manifest(); result = apply_pinned_git_update(Path.cwd(), manifest, signature, Path(os.environ["AI_BRIDGE_UPDATE_PUBLIC_KEY"])); print("Signed update applied: HEAD=" + result["commit"] + " (was " + result["previous_commit"] + ")")'
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] Signed update failed or was refused; $InstallDir left unchanged." -ForegroundColor Red
+        exit 1
+    }
 }
 
 Set-Location $InstallDir

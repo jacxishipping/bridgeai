@@ -23,6 +23,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# P-07 (Wave 7): production-only runtime deps, pinned exactly. These
+# used to be installed unpinned in deployment/docker/Dockerfile.prod
+# (`gunicorn`, `psycopg[binary]>=3.2`, `prometheus-client>=0.20`),
+# outside this file. Pins: psycopg[binary]==3.3.9 is the version
+# installed and tested in the repo venv (see requirements.lock);
+# gunicorn==23.0.0 / prometheus-client==0.21.0 are conservative
+# long-stable pins — the latest on PyPI when pinned (2026-11-17) were
+# 27.0.1 / 0.26.0, but neither package is installed in the repo venv
+# and the Docker image cannot be built in this VM, so the newest
+# majors were NOT adopted untested. Bump only with a Docker build.
+prod = ["gunicorn==23.0.0", "psycopg[binary]==3.3.9", "prometheus-client==0.21.0"]
 dev = ["pytest>=8.0", "ruff>=0.4", "Pillow>=10.0"]
 desktop = ["Pillow>=10.0"]
 webrtc = ["aiortc>=1.8", "av>=11.0", "Pillow>=10.0", "soundcard>=0.4.2", "numpy>=1.24"]

@@ -123,6 +123,55 @@ def capture_desktop_frame(
     }
 
 
+def _looks_like_ai_bridge_checkout(repo: Path) -> bool:
+    """True only if ``repo`` provably is an AI Bridge checkout.
+
+    Gate 13 (Wave 7): the update target must never be an arbitrary
+    directory that merely happens to be the process working directory.
+    A checkout must contain ``.git`` (the update runs git fetch/checkout)
+    and a ``pyproject.toml`` declaring ``[project] name = "ai-bridge"``.
+    """
+    if not (repo / ".git").exists():
+        return False
+    pyproject = repo / "pyproject.toml"
+    if not pyproject.is_file():
+        return False
+    try:
+        import tomllib
+
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - any unreadable/invalid pyproject fails closed
+        return False
+    return isinstance(data.get("project"), dict) and data["project"].get("name") == "ai-bridge"
+
+
+def _resolve_update_repo_dir(repo_dir: str | Path | None) -> Path:
+    """Resolve the fleet-update target directory (gate 13, Wave 7).
+
+    Precedence: explicit ``repo_dir`` argument, then the
+    ``AI_BRIDGE_AGENT_REPO_DIR`` environment variable (set to ``/app`` by
+    both Docker images), then the process working directory — but only if
+    the cwd provably is an AI Bridge checkout. Anything else fails closed
+    with ValueError instead of checking a pinned commit out into an
+    unrelated directory. The previous behaviour (silent ``Path.cwd()``
+    fallback) is gone.
+    """
+    if repo_dir is not None:
+        resolved = Path(repo_dir)
+    elif os.environ.get("AI_BRIDGE_AGENT_REPO_DIR"):
+        resolved = Path(os.environ["AI_BRIDGE_AGENT_REPO_DIR"])
+    else:
+        resolved = Path.cwd()
+    if not _looks_like_ai_bridge_checkout(resolved):
+        raise ValueError(
+            "Refusing fleet update: repo_dir is not an AI Bridge checkout "
+            f"({resolved}): expected .git plus a pyproject.toml declaring "
+            '[project] name = "ai-bridge". Pass repo_dir explicitly or set '
+            "AI_BRIDGE_AGENT_REPO_DIR to the agent checkout directory."
+        )
+    return resolved
+
+
 def update_fleet_agent(
     *,
     approval_granted: bool = False,
@@ -137,9 +186,10 @@ def update_fleet_agent(
     ``AI_BRIDGE_UPDATE_MANIFEST_PATH`` / ``AI_BRIDGE_UPDATE_SIGNATURE_PATH``
     / ``AI_BRIDGE_UPDATE_PUBLIC_KEY`` (see ``ai_bridge.updates``). If the
     signed update is not configured this fails closed with PermissionError
-    and performs NO checkout. ``repo_dir`` defaults to the current working
-    directory (the checkout root); the control plane passes it explicitly
-    when the repo lives elsewhere.
+    and performs NO checkout. ``repo_dir`` resolves as explicit argument,
+    then ``AI_BRIDGE_AGENT_REPO_DIR``, then the process working directory
+    only if it provably is an AI Bridge checkout (Wave 7, gate 13); an
+    unrelated directory is refused instead of being silently updated.
     """
     eff_policy = policy or default_policy()
     _check("update_fleet_agent", approval_granted=approval_granted, policy=eff_policy)
@@ -155,7 +205,7 @@ def update_fleet_agent(
     manifest, signature_b64 = updates.load_signed_manifest()
     public_key_path = Path(os.environ[updates.UPDATE_PUBLIC_KEY_ENV])
     result = updates.apply_pinned_git_update(
-        Path(repo_dir) if repo_dir else Path.cwd(),
+        _resolve_update_repo_dir(repo_dir),
         manifest, signature_b64, public_key_path,
     )
     return {

@@ -1,9 +1,10 @@
-# AI Bridge - Locked dependencies
-# Generated from pyproject.toml. Update with: pip-compile pyproject.toml
-# or: pip freeze > requirements.txt
-#
-# Install the local package (not published to PyPI). Render and other hosts
-# that run `pip install -r requirements.txt` need this editable install.
+# AI Bridge - runtime dependencies (loose lower bounds, mirrors pyproject.toml).
+# P-07 (Wave 7): this file is NOT a lockfile despite its old header
+# claiming so — the pinned tree is requirements.lock (generated from
+# `pip freeze` of the tested repo venv; see its header for method and
+# gaps). Install the local package (not published to PyPI). Render and
+# other hosts that run `pip install -r requirements.txt` need this
+# editable install.
 -e .
 mcp>=1.6.0,<2.0.0
 fastapi>=0.110

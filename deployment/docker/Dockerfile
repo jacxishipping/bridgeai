@@ -10,6 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && apt-get update && apt-get install -y --no-install-recommends postgresql-client-18 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+# Gate 13 (Wave 7): the fleet self-update target. update_fleet_agent()
+# resolves repo_dir as explicit arg -> AI_BRIDGE_AGENT_REPO_DIR -> the
+# process cwd, but only if the cwd provably is an AI Bridge checkout
+# (pyproject.toml named ai-bridge + .git); an explicit, deterministic
+# value here keeps the Docker image independent of the worker's cwd.
+ENV AI_BRIDGE_AGENT_REPO_DIR=/app
 COPY pyproject.toml README.md ./
 COPY src ./src
 # The control plane embeds the OAuth gateway on PaaS (combined.py loads

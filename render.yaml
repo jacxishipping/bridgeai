@@ -4,6 +4,41 @@
 # Render dashboard (marked sync: false, so it is never in this file).
 # Postgres is provisioned below and wired via fromDatabase. Override
 # DATABASE_URL in the dashboard only if you use an external Timescale URL.
+#
+# Env matrix (P-15, Wave 7): the control-plane env keys below are aligned
+# with docker-compose.prod.yml `control-api`. Shared core keys (present in
+# both, same meaning): DATABASE_URL, REDIS_URL, AI_BRIDGE_ADMIN_TOKEN,
+# AI_BRIDGE_CSRF_SECRET, AI_BRIDGE_PUBLIC_URL, AI_BRIDGE_PUBLIC_BASE_URL,
+# AI_BRIDGE_OIDC_ISSUER / _CLIENT_ID / _CLIENT_SECRET / _REDIRECT_URI /
+# _DASHBOARD_URL, AI_BRIDGE_ALLOW_TIER3, AI_BRIDGE_DEVICE_TOKEN_TTL_DAYS,
+# AI_BRIDGE_CORS_ORIGINS, AI_BRIDGE_DASHBOARD_URL, AI_BRIDGE_PROFILE.
+# Intentional differences (not drift — do not "fix" by copying blindly):
+#   - AI_BRIDGE_EMBED_MCP=1 (Render only): Render runs one combined
+#     service, so the MCP server is embedded; compose runs a separate
+#     mcp-http service instead.
+#   - AI_BRIDGE_MCP_HOST / AI_BRIDGE_OAUTH_HOST, AI_BRIDGE_DATA_DIR /
+#     AI_BRIDGE_WORKSPACE / AI_BRIDGE_OAUTH_DB (compose only): inter-service
+#     hostnames and container paths; meaningless on Render.
+#   - AI_BRIDGE_OAUTH_ISSUER lives on the Render control service, but on
+#     the compose oauth-gateway service: same value, different home —
+#     on Render the gateway is embedded in the control service.
+#   - SLACK_WEBHOOK_URL / DISCORD_WEBHOOK_URL / ALERT_WEBHOOK_URL
+#     (compose only, empty by default): not set on Render — alerts off.
+#   - REDIS_URL (Render: sync: false): the staging Redis is a separately
+#     provisioned managed Key Value instance; the operator supplies its
+#     URL. Compose wires its bundled redis service.
+#   - PYTHONUNBUFFERED / PYTHON_VERSION (Render only): Dockerfile.prod
+#     already sets PYTHONUNBUFFERED=1 in the image; PYTHON_VERSION
+#     selects the Render native runtime.
+#   - AI_BRIDGE_WORKERS: Dockerfile.prod fixes 4 workers (compose path);
+#     Render runs `python -m ai_bridge.control` single-process — scale by
+#     adding Render instances, not workers, on this blueprint.
+# Topology note (P-15 basis corrected, Wave 7): the LIVE staging plane is
+# NOT this blueprint's free-tier shape — since 17 Nov 2026 it runs 4x
+# Starter instances WITH managed Redis. This file still provisions free
+# defaults for a fresh test deployment; the production topology (separate
+# MCP/gateway, TURN, multi-instance) remains an open deployment decision
+# and is NOT claimed by this blueprint.
 databases:
   - name: ai-bridge-db
     plan: basic-256mb
@@ -35,6 +70,12 @@ services:
         fromDatabase:
           name: ai-bridge-db
           property: connectionString
+      # P-15 (Wave 7): compose control-api also sets REDIS_URL (its bundled
+      # redis service). On Render the value is supplied by the operator
+      # (sync: false) — the staging Redis is a separately provisioned
+      # managed Key Value instance, not a blueprint resource.
+      - key: REDIS_URL
+        sync: false
       - key: AI_BRIDGE_PUBLIC_URL
         value: "https://ai-bridge-control.onrender.com"
       # Alias also accepted as AI_BRIDGE_PUBLIC_BASE_URL (same resolution order).
@@ -44,6 +85,21 @@ services:
         value: "https://ai-bridge-control.onrender.com"
       - key: AI_BRIDGE_OAUTH_ISSUER
         value: "https://ai-bridge-control.onrender.com"
+      # P-15 (Wave 7): OIDC login keys, matching docker-compose.prod.yml
+      # control-api (same names, same meaning). The client id/secret are
+      # operator-supplied (sync: false — never a literal in this file);
+      # the issuer/redirect/dashboard URLs default to this service's
+      # public origin, as the compose file defaults them to the domain.
+      - key: AI_BRIDGE_OIDC_ISSUER
+        value: "https://ai-bridge-control.onrender.com"
+      - key: AI_BRIDGE_OIDC_CLIENT_ID
+        sync: false
+      - key: AI_BRIDGE_OIDC_CLIENT_SECRET
+        sync: false
+      - key: AI_BRIDGE_OIDC_REDIRECT_URI
+        value: "https://ai-bridge-control.onrender.com/api/auth/oidc/callback"
+      - key: AI_BRIDGE_OIDC_DASHBOARD_URL
+        value: "https://ai-bridge-dashboard.onrender.com"
       - key: AI_BRIDGE_CONTROL_URL
         value: "https://ai-bridge-control.onrender.com"
       - key: AI_BRIDGE_EMBED_MCP
@@ -67,7 +123,9 @@ services:
   - type: web
     name: ai-bridge-dashboard
     runtime: static
-    buildCommand: cd apps/dashboard && npm install && npm run build
+    # P-07 (Wave 7): `npm ci` (exact lockfile install), not `npm install` —
+    # apps/dashboard/package-lock.json exists (lockfileVersion 3).
+    buildCommand: cd apps/dashboard && npm ci && npm run build
     staticPublishPath: ./apps/dashboard/dist
     routes:
       - type: rewrite

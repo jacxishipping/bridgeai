@@ -62,3 +62,31 @@ by deleting the connection in Copilot Studio.
 Written from Microsoft's documented MCP onboarding flow. **Not yet tested
 against a live Copilot Studio tenant**; the Copilot Studio UI labels may
 differ slightly.
+
+What *has* been verified (server side only — Wave 7, 17 Nov 2026;
+`deployment/copilot_smoke_check.py`, non-mutating: no credentials sent,
+no client registered):
+
+- Against the public host `https://jxiptvplayer.app`: **9/9 checks passed**
+  (exit 0) — HTTPS, protected-resource + authorization-server metadata,
+  PKCE S256, dynamic client registration advertised, all OAuth endpoints
+  public HTTPS, issuer matches the host, registration rejects an insecure
+  (`http://`) redirect URI, and `/mcp` refuses unauthenticated access
+  (HTTP 401).
+- Against the staging plane `https://ai-bridge-staging-plane.onrender.com`:
+  **8/9 checks passed** (exit 1). The single failure is a staging-config
+  artifact, not a Copilot defect: the staging gateway was deployed with
+  `AI_BRIDGE_OAUTH_ISSUER=https://jxiptvplayer.app`, so its metadata
+  (issuer, authorization/token/registration endpoints, protected resource)
+  names the production host instead of the staging host. Note the
+  registration-rejection check in that run therefore exercised the
+  production gateway, not staging.
+
+What still needs a live Copilot Studio tenant (impossible to verify from
+here — no tenant access): adding the MCP tool in Copilot Studio
+(Dynamic discovery OAuth), creating the connection through the gateway's
+approval page, device binding of that connection, publishing the agent to
+Microsoft 365 Copilot, and an end-to-end tool call (e.g. `system_info`)
+returning through Copilot. Until that is done, this row stays partial:
+the server side a tenant would talk to is verified, the tenant side is
+not.

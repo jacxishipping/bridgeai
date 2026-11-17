@@ -373,7 +373,10 @@ def test_progress_heartbeat_prevents_requeue_while_running(conn):
     _seed_task(conn, "t2", updated_at=old)
     assert orchestration.record_task_progress(conn, "t1") is True
     assert orchestration.record_task_progress(conn, "missing") is False
-    result = orchestration.sweep_stale_running_tasks(conn, lease_sec=900)
+    # F-05-09: the sweeper default is now requeue OFF; this test
+    # exercises the opt-in path explicitly (the heartbeat protection
+    # itself is unchanged — t1 stays running, silent t2 is reclaimed).
+    result = orchestration.sweep_stale_running_tasks(conn, lease_sec=900, requeue=True)
     assert result == {"timed_out": 0, "requeued": 1, "scanned": 1}
     assert conn.execute("SELECT status FROM tasks WHERE id='t1'").fetchone()[0] == "running"
     assert conn.execute("SELECT status FROM tasks WHERE id='t2'").fetchone()[0] == "queued"

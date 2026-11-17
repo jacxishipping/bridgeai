@@ -27,6 +27,10 @@ set -eo pipefail
 MAGIC_VERSION="2.0.0"
 REPO_URL="https://github.com/jacxishipping/ai-bridge.git"
 DEFAULT_INSTALL_DIR="/opt/ai-bridge"
+# P-12 (Wave 7): canonical default — MUST match
+# ai_bridge.client.DEFAULT_CONTROL_URL and the Windows wizard's
+# DEFAULT_CONTROL_URL; tests/unit/test_deployment_config.py locks all
+# three to the same value.
 DEFAULT_CONTROL_URL="https://jxiptvplayer.app"
 CONFIG_DIR="/etc/ai-bridge"
 CONFIG_FILE="$CONFIG_DIR/agent.env"

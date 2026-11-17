@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from ai_bridge import browser_tools, native_encode, tools, webrtc_stream
+from ai_bridge.control import db as dbmod
 from ai_bridge.control import dispatch, durable_ratelimit, plane_state
 from ai_bridge.control import metrics as metricsmod
 from ai_bridge.control.app import create_app
@@ -220,3 +222,72 @@ def test_streamer_attaches_silent_audio_when_opted_in(monkeypatch):
     pc.addTrack.assert_called_once_with(fake_track)
     assert signaling.session.get("audio_enabled") is True
     assert fake_track._silent_bytes == b"\x00" * len(fake_track._silent_bytes)
+
+
+def test_durable_ratelimit_db_atomic_concurrent(tmp_path):
+    """F-05-08: concurrent writers on separate connections (one per
+    worker) can never admit over the limit. The old read-modify-write
+    _db_allow admitted limit+1 under this exact shape; the single
+    statement conditional UPSERT serialises writers, so exactly
+    ``limit`` of the 80 racing calls admit."""
+    db_file = tmp_path / "rl-race.db"
+    seed = dbmod.connect(db_path=db_file)
+    seed.close()
+    # One connection per thread, opened sequentially up front so the
+    # race covers only _db_allow calls, not migration/setup.
+    conns = [dbmod.connect(db_path=db_file) for _ in range(16)]
+    results: list[bool] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker(conn):
+        try:
+            for _ in range(5):
+                ok = durable_ratelimit._db_allow(conn, "hot-key", 10, 60.0)
+                with lock:
+                    results.append(ok)
+        except BaseException as exc:  # noqa: BLE001 — surfaced below
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(c,)) for c in conns]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert not [t for t in threads if t.is_alive()], "worker threads hung"
+    assert errors == [], errors
+    assert len(results) == 80
+    assert sum(results) == 10, f"expected exactly 10 admissions, got {sum(results)}"
+    stored = conns[0].execute(
+        "SELECT value FROM settings WHERE key='ratelimit.hot-key'"
+    ).fetchone()[0]
+    # Canonical integer encoding (a leading '-' only marks that the
+    # last writer was denied); the counter itself must read exactly 10.
+    assert stored == str(int(stored))
+    assert abs(int(stored)) % 1_000_000 == 10
+    for c in conns:
+        c.close()
+
+
+def test_durable_ratelimit_db_legacy_json_row_denied_once_then_migrates(tmp_path):
+    """F-05-08: a row in the pre-fix JSON format is denied once
+    (fail-closed on upgrade) and rewritten in the new integer encoding,
+    after which normal fixed-window counting resumes."""
+    import time as _time
+
+    app = create_app(admin_token="adm-rl-legacy", db_path=tmp_path / "rl-legacy.db")
+    conn = app.state.conn
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?)",
+        ("ratelimit.legacy-key", json.dumps({"t0": _time.time(), "count": 2})),
+    )
+    conn.commit()
+    assert durable_ratelimit.allow("legacy-key", 2, 60.0, conn=conn) is False
+    assert durable_ratelimit.allow("legacy-key", 2, 60.0, conn=conn) is True
+    assert durable_ratelimit.allow("legacy-key", 2, 60.0, conn=conn) is True
+    assert durable_ratelimit.allow("legacy-key", 2, 60.0, conn=conn) is False
+    stored = conn.execute(
+        "SELECT value FROM settings WHERE key='ratelimit.legacy-key'"
+    ).fetchone()[0]
+    assert stored == str(int(stored)), f"legacy row not migrated to integer encoding: {stored!r}"

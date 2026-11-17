@@ -6,7 +6,11 @@
 FROM node:22-alpine AS frontend-builder
 WORKDIR /build
 COPY apps/dashboard/package*.json ./
-RUN npm install
+# P-07 (Wave 7): `npm ci` (exact lockfile install), not `npm install`.
+# apps/dashboard/package-lock.json exists (lockfileVersion 3); `npm ci`
+# fails fast if package.json and the lockfile drift, instead of silently
+# resolving floating ranges at image-build time.
+RUN npm ci
 COPY apps/dashboard/ ./
 RUN npm run build
 
@@ -33,8 +37,10 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY migrations/ ./migrations/
 
-RUN pip install --no-cache-dir gunicorn "psycopg[binary]>=3.2" "prometheus-client>=0.20" && \
-    pip install --no-cache-dir -e .
+# P-07 (Wave 7): the prod-only deps (gunicorn, psycopg[binary],
+# prometheus-client) live pinned in pyproject.toml [prod] — they used
+# to be installed here unpinned, outside pyproject.toml.
+RUN pip install --no-cache-dir -e .[prod]
 
 # Copy built dashboard assets from Stage 1
 COPY --from=frontend-builder /build/dist /app/apps/dashboard/dist
@@ -58,6 +64,11 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
 # when AI_BRIDGE_WORKERS > 1 and no shared AI_BRIDGE_CSRF_SECRET is
 # configured (a per-process random secret breaks CSRF across workers).
 ENV AI_BRIDGE_WORKERS=4
+
+# Gate 13 (Wave 7): the fleet self-update target — see the comment in
+# deployment/docker/Dockerfile. The image carries the repo at /app, so
+# the update target is deterministic and independent of the worker's cwd.
+ENV AI_BRIDGE_AGENT_REPO_DIR=/app
 
 # Launch with Gunicorn (4 Uvicorn workers)
 CMD ["gunicorn", \

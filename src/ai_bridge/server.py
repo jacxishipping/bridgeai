@@ -217,12 +217,77 @@ if os.environ.get("AI_BRIDGE_MCP_ALLOWED_HOSTS"):
 # (TransportSecuritySettings defaults enable_dns_rebinding_protection
 # to True); there is no longer any way to disable it from the env.
 
-mcp = FastMCP(
-    "ai-bridge",
-    stateless_http=True,
-    json_response=True,
-    transport_security=_mcp_transport_security,
-)
+# F-06-16 (Wave 7): `stateless_http=True` + `json_response=True` is the
+# DEFAULT, and that default is deliberate — not an oversight:
+#
+# * The MCP HTTP app is embedded in the control plane
+#   (`control/combined.py::create_combined_app`), which production runs
+#   under gunicorn with 4 Uvicorn workers (`deployment/docker/
+#   Dockerfile.prod`, `AI_BRIDGE_WORKERS=4`) behind a load balancer with
+#   NO sticky sessions. Stateful Streamable HTTP sessions live in-process
+#   in the SDK's `StreamableHTTPSessionManager`: a client whose next
+#   request lands on a different worker gets an unknown `Mcp-Session-Id`
+#   and its session is gone. Flipping the default to stateful would break
+#   every remote client on the production deployment.
+# * Resumability is a separate, larger gap: the SDK ships only the
+#   `EventStore` ABC (`mcp/server/streamable_http.py`) — no Redis or
+#   Postgres implementation. A shared, cross-worker event store would have
+#   to be written before any session could survive a restart or a worker
+#   change, even in stateful mode. Stateful mode below is therefore SSE
+#   streaming + in-process sessions, NOT resumable sessions.
+#
+# What Wave 7 does instead: an explicit opt-in. Setting
+# `AI_BRIDGE_MCP_STATEFUL_HTTP=1` builds the server with
+# `stateless_http=False, json_response=False` (SSE streaming + server
+# sessions). That is only safe for a SINGLE-PROCESS deployment — the
+# standalone `python -m ai_bridge.server --http` (one uvicorn process) or
+# a combined app run with one worker. If it is enabled while
+# `AI_BRIDGE_WORKERS > 1`, startup prints a loud warning and keeps going
+# (refusing to start would break existing single-worker containers that
+# happen to export the variable); the operator must drop to one worker or
+# add sticky sessions. The production default stays stateless, so this row
+# stays OPEN for the deployed topology: closing it needs a shared
+# EventStore plus sticky sessions or a single MCP worker, neither of which
+# exists yet.
+def _mcp_http_options() -> dict[str, bool]:
+    """Stateless (default) vs stateful Streamable HTTP, from the env.
+
+    `AI_BRIDGE_MCP_STATEFUL_HTTP=1` opts a single-process deployment
+    into SSE streaming + server-managed sessions. Anything else (unset,
+    `0`, `false`, ...) keeps the multi-worker-safe stateless default.
+    Pure function of the environment, so tests can assert it without
+    importing a second server instance.
+    """
+    stateful = os.environ.get("AI_BRIDGE_MCP_STATEFUL_HTTP", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    return {"stateless_http": not stateful, "json_response": not stateful}
+
+
+def _build_mcp_server() -> FastMCP:
+    opts = _mcp_http_options()
+    if not opts["stateless_http"]:
+        try:
+            workers = int(os.environ.get("AI_BRIDGE_WORKERS", "1") or "1")
+        except ValueError:
+            workers = 1
+        if workers > 1:
+            print(
+                "[ai-bridge] WARNING: AI_BRIDGE_MCP_STATEFUL_HTTP=1 with "
+                f"AI_BRIDGE_WORKERS={workers}: Streamable HTTP sessions are "
+                "kept in-process, so a client whose next request lands on a "
+                "different worker loses its session. Stateful MCP HTTP is "
+                "only safe with a single worker (or sticky sessions).",
+                file=sys.stderr,
+            )
+    return FastMCP(
+        "ai-bridge",
+        transport_security=_mcp_transport_security,
+        **opts,
+    )
+
+
+mcp = _build_mcp_server()
 
 VERIFY_URL = os.environ.get("AI_BRIDGE_GATEWAY_VERIFY_URL", "http://127.0.0.1:8002/internal/verify")
 CONTROL_URL = os.environ.get("AI_BRIDGE_CONTROL_URL", "http://127.0.0.1:8000")

@@ -329,5 +329,157 @@ class TestCsrfSharedSecret(unittest.TestCase):
         self.assertIn("AI_BRIDGE_CSRF_SECRET=${CSRF_SECRET}", text)
 
 
+class TestPinnedDependencies(unittest.TestCase):
+    """P-07 (Wave 7): locked deps, pinned prod extras, `npm ci`."""
+
+    def test_dockerfile_prod_installs_pinned_prod_extra(self):
+        text = _read(DOCKERFILE_PROD)
+        self.assertIn("-e .[prod]", text, "Dockerfile.prod must install pyproject [prod]")
+        self.assertNotIn("prometheus-client>=", text)
+        self.assertNotIn("psycopg[binary]>=", text)
+        self.assertNotIn('pip install --no-cache-dir gunicorn', text)
+
+    def test_pyproject_prod_extra_pins_exactly(self):
+        text = _read(REPO_ROOT / "pyproject.toml")
+        for pinned in (
+            "gunicorn==23.0.0",
+            "psycopg[binary]==3.3.9",
+            "prometheus-client==0.21.0",
+        ):
+            self.assertIn(pinned, text, f"pyproject [prod] must pin {pinned}")
+
+    def test_dashboard_builds_use_npm_ci(self):
+        self.assertTrue(
+            (REPO_ROOT / "apps/dashboard/package-lock.json").exists(),
+            "npm ci requires apps/dashboard/package-lock.json",
+        )
+        for path in (DOCKERFILE_PROD, RENDER):
+            text = _read(path)
+            self.assertIn("npm ci", text, f"{path.name} must build the dashboard with npm ci")
+            # Strip comment lines first: the P-07 comments themselves
+            # mention `npm install` while explaining why it is gone.
+            code = "\n".join(
+                line for line in text.splitlines()
+                if not line.strip().startswith("#")
+            )
+            self.assertNotIn("npm install", code, f"{path.name} must not use npm install")
+
+    def test_requirements_lock_exists_and_is_pinned(self):
+        lock = REPO_ROOT / "requirements.lock"
+        self.assertTrue(lock.exists(), "requirements.lock must exist (P-07)")
+        text = _read(lock)
+        header = "\n".join(text.splitlines()[:40])
+        self.assertIn("pip freeze", header, "lock header must state how it was generated")
+        self.assertIn("piptools", header, "lock header must record the pip-compile route")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            self.assertRegex(
+                line, r"^(-e \.|[A-Za-z0-9_.\-]+==\S+)",
+                f"lockfile line is not a pin: {line!r}",
+            )
+        for pinned in (
+            "fastapi==0.163.1",
+            "mcp==1.30.0",
+            "psycopg==3.3.9",
+            "uvicorn==0.54.0",
+        ):
+            self.assertIn(pinned, text, f"lockfile must pin {pinned}")
+
+    def test_requirements_txt_no_longer_claims_locked(self):
+        text = _read(REPO_ROOT / "requirements.txt")
+        self.assertIn("requirements.lock", text)
+        self.assertNotIn("Locked dependencies", text)
+
+
+class TestCanonicalControlUrl(unittest.TestCase):
+    """P-12 (Wave 7): one canonical default control URL (jxiptvplayer.app)."""
+
+    @staticmethod
+    def _default_url(path: Path, pattern: str) -> str:
+        match = re.search(pattern, _read(path), re.M)
+        assert match is not None, f"{path} must define DEFAULT_CONTROL_URL"
+        return match.group(1)
+
+    def test_all_install_paths_agree_on_production_host(self):
+        canonical = "https://jxiptvplayer.app"
+        self.assertEqual(
+            self._default_url(REPO_ROOT / "src/ai_bridge/client.py",
+                              r'^DEFAULT_CONTROL_URL = "([^"]+)"'),
+            canonical,
+        )
+        self.assertEqual(
+            self._default_url(REPO_ROOT / "deployment/windows/installer_gui.py",
+                              r'^DEFAULT_CONTROL_URL = "([^"]+)"'),
+            canonical,
+        )
+        self.assertEqual(
+            self._default_url(MAGIC_SH, r'^DEFAULT_CONTROL_URL="([^"]+)"'),
+            canonical,
+        )
+        self.assertEqual(
+            self._default_url(MAGIC_SH_LINUX, r'^DEFAULT_CONTROL_URL="([^"]+)"'),
+            canonical,
+        )
+
+    def test_sdk_has_no_silent_localhost_default(self):
+        text = _read(REPO_ROOT / "src/ai_bridge/client.py")
+        self.assertNotIn('or "http://127.0.0.1:8000"', text)
+        self.assertIn("or DEFAULT_CONTROL_URL", text)
+
+    def test_installer_normalizes_dashboard_host_to_canonical(self):
+        text = _read(REPO_ROOT / "deployment/windows/installer_gui.py")
+        self.assertIn("return DEFAULT_CONTROL_URL", text)
+        self.assertNotIn('"https://ai-bridge-control.onrender.com"', text)
+
+
+def _render_env_keys(path: Path) -> set[str]:
+    return set(re.findall(r"(?m)^\s*- key: ([A-Z][A-Z0-9_]*)", _read(path)))
+
+
+# P-15 (Wave 7): control-plane keys that must exist in BOTH render.yaml
+# and docker-compose.prod.yml with the same meaning. Keys intentionally
+# present in only one file are documented in render.yaml's matrix comment.
+SHARED_CORE_KEYS = (
+    "DATABASE_URL",
+    "REDIS_URL",
+    "AI_BRIDGE_ADMIN_TOKEN",
+    "AI_BRIDGE_CSRF_SECRET",
+    "AI_BRIDGE_PUBLIC_URL",
+    "AI_BRIDGE_PUBLIC_BASE_URL",
+    "AI_BRIDGE_OIDC_ISSUER",
+    "AI_BRIDGE_OIDC_CLIENT_ID",
+    "AI_BRIDGE_OIDC_CLIENT_SECRET",
+    "AI_BRIDGE_OIDC_REDIRECT_URI",
+    "AI_BRIDGE_OIDC_DASHBOARD_URL",
+    "AI_BRIDGE_ALLOW_TIER3",
+    "AI_BRIDGE_DEVICE_TOKEN_TTL_DAYS",
+    "AI_BRIDGE_CORS_ORIGINS",
+    "AI_BRIDGE_DASHBOARD_URL",
+    "AI_BRIDGE_PROFILE",
+)
+
+
+class TestEnvMatrix(unittest.TestCase):
+    """P-15 (Wave 7): render.yaml / docker-compose.prod.yml env matrix aligned."""
+
+    def test_shared_core_keys_present_in_both(self):
+        render_keys = _render_env_keys(RENDER)
+        compose_env = _compose_env(PROD_COMPOSE)
+        for key in SHARED_CORE_KEYS:
+            self.assertIn(key, render_keys, f"render.yaml omits {key}")
+            self.assertIn(key, compose_env, f"docker-compose.prod.yml omits {key}")
+
+    def test_matrix_documented_in_both_files(self):
+        self.assertIn("Env matrix (P-15", _read(RENDER))
+        self.assertIn("Env matrix (P-15", _read(PROD_COMPOSE))
+
+    def test_render_topology_basis_corrected(self):
+        text = _read(RENDER)
+        self.assertIn("LIVE staging plane", text)
+        self.assertIn("Starter instances WITH managed Redis", text)
+
+
 if __name__ == "__main__":
     unittest.main()

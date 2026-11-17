@@ -32,10 +32,15 @@ _HTTP_CLIENT: httpx.Client | None = None
 _HTTP_CLIENT_FACTORY: object = None
 
 # Short-lived OAuth verify cache (token hash -> (device_id_or_None, expires_at)).
+# F-04-10 (Wave 7): the TTL was 15 s, so a revoked device's cached binding
+# stayed valid for up to 15 s after revocation. 5 s bounds the window in
+# split deployments; in the embedded single-process deployment the
+# device-revoke endpoint also clears this cache outright (see
+# control/routers/devices.py revoke handler).
 _VERIFY_CACHE: dict[str, tuple[str | None, float]] = {}
 _VERIFY_CACHE_LOCK = threading.Lock()
 _VERIFY_CACHE_FACTORY: tuple[object, object] | None = None
-_VERIFY_CACHE_TTL_SEC = 15.0
+_VERIFY_CACHE_TTL_SEC = 5.0
 _VERIFY_CACHE_MAX = 256
 
 
@@ -60,7 +65,13 @@ def get_http_client() -> httpx.Client:
             _HTTP_CLIENT = current_factory(
                 timeout=httpx.Timeout(30.0, connect=10.0),
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=30.0),
-                follow_redirects=True,
+                # F-04-10 (Wave 7): NEVER follow redirects with credentials.
+                # httpx forwards custom headers (X-Admin-Token) to redirect
+                # targets and keeps Authorization on same-origin redirects,
+                # so a redirecting control URL could leak the admin/bearer
+                # token to an attacker-controlled host. Callers refuse 3xx
+                # explicitly instead (see _api / resolve_binding).
+                follow_redirects=False,
             )
             _HTTP_CLIENT_FACTORY = current_factory
             if factory_changed:
@@ -126,10 +137,20 @@ def resolve_binding(verify_url: str, bearer_token: str, timeout: int = 10) -> st
             headers={"Authorization": f"Bearer {bearer_token}"},
             timeout=timeout,
         )
+        # F-04-10 (Wave 7): the shared client never follows redirects
+        # (see get_http_client); refuse a 3xx here rather than re-issuing
+        # the request with the bearer token to another host.
+        if 300 <= resp.status_code < 400:
+            raise BindingError(
+                f"gateway verify redirected (HTTP {resp.status_code}); "
+                "refusing to follow a redirect with credentials"
+            )
         resp.raise_for_status()
         data = resp.json()
     except httpx.HTTPStatusError as exc:
         raise BindingError(f"gateway verify returned HTTP {exc.response.status_code}")
+    except BindingError:
+        raise
     except Exception as exc:  # noqa: BLE001 - surfaced as a binding failure
         raise BindingError(f"gateway verify failed: {exc}")
     if not data.get("ok"):
@@ -155,6 +176,14 @@ def _api(method: str, url: str, admin_token: str, payload: dict | None = None, t
             headers={"X-Admin-Token": admin_token, "Content-Type": "application/json"},
             timeout=timeout,
         )
+        # F-04-10 (Wave 7): the shared client never follows redirects
+        # (see get_http_client); refuse a 3xx here rather than re-issuing
+        # the request with the admin token to another host.
+        if 300 <= resp.status_code < 400:
+            raise RuntimeError(
+                f"control plane redirected (HTTP {resp.status_code}) for {method} {url}; "
+                "refusing to follow a redirect with credentials"
+            )
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPStatusError as exc:
@@ -174,7 +203,7 @@ def run_device_tool(
     device_id: str,
     tool: str,
     args: dict,
-    wait_seconds: int = 100,
+    wait_seconds: int = 30,
     *,
     should_abort: Callable[[], bool] | None = None,
 ) -> dict:
@@ -184,6 +213,12 @@ def run_device_tool(
     the caller must approve them in the dashboard, then re-check with
     get_device_task. Long tasks that outlast wait_seconds come back as
     running with the task_id for a later check.
+
+    F-04-10 (Wave 7): the default wait was 100 s, so one MCP worker
+    thread blocked for up to ~100 s per device-tool call. 30 s is the
+    default now; pass a larger wait_seconds explicitly for a call that
+    genuinely needs a longer synchronous wait — long tasks still return
+    "running" with the task_id for a later get_device_task check.
 
     Relies on control-plane ``?wait=`` long-poll; does not add extra sleeps
     between polls. Optional ``should_abort`` cancels the device task when true.

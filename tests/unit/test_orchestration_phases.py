@@ -80,6 +80,30 @@ def test_dispatch_registers_browser_navigate():
         nav.assert_called_once()
 
 
+def _seed_stale_task(conn, task_id, tool, dev_id="dev-1"):
+    now = time.time()
+    conn.execute(
+        "INSERT INTO tasks (id, device_id, tenant, tool, args_json, tier, status, created_at, updated_at) "
+        "VALUES (?, ?, 'default', ?, '{}', 1, 'running', ?, ?)",
+        (task_id, dev_id, tool, now - 5000, now - 5000),
+    )
+    conn.commit()
+
+
+def _seed_stale_app(tmp_path, name):
+    admin_token = "adm-orch"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / name)
+    conn = app.state.conn
+    now = time.time()
+    conn.execute(
+        "INSERT INTO devices (id, name, hostname, os, token_hash, created_at, status, last_seen) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'online', ?)",
+        ("dev-1", "n", "h", "Linux", "x", now, now),
+    )
+    conn.commit()
+    return app, conn
+
+
 def test_stale_running_task_sweeper_requeues(tmp_path):
     admin_token = "adm-orch"
     app = create_app(admin_token=admin_token, db_path=tmp_path / "orch.db")
@@ -101,6 +125,48 @@ def test_stale_running_task_sweeper_requeues(tmp_path):
     row = conn.execute("SELECT status FROM tasks WHERE id='stale1'").fetchone()
     assert stats["requeued"] + stats["timed_out"] >= 1
     assert row["status"] in {"queued", "timed_out"}
+
+
+def test_stale_task_requeue_defaults_off_for_non_idempotent_tool(tmp_path, monkeypatch):
+    """F-05-09: with AI_BRIDGE_STALE_TASK_REQUEUE unset, a stale
+    non-idempotent task (run_shell) is timed out for manual inspection,
+    NOT silently re-queued for a second execution."""
+    monkeypatch.delenv("AI_BRIDGE_STALE_TASK_REQUEUE", raising=False)
+    _app, conn = _seed_stale_app(tmp_path, "orch-off.db")
+    _seed_stale_task(conn, "stale-shell", "run_shell")
+    stats = orchestration.sweep_stale_running_tasks(conn, lease_sec=60)
+    assert stats == {"timed_out": 1, "requeued": 0, "scanned": 1}
+    row = conn.execute("SELECT status FROM tasks WHERE id='stale-shell'").fetchone()
+    assert row["status"] == "timed_out"
+
+
+def test_stale_task_requeue_opt_in_env_requeues(tmp_path, monkeypatch):
+    """F-05-09: the opt-in (AI_BRIDGE_STALE_TASK_REQUEUE=1) still
+    re-queues — the mechanism is preserved for workloads the operator
+    knows to be idempotent-safe; only the default changed."""
+    monkeypatch.setenv("AI_BRIDGE_STALE_TASK_REQUEUE", "1")
+    _app, conn = _seed_stale_app(tmp_path, "orch-on.db")
+    _seed_stale_task(conn, "stale-shell", "run_shell")
+    stats = orchestration.sweep_stale_running_tasks(conn, lease_sec=60)
+    assert stats == {"timed_out": 0, "requeued": 1, "scanned": 1}
+    row = conn.execute("SELECT status FROM tasks WHERE id='stale-shell'").fetchone()
+    assert row["status"] == "queued"
+
+
+def test_stale_task_requeue_explicit_arg_overrides_env(tmp_path, monkeypatch):
+    """F-05-09: an explicit requeue= argument wins over the env var in
+    both directions, so callers (and the scheduler) can choose per call."""
+    _app, conn = _seed_stale_app(tmp_path, "orch-arg.db")
+    monkeypatch.setenv("AI_BRIDGE_STALE_TASK_REQUEUE", "0")
+    _seed_stale_task(conn, "stale-a", "run_shell")
+    stats = orchestration.sweep_stale_running_tasks(conn, lease_sec=60, requeue=True)
+    assert stats["requeued"] == 1
+    assert conn.execute("SELECT status FROM tasks WHERE id='stale-a'").fetchone()["status"] == "queued"
+    monkeypatch.setenv("AI_BRIDGE_STALE_TASK_REQUEUE", "1")
+    _seed_stale_task(conn, "stale-b", "run_shell")
+    stats = orchestration.sweep_stale_running_tasks(conn, lease_sec=60, requeue=False)
+    assert stats["timed_out"] == 1
+    assert conn.execute("SELECT status FROM tasks WHERE id='stale-b'").fetchone()["status"] == "timed_out"
 
 
 def test_emergency_stop_durable_across_app_state(tmp_path):
@@ -190,13 +256,49 @@ def test_per_device_concurrency_lease_blocks_second_task(tmp_path):
     assert nxt.get("task") is None
 
 
-def test_turn_secret_required_in_prod_profile(monkeypatch):
+def test_turn_credentials_require_secret_and_host_in_all_profiles(monkeypatch):
+    """F-04-18 / F13-11: TURN credentials fail closed in EVERY profile —
+    no hard-coded default secret, no default host. (This replaces the
+    old prod-only test: the prod case still raises, and non-prod now
+    raises too instead of minting with the shared default.)"""
     from ai_bridge import webrtc_stream
 
     monkeypatch.delenv("AI_BRIDGE_TURN_SECRET", raising=False)
+    monkeypatch.delenv("AI_BRIDGE_TURN_HOST", raising=False)
+    monkeypatch.delenv("AI_BRIDGE_ICE_SERVERS", raising=False)
+    monkeypatch.delenv("AI_BRIDGE_TURN_URL", raising=False)
+    # No secret at all: raises in prod ...
     monkeypatch.setenv("AI_BRIDGE_PROFILE", "production")
     with pytest.raises(RuntimeError, match="AI_BRIDGE_TURN_SECRET"):
         webrtc_stream.generate_ephemeral_turn_credentials()
+    # ... and in non-prod (previously minted with the default secret).
+    monkeypatch.delenv("AI_BRIDGE_PROFILE", raising=False)
+    monkeypatch.delenv("RENDER", raising=False)
+    with pytest.raises(RuntimeError, match="AI_BRIDGE_TURN_SECRET"):
+        webrtc_stream.generate_ephemeral_turn_credentials()
+    # Secret without a host: still refuses (no default jxiptvplayer.app).
+    monkeypatch.setenv("AI_BRIDGE_TURN_SECRET", "test-only-secret")
+    with pytest.raises(RuntimeError, match="AI_BRIDGE_TURN_HOST"):
+        webrtc_stream.generate_ephemeral_turn_credentials()
+    # Explicitly configured secret + host: mints normally.
+    monkeypatch.setenv("AI_BRIDGE_TURN_HOST", "turn.example.internal")
+    servers = webrtc_stream.generate_ephemeral_turn_credentials()
+    assert any("turn:turn.example.internal:3478" in u for s in servers for u in s["urls"])
+
+
+def test_ice_servers_degrade_to_stun_only_without_turn_config(monkeypatch):
+    """F-04-18 / F13-11: with no TURN secret/host configured,
+    get_configured_ice_servers() returns STUN-only instead of minting
+    credentials with a default secret."""
+    from ai_bridge import webrtc_stream
+
+    monkeypatch.delenv("AI_BRIDGE_TURN_SECRET", raising=False)
+    monkeypatch.delenv("AI_BRIDGE_TURN_HOST", raising=False)
+    monkeypatch.delenv("AI_BRIDGE_ICE_SERVERS", raising=False)
+    monkeypatch.delenv("AI_BRIDGE_TURN_URL", raising=False)
+    servers = webrtc_stream.get_configured_ice_servers()
+    assert servers == [{"urls": "stun:stun.l.google.com:19302"}]
+    assert not any("turn:" in str(s.get("urls")) for s in servers)
 
 
 def test_orchestration_load_smoke(tmp_path):

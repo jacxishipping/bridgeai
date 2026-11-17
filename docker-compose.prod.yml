@@ -7,6 +7,13 @@
 #   - PostgreSQL 16 (High Performance Relational Storage with Connection Pooling)
 #   - Redis 7 (Distributed Pub/Sub & Inter-Worker Synchronization)
 #   - Certbot (Automated Let's Encrypt Certificate Renewal Daemon)
+#
+#  Env matrix (P-15, Wave 7): the control-api env keys are aligned with
+#  render.yaml's ai-bridge-control service — same core keys, same
+#  meaning. The full matrix (shared keys + intentional differences, e.g.
+#  AI_BRIDGE_EMBED_MCP on Render only, inter-service hostnames and
+#  container paths in compose only) is documented at the top of
+#  render.yaml; do not add a key to one file without checking the other.
 # ==============================================================================
 
 services:
@@ -37,6 +44,17 @@ services:
       - AI_BRIDGE_ALLOW_TIER3=${AI_BRIDGE_ALLOW_TIER3:-0}
       - AI_BRIDGE_DEVICE_TOKEN_TTL_DAYS=${AI_BRIDGE_DEVICE_TOKEN_TTL_DAYS:-7}
       - AI_BRIDGE_PUBLIC_URL=${AI_BRIDGE_PUBLIC_URL:-https://${AI_BRIDGE_DOMAIN:-jxiptvplayer.app}}
+      # P-15 (Wave 7): env-matrix alignment with render.yaml — these keys
+      # are set on the Render control service too (same names, same
+      # meaning). PUBLIC_BASE_URL is the alias production_readiness.py
+      # prefers; PROFILE=production gates the unsafe-anon refusal and
+      # the readiness checks; CORS_ORIGINS / DASHBOARD_URL default to
+      # this deployment's own domain (the dashboard is served by nginx
+      # from the same host in compose, unlike Render's separate SPA).
+      - AI_BRIDGE_PUBLIC_BASE_URL=${AI_BRIDGE_PUBLIC_BASE_URL:-https://${AI_BRIDGE_DOMAIN:-jxiptvplayer.app}}
+      - AI_BRIDGE_PROFILE=${AI_BRIDGE_PROFILE:-production}
+      - AI_BRIDGE_CORS_ORIGINS=${AI_BRIDGE_CORS_ORIGINS:-https://${AI_BRIDGE_DOMAIN:-jxiptvplayer.app}}
+      - AI_BRIDGE_DASHBOARD_URL=${AI_BRIDGE_DASHBOARD_URL:-https://${AI_BRIDGE_DOMAIN:-jxiptvplayer.app}}
       - AI_BRIDGE_OIDC_ISSUER=${AI_BRIDGE_OIDC_ISSUER:-https://accounts.google.com}
       - AI_BRIDGE_OIDC_CLIENT_ID=${AI_BRIDGE_OIDC_CLIENT_ID:-}
       - AI_BRIDGE_OIDC_CLIENT_SECRET=${AI_BRIDGE_OIDC_CLIENT_SECRET:-}

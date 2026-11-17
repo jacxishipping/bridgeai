@@ -151,6 +151,17 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         conn.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Device not found.")
+        # F-04-10 (Wave 7): a revoked device's cached verify binding must
+        # die immediately, not at the 5 s cache TTL. This clears the
+        # in-process cache of the embedded deployment (MCP server and
+        # control plane sharing one process); in split deployments the
+        # 5 s TTL still bounds the window.
+        try:
+            from ...device_routing import clear_verify_cache as _clear_verify_cache
+
+            _clear_verify_cache()
+        except Exception:  # noqa: BLE001 - cache clear is best-effort; revoke already committed
+            pass
         audit("admin", device_id, "revoke_device", {}, "allowed")
         return {"device_id": device_id, "revoked": True}
 

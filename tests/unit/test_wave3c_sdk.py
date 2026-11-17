@@ -22,6 +22,7 @@ import pytest
 
 from ai_bridge import browser_isolation_os, browser_tools, terminal_manager, vision
 from ai_bridge.client import (
+    DEFAULT_CONTROL_URL,
     AIBridgeClient,
     AIBridgeError,
     project_task_summaries,
@@ -266,6 +267,28 @@ def test_sdk_repr_and_token_never_in_url(monkeypatch):
     assert "token=" not in captured["url"]
     auth = {k.lower(): v for k, v in captured["headers"].items()}["authorization"]
     assert auth == "Bearer tok-987654321"
+
+
+# P-12 (Wave 7) — one canonical default control URL.
+# ---------------------------------------------------------------------------
+
+def test_sdk_default_control_url_is_canonical_production_host(monkeypatch):
+    """No env / no arg -> the production host, never silent localhost."""
+    monkeypatch.delenv("AI_BRIDGE_URL", raising=False)
+    monkeypatch.delenv("AI_BRIDGE_CONTROL_URL", raising=False)
+    assert DEFAULT_CONTROL_URL == "https://jxiptvplayer.app"
+    sdk = AIBridgeClient(token="tok-987654321")
+    assert sdk.base_url == "https://jxiptvplayer.app"
+
+
+def test_sdk_localhost_is_explicit_dev_override_only(monkeypatch):
+    """Localhost is reachable only as an explicit env/arg override."""
+    monkeypatch.setenv("AI_BRIDGE_CONTROL_URL", "http://127.0.0.1:8000")
+    sdk = AIBridgeClient(token="tok-987654321")
+    assert sdk.base_url == "http://127.0.0.1:8000"
+    monkeypatch.delenv("AI_BRIDGE_CONTROL_URL", raising=False)
+    sdk = AIBridgeClient(base_url="http://127.0.0.1:8000", token="tok-987654321")
+    assert sdk.base_url == "http://127.0.0.1:8000"
 
 
 def test_sdk_error_redacts_token(monkeypatch):

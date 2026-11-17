@@ -49,7 +49,14 @@ TOKEN_FILE = HOME_DIR / "device.token"
 REG_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REG_CLIENT_NAME = "AIBridgeWindowsClient"
 REG_AGENT_NAME = "AIBridgeWindowsAgent"
-DEFAULT_CONTROL_URL = "https://ai-bridge-control.onrender.com"
+# P-12 (Wave 7): canonical default control-plane URL — MUST match
+# ai_bridge.client.DEFAULT_CONTROL_URL ("https://jxiptvplayer.app").
+# Mirrored as a literal because the frozen onefile installer cannot
+# import ai_bridge at install time; tests/unit/test_deployment_config.py
+# locks the SDK, this wizard, and magic-install.sh to the same value.
+# (Was https://ai-bridge-control.onrender.com — a different host than
+# the shell installer used, so two guides enrolled two servers.)
+DEFAULT_CONTROL_URL = "https://jxiptvplayer.app"
 TASK_NAME = "AI Bridge Agent"
 SUPPORTED_PYTHONS = ("3.12", "3.13", "3.14")
 USER_AGENT = f"AIBridge-WindowsInstaller/{APP_VERSION}"
@@ -387,7 +394,7 @@ def normalize_control_url(control_url: str) -> str:
     cleaned = (control_url or "").strip().rstrip("/")
     lower = cleaned.lower()
     if "ai-bridge-dashboard.onrender.com" in lower:
-        return "https://ai-bridge-control.onrender.com"
+        return DEFAULT_CONTROL_URL
     return cleaned or DEFAULT_CONTROL_URL
 
 

@@ -112,3 +112,59 @@ def test_get_device_filters_list(monkeypatch):
     )
     assert device_routing.get_device("http://ctl", "adm", "d2")["name"] == "two"
     assert device_routing.get_device("http://ctl", "adm", "d9") is None
+
+
+# --- F-04-10 (Wave 7): redirect refusal, verify-cache TTL/clear, wait default ---
+
+
+def test_resolve_binding_redirect_refused(monkeypatch):
+    calls = _patch_urlopen(
+        monkeypatch,
+        lambda req, c: FakeResp({"ok": True, "device_id": "dev-1"}, status=301),
+    )
+    with pytest.raises(BindingError, match="redirect"):
+        resolve_binding("http://x/internal/verify", "tok")
+    assert len(calls) == 1  # never followed to a second host
+
+
+def test_run_device_tool_redirect_refused(monkeypatch):
+    calls = _patch_urlopen(monkeypatch, lambda req, c: FakeResp({}, status=301))
+    with pytest.raises(RuntimeError, match="redirect"):
+        run_device_tool("http://ctl", "adm", "dev-1", "get_system_info", {})
+    assert len(calls) == 1  # admin token never re-sent to a redirect target
+
+
+def test_verify_cache_ttl_and_clear(monkeypatch):
+    calls = _patch_urlopen(
+        monkeypatch, lambda req, c: FakeResp({"ok": True, "device_id": "dev-1"})
+    )
+    assert resolve_binding("http://x/internal/verify", "tok-cache") == "dev-1"
+    assert resolve_binding("http://x/internal/verify", "tok-cache") == "dev-1"
+    assert len(calls) == 1  # second call served from cache
+    device_routing.clear_verify_cache()
+    assert resolve_binding("http://x/internal/verify", "tok-cache") == "dev-1"
+    assert len(calls) == 2  # clear forces a re-verify
+
+    # TTL expiry forces a re-verify.
+    now = [1000.0]
+
+    class _FakeTime:
+        @staticmethod
+        def time():
+            return now[0]
+
+    monkeypatch.setattr(device_routing, "time", _FakeTime)
+    assert resolve_binding("http://x/internal/verify", "tok-ttl") == "dev-1"
+    assert len(calls) == 3
+    assert resolve_binding("http://x/internal/verify", "tok-ttl") == "dev-1"
+    assert len(calls) == 3  # still cached within TTL
+    now[0] = 1000.0 + device_routing._VERIFY_CACHE_TTL_SEC + 1
+    assert resolve_binding("http://x/internal/verify", "tok-ttl") == "dev-1"
+    assert len(calls) == 4  # expired: re-verified
+    assert device_routing._VERIFY_CACHE_TTL_SEC == 5.0
+
+
+def test_run_device_tool_default_wait_seconds_is_30():
+    import inspect
+
+    assert inspect.signature(run_device_tool).parameters["wait_seconds"].default == 30

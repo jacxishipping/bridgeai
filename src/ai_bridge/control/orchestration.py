@@ -74,10 +74,26 @@ def sweep_stale_running_tasks(
     lease_sec: int | None = None,
     requeue: bool | None = None,
 ) -> dict[str, int]:
-    """Reclaim tasks stuck in 'running' longer than the lease (agent crash / network loss)."""
+    """Reclaim tasks stuck in 'running' longer than the lease (agent crash / network loss).
+
+    F-05-09: requeue is OFF by default (``AI_BRIDGE_STALE_TASK_REQUEUE``
+    defaults to ``0``; pass ``requeue=True`` or set the variable to
+    ``1``/``true``/``yes`` to opt in). The tool registry
+    (:mod:`ai_bridge.policy` ``TOOL_TIERS`` / :mod:`.dispatch`) marks
+    risk tiers only — it carries NO idempotency metadata, so the
+    sweeper cannot tell a safe-to-replay read (``get_system_info``)
+    from a double-apply hazard (``run_shell``, file writes, desktop
+    input, deploys). Re-running a crashed task's tool can therefore
+    execute a non-idempotent effect twice: once on the original agent
+    (if it was merely slow or partitioned, not dead) and once on the
+    re-queued claim, with no fencing token or execution epoch to
+    reject the stale result. With requeue off, stale tasks land in
+    ``timed_out`` for manual inspection instead of silently re-running.
+    Opt in only for workloads known to be idempotent-safe.
+    """
     lease = lease_sec if lease_sec is not None else DEFAULT_RUNNING_LEASE_SEC
     if requeue is None:
-        requeue = os.environ.get("AI_BRIDGE_STALE_TASK_REQUEUE", "1").strip().lower() in (
+        requeue = os.environ.get("AI_BRIDGE_STALE_TASK_REQUEUE", "0").strip().lower() in (
             "1",
             "true",
             "yes",
