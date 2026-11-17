@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>WS probe — AI Bridge staging</title></head>
+<body>
+<h1>WebSocket probe — AI Bridge staging plane</h1>
+<p>This page opens one WebSocket with a garbage ticket (no credentials) and
+reports what happens. No data is sent anywhere except the probe itself.</p>
+<pre id="result">RUNNING…</pre>
+<script>
+(function () {
+  var out = [];
+  function log(s) { out.push(s); document.getElementById('result').textContent = out.join('\n'); }
+  var url = 'wss://ai-bridge-staging-plane.onrender.com/api/v1/ws/sessions/webrtc-e2e-probe-test?ticket=garbage-ticket-value';
+  log('URL: ' + url);
+  log('started: ' + new Date().toISOString());
+  var ws;
+  try { ws = new WebSocket(url); } catch (e) { log('CONSTRUCTOR ERROR: ' + e); log('VERDICT: NO-CONNECTION (constructor threw)'); return; }
+  var done = false;
+  function finish(v) { if (!done) { done = true; log('VERDICT: ' + v); } }
+  ws.onopen = function () { log('WS OPENED'); };
+  ws.onmessage = function (e) { log('WS MESSAGE: ' + e.data); };
+  ws.onerror = function () { log('WS ERROR event'); };
+  ws.onclose = function (e) {
+    log('WS CLOSED code=' + e.code + ' reason=' + (e.reason || '(none)') + ' wasClean=' + e.wasClean);
+    if (e.code === 4401) finish('4401-REJECTED (plane ticket auth works)');
+    else if (e.code === 1006) finish('1006-ABNORMAL (handshake failed before any close frame)');
+    else finish('CLOSED-' + e.code);
+  };
+  setTimeout(function () { log('TIMEOUT after 20s (socket neither opened nor closed)'); finish('TIMEOUT'); try { ws.close(); } catch (e) {} }, 20000);
+})();
+</script>
+</body>
+</html>
