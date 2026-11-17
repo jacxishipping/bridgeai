@@ -28,6 +28,37 @@ jobs:
             .run/pytest-junit.xml
           retention-days: 30
 
+  postgres-boot:
+    # Gate 16 (Wave 6): the plane must boot on PostgreSQL and the
+    # migrations must produce the same schema there as on SQLite.
+    # Runs on every push; the postgres:18 service is the only PG server
+    # the repo can reach (no local Postgres exists in the dev VM).
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ai_bridge
+          POSTGRES_PASSWORD: ai_bridge_pw
+          POSTGRES_DB: ai_bridge
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]" "psycopg[binary]"
+      - name: Postgres schema parity + boot test
+        env:
+          AIBRIDGE_PG_BASE_DSN: postgresql://ai_bridge:ai_bridge_pw@localhost:5432/postgres
+        run: |
+          python3 scripts/check_schema_parity.py --postgres "$AIBRIDGE_PG_BASE_DSN"
+          python3 scripts/test_postgres_boot.py --base-dsn "$AIBRIDGE_PG_BASE_DSN"
+
   deployment-config:
     # R-P1-53 / R-P0-14 / R-P0-15: deployment-config regression tests run
     # with the standard library only — no package install, so this job

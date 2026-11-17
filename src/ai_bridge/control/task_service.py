@@ -384,14 +384,19 @@ def create_task(
         except Exception:
             pass
     else:
+        # Gate 9 (Wave 6): no direct db.audit — route through the single
+        # audit writer on the caller's live connection, so the row commits
+        # with the task insert and keeps the task's tenant.
         try:
-            dbmod.audit(
-                conn,
-                tenant=tenant,
+            from ..audit_writer import write_audit_event
+
+            write_audit_event(
                 actor=actor,
+                action=tool_name,
                 device_id=device_id,
-                tool=tool_name,
-                args=args,
+                details=args,
+                conn=conn,
+                tenant=tenant,
                 decision=status,
             )
         except Exception:

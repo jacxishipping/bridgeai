@@ -218,23 +218,25 @@ def migrate_plaintext_secrets(conn: Any) -> dict[str, Any]:
 
 
 def _audit_secret_read(conn: Any, srv: dict[str, Any]) -> None:
-    """Audit one secret read via db.audit (actor "system", tool
-    "mcp_server_secret_read"). Best-effort: an audit failure is logged, not
-    raised, so a broken audit sink cannot wedge token refresh. db.audit
-    never reads mcp_servers, so this cannot recurse. No secret values are
-    passed to the audit call — only the server id."""
+    """Audit one secret read via the single audit writer (actor "system",
+    tool "mcp_server_secret_read"). Best-effort: an audit failure is
+    logged, not raised, so a broken audit sink cannot wedge token
+    refresh. The writer redacts arguments; no secret values are passed
+    to the audit call — only the server id. The row is written on the
+    caller's live connection (Gate 9), so it commits with the caller's
+    own transaction and keeps the server's tenant."""
     if conn is None:
         return
     try:
-        from . import db as dbmod
+        from ..audit_writer import write_audit_event
 
-        dbmod.audit(
-            conn,
-            tenant=str(srv.get("tenant") or "default"),
+        write_audit_event(
             actor="system",
+            action="mcp_server_secret_read",
             device_id=str(srv.get("id") or ""),
-            tool="mcp_server_secret_read",
-            args={"server_id": str(srv.get("id") or "")},
+            details={"server_id": str(srv.get("id") or "")},
+            conn=conn,
+            tenant=str(srv.get("tenant") or "default"),
             decision="allowed",
         )
     except Exception as exc:  # noqa: BLE001 — audit must not break token use

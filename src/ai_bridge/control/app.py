@@ -1237,7 +1237,21 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
         )
 
     def audit(actor: str, device_id: str, tool: str, args: dict, decision: str, result: str = "", tenant: str = "default"):
-        dbmod.audit(conn, tenant=tenant, actor=actor, device_id=device_id, tool=tool, args=args, decision=decision, result=result)
+        # Gate 9 (Wave 6): the control-plane audit closure routes through
+        # the single audit writer on the app's live connection — no direct
+        # db.audit call sites remain outside audit_writer itself.
+        from ..audit_writer import write_audit_event
+
+        write_audit_event(
+            actor=actor,
+            action=tool,
+            device_id=device_id,
+            details=args,
+            conn=conn,
+            tenant=tenant,
+            decision=decision,
+            result=result,
+        )
 
     from . import dispatch_audit as dispatch_auditmod
 

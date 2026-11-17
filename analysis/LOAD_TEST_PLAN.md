@@ -193,6 +193,69 @@ prove — scheduler-once, fan-out, shared rate limit — all passed live,
 and the backup/restore drill (DB-01) is now proven, closing that part
 of gate 16.
 
+## 5B. Results — Wave 5E, 17 Nov 2026 (live, staging plane 4 × Starter, deploy dep-dbu6vpe7bikc738fsv0g on commit 7726e58e)
+
+- **Ice-servers route fix (Wave 5C) — verified live.** `GET
+  /api/v1/sessions/ice-servers` now returns 200
+  `{"ice_servers":[{"urls":"stun:stun.l.google.com:19302"}]}` on the
+  redeployed plane (it 404'd on the old deploy — the route-shadow
+  defect is fixed in the deployed code).
+- **Per-VU soak (gate 15) — PASS.** New script
+  `scripts/k6/claim_cancel_soak_per_vu.js`: every VU gets its own
+  admin-role session token (`POST /api/auth/users` + `POST
+  /api/auth/login`) and its own enrolled device, so each VU has its own
+  1,200/min bucket; setup paces auth-path calls ~2.5 s apart (under
+  the 30/min-per-IP auth bucket). Full run, 20 VUs, 5 min, 3,374
+  iterations, 0 interrupted, 10,202 requests: checks **100.00%
+  (3,454/3,454)**; **claim latency p95 789 ms** (threshold < 5,000 ms);
+  **http_req_failed 0.01% (1/10,202)** (threshold < 5%). The single
+  failed request left no error trace in the log; immaterial at 0.01%.
+  Note: mean request duration rose to 523 ms at 20 VUs (vs ~138 ms at
+  2 VUs) — the plane slows under load but stays far inside thresholds.
+- **Rate-limiter lockout fix (W5A-01) — VERIFIED LIVE.** Discriminating
+  test, same shape as the original confirmation: drain 70 s → single
+  request 200 → k6 hammer 60 s, 20 VUs → 30 s silence → single request
+  **200** (was 429 before the fix). Hammer numbers with the corrected
+  endpoint (below): **8,726 requests at ~145/s; 1,200 admitted,
+  7,526 rejected (86%)** — the limiter admitted exactly the
+  configured 1,200/min and rejected the rest, then the token worked
+  again after silence, because rejected requests are no longer
+  recorded in the window.
+- **Hammer endpoint lesson (tooling, not a gate item).** The first 5E
+  hammer used `GET /api/devices` and only managed 319 requests in
+  60 s (~5/s, 0 failed) — the endpoint is heavy under concurrency
+  (~3.7 s/req at 20 VUs vs ~0.5 s sequential; 37 devices, 10.7 KB
+  response), so it never filled the 1,200/min bucket and the test had
+  no discriminating power. Switched to lightweight `GET /api/auth/me`
+  (~115 ms avg at 20 VUs, ~165 req/s in a 30 s probe: 4,982 requests,
+  1,187 admitted ≈ the 1,200 bucket). The lockout re-run above used
+  `/me`.
+- **CSRF cross-worker finding — FOUND LIVE, fixed on staging (new).**
+  The per-VU script first failed task creation with 403 `CSRF token
+  missing or invalid` (session-token POSTs require `X-CSRF-Token`;
+  admin/device tokens are exempt). After adding the CSRF fetch
+  (`GET /api/auth/csrf-token` per VU, token valid 24 h), task creation
+  still succeeded only ~15–21% of the time: the same session + CSRF
+  token validated on 3/20 repeated creates. Root cause: the CSRF HMAC
+  secret falls back to a **per-process random secret** when
+  `AI_BRIDGE_CSRF_SECRET` is unset (`control/csrf.py`, documented
+  warning), so a token minted by one of the 4 workers validates only
+  on that worker. Fix (staging deployment config, not code): set a
+  shared `AI_BRIDGE_CSRF_SECRET` (random 64-hex) on the service via
+  `update_environment_variables` (merge) → redeploy
+  `dep-dbu6vpe7bikc738fsv0g` → live 15:17:20 UTC. Re-test: **20/20**
+  creates with one session + CSRF token; the per-VU smoke then went
+  100% (106/106 checks, 0 failed requests). **Production
+  deployments with >1 worker MUST set a shared
+  `AI_BRIDGE_CSRF_SECRET`** — without it, session-based writes fail
+  ~80% of the time. (Flagged for the 5F re-audit to record as a
+  register row if it judges it one.)
+
+**Gate 15 is now MET** (soak thresholds pass with one token per VU;
+lockout fix verified live). OIDC cross-worker flow remains not
+live-proven (staging OIDC not configured; code-verified only) — see
+gate 14.
+
 ## 6. Cost (Render list prices, checked Oct 2026; verify on the pricing page before spending)
 
 | Item | Price | Phase cost |

@@ -123,22 +123,34 @@ def _write_jsonl(event: dict[str, Any]) -> None:
             os.fsync(fh.fileno())
 
 
+def _write_db_conn(event: dict[str, Any], conn: Any) -> None:
+    """Write through the control-plane DB hash chain on a caller-owned
+    connection (Gate 9, Wave 6). The caller owns the transaction: the
+    audit row commits with the caller's own work (``control.db.audit``
+    runs its insert inside ``conn.transaction()``), and the caller's
+    tenant is preserved instead of the writer's default. The writer
+    never commits or closes the caller's connection."""
+    from .control import db as control_db
+
+    control_db.audit(
+        conn,
+        tenant=event.get("tenant", "default"),
+        actor=event.get("actor", "unknown"),
+        device_id=event.get("device_id") or "local",
+        tool=event.get("tool", event.get("action", "unknown")),
+        args=event.get("arguments") or event.get("details") or {},
+        decision=event.get("decision", "recorded"),
+        result=event.get("result", ""),
+    )
+
+
 def _write_db(event: dict[str, Any], db_path: Path) -> None:
     """Write through the control-plane DB hash chain (lazy import)."""
     from .control import db as control_db
 
     conn = control_db.connect(db_path)
     try:
-        control_db.audit(
-            conn,
-            tenant="default",
-            actor=event.get("actor", "unknown"),
-            device_id=event.get("device_id") or "local",
-            tool=event.get("tool", event.get("action", "unknown")),
-            args=event.get("arguments") or event.get("details") or {},
-            decision=event.get("decision", "recorded"),
-            result=event.get("result", ""),
-        )
+        _write_db_conn(event, conn)
     finally:
         try:
             conn.close()
@@ -193,11 +205,23 @@ def record_tool_call(*, actor: str, session_id: str, tool: str,
 def write_audit_event(*, actor: str, action: str,
                       device_id: str | None = None,
                       details: dict | None = None,
-                      db_path: str | Path | None = None) -> dict[str, Any] | None:
+                      db_path: str | Path | None = None,
+                      conn: Any = None,
+                      tenant: str = "default",
+                      decision: str = "recorded",
+                      result: str | None = None) -> dict[str, Any] | None:
     """Record a generic audited admin/security event (e.g. an
     `unrestricted` policy grant). Same sinks and redaction as
     record_tool_call; the control-plane DB stores it as a tool-style
-    audit row with decision "recorded"."""
+    audit row.
+
+    Gate 9 (Wave 6): this is the single writer — every audit call site
+    in the control plane routes through here. Pass the caller's live
+    ``conn`` (and its ``tenant``) when the audit row must commit with
+    the caller's own transaction on that connection; otherwise the
+    writer opens its own connection from ``db_path`` (or
+    ``AI_BRIDGE_MCP_AUDIT_DB``) and falls back to JSONL, as before.
+    """
     event: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "kind": "audit_event",
@@ -206,10 +230,24 @@ def write_audit_event(*, actor: str, action: str,
         "tool": action,
         "action": action,
         "tier": "",
+        "tenant": tenant,
         "device_id": device_id or "local",
-        "decision": "recorded",
+        "decision": decision,
         "arguments": _safe_args(details),
         "details": _safe_args(details),
-        "result": "",
+        "result": _safe_result(result),
     }
+    if conn is not None:
+        try:
+            _write_db_conn(event, conn)
+            return event
+        except Exception as exc:  # fall back to JSONL, never drop silently
+            print(f"[ai-bridge] audit DB write failed ({exc}); falling back to JSONL",
+                  file=sys.stderr)
+        try:
+            _write_jsonl(event)
+            return event
+        except Exception as exc:
+            print(f"[ai-bridge] audit write failed (DB and JSONL): {exc}", file=sys.stderr)
+            return None
     return _write(event, db_path)
