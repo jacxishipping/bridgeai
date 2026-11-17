@@ -14,6 +14,8 @@ COPY deployment/oauth ./deployment/oauth
 # The Postgres boot runs migrations from the repo-root migrations/
 # directory (migrations.py refuses to start without it, DB-08).
 COPY migrations ./migrations
+# Ops scripts (backup/restore drill) — also used by the Render cron job.
+COPY scripts ./scripts
 RUN pip install --no-cache-dir -e .
 
 FROM base AS dev
