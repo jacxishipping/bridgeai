@@ -70,6 +70,10 @@ if [ ! -f "$ENV_FILE" ]; then
     REDIS_PASS=$(openssl rand -hex 24)
     ADMIN_TOKEN=$(openssl rand -hex 32)
     SECRET_KEY=$(openssl rand -hex 32)
+    # CSRF HMAC secret (F-05-02, Wave 6): one shared value across all
+    # control-api workers; docker-compose.prod.yml fails fast without it,
+    # and the plane itself fails fast at boot with >1 worker and no secret.
+    CSRF_SECRET=$(openssl rand -hex 32)
     # TURN shared secret (R-P0-15): docker-compose.prod.yml fails fast
     # without it, so it must be generated here alongside the others.
     TURN_SECRET=$(openssl rand -hex 32)
@@ -93,6 +97,7 @@ REDIS_PASSWORD=${REDIS_PASS}
 # Control Plane Authentication & Security
 AI_BRIDGE_ADMIN_TOKEN=${ADMIN_TOKEN}
 SECRET_KEY=${SECRET_KEY}
+AI_BRIDGE_CSRF_SECRET=${CSRF_SECRET}
 AI_BRIDGE_TURN_SECRET=${TURN_SECRET}
 # Tier 3 (shell/desktop control) is OFF by default (R-P0-14).
 # Explicit opt-in only: change to 1 to enable.

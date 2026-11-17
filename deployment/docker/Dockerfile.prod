@@ -53,6 +53,12 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://127.0.0.1:8000/health/ready || exit 1
 
+# F-05-02 (Wave 6): the worker count the control plane runs with.
+# MUST match the gunicorn `-w` below. create_app() fails fast at boot
+# when AI_BRIDGE_WORKERS > 1 and no shared AI_BRIDGE_CSRF_SECRET is
+# configured (a per-process random secret breaks CSRF across workers).
+ENV AI_BRIDGE_WORKERS=4
+
 # Launch with Gunicorn (4 Uvicorn workers)
 CMD ["gunicorn", \
      "-w", "4", \

@@ -26,20 +26,41 @@ _CSRF_SECRET: str | None = None
 _CSRF_TTL = 86400  # 24 hours
 
 
-def get_csrf_secret() -> str:
-    """Resolve the CSRF HMAC secret, caching it in the module.
+def _worker_count() -> int:
+    """How many worker processes serve the plane (1 = single process).
 
-    Order: the secrets backend (``AI_BRIDGE_CSRF_SECRET`` via
-    :func:`secrets_backend.get_secret`, so Vault/AWS deployments share one
-    secret), then the ``AI_BRIDGE_CSRF_SECRET`` environment variable
-    directly, and only as a last resort a per-process random secret — with
-    a logged warning, because a random secret means tokens minted by one
-    worker do not validate on another. A misconfigured vault/aws backend
-    raises from ``get_secret`` (fail closed) and is not swallowed here.
+    Read from ``AI_BRIDGE_WORKERS`` (set to 4 by Dockerfile.prod to match
+    its hardcoded gunicorn ``-w 4``). A non-integer value fails closed:
+    a typo must not silently mask a multi-worker deployment.
     """
-    global _CSRF_SECRET
-    if _CSRF_SECRET:
-        return _CSRF_SECRET
+    raw = os.environ.get("AI_BRIDGE_WORKERS", "1").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        raise RuntimeError(f"AI_BRIDGE_WORKERS must be an integer, got {raw!r}") from None
+
+
+def resolve_csrf_secret(*, workers: int | None = None) -> str:
+    """Resolve the configured CSRF secret, WITHOUT using the module cache.
+
+    F-05-02 (Wave 6): when more than one worker/process serves the plane,
+    a per-process random secret breaks CSRF validation across workers —
+    a token minted on one worker fails on the others (observed live in
+    Wave 5E: ~80% of session writes failed on the 4-worker staging
+    plane). Fail fast instead of silently degrading: if no shared secret
+    is configured and ``workers`` > 1, raise RuntimeError. The worker
+    count comes from ``AI_BRIDGE_WORKERS`` when not passed explicitly.
+
+    Single-worker deployments keep the per-process random fallback (with
+    the existing warning). A misconfigured vault/aws backend raises from
+    ``get_secret`` (fail closed) and is not swallowed here.
+
+    NOTE: this cannot see Render's instance count — each Render instance
+    is a separate process with no shared worker env var. On Render the
+    shared secret itself is the fix (``render.yaml`` generates one via
+    ``generateValue``); the fail-fast covers the deployments where the
+    worker count is knowable (gunicorn ``-w N`` / ``AI_BRIDGE_WORKERS``).
+    """
     value: str | None = None
     try:
         from .secrets_backend import get_secret
@@ -49,14 +70,40 @@ def get_csrf_secret() -> str:
         value = get_secret("AI_BRIDGE_CSRF_SECRET")
     if not value:
         value = os.environ.get("AI_BRIDGE_CSRF_SECRET") or None
-    if not value:
-        value = secrets.token_hex(32)
-        logger.warning(
-            "AI_BRIDGE_CSRF_SECRET is not configured; using a per-process random "
-            "CSRF secret. CSRF tokens will not validate across workers or restarts. "
-            "Set AI_BRIDGE_CSRF_SECRET via the secrets backend or environment."
+    if value:
+        return value
+    n = workers if workers is not None else _worker_count()
+    if n > 1:
+        raise RuntimeError(
+            "AI_BRIDGE_CSRF_SECRET is not configured but the plane runs "
+            f"with {n} workers (AI_BRIDGE_WORKERS={n}): CSRF tokens minted "
+            "by one worker would not validate on the others. Set a single "
+            "shared AI_BRIDGE_CSRF_SECRET via the secrets backend or "
+            "environment (render.yaml generates one; "
+            "docker-compose.prod.yml requires it in .env; "
+            "deployment/linux/deploy-production.sh generates it)."
         )
-    _CSRF_SECRET = value
+    value = secrets.token_hex(32)
+    logger.warning(
+        "AI_BRIDGE_CSRF_SECRET is not configured; using a per-process random "
+        "CSRF secret. CSRF tokens will not validate across workers or restarts. "
+        "Set AI_BRIDGE_CSRF_SECRET via the secrets backend or environment."
+    )
+    return value
+
+
+def get_csrf_secret() -> str:
+    """Resolve the CSRF HMAC secret, caching it in the module.
+
+    Delegates to :func:`resolve_csrf_secret` (same order: secrets backend,
+    then ``AI_BRIDGE_CSRF_SECRET`` env, then — single-worker only — a
+    per-process random secret; multi-worker without a shared secret
+    raises, see F-05-02).
+    """
+    global _CSRF_SECRET
+    if _CSRF_SECRET:
+        return _CSRF_SECRET
+    _CSRF_SECRET = resolve_csrf_secret()
     return _CSRF_SECRET
 
 

@@ -29,6 +29,7 @@ RENDER = REPO_ROOT / "render.yaml"
 CFN = REPO_ROOT / "deployment/aws/cloudformation.yml"
 NGINX = REPO_ROOT / "deployment/docker/nginx.conf"
 DEPLOY_PROD = REPO_ROOT / "deployment/linux/deploy-production.sh"
+DOCKERFILE_PROD = REPO_ROOT / "deployment/docker/Dockerfile.prod"
 MAGIC_SH = REPO_ROOT / "magic-install.sh"
 MAGIC_SH_LINUX = REPO_ROOT / "deployment/linux/magic-install.sh"
 MAGIC_PS1 = REPO_ROOT / "magic-install.ps1"
@@ -226,6 +227,7 @@ class TestEnvExample(unittest.TestCase):
         for var in (
             "AI_BRIDGE_ADMIN_TOKEN",
             "SECRET_KEY",
+            "AI_BRIDGE_CSRF_SECRET",
             "DATABASE_URL",
             "REDIS_URL",
             "POSTGRES_PASSWORD",
@@ -246,6 +248,7 @@ class TestEnvExample(unittest.TestCase):
         secret_vars = {
             "AI_BRIDGE_ADMIN_TOKEN",
             "SECRET_KEY",
+            "AI_BRIDGE_CSRF_SECRET",
             "DATABASE_URL",
             "POSTGRES_PASSWORD",
             "REDIS_PASSWORD",
@@ -265,6 +268,49 @@ class TestEnvExample(unittest.TestCase):
                     f".env.example ships a default for secret {key}",
                 )
         self.assertIn("AI_BRIDGE_ALLOW_TIER3=0", _read(ENV_EXAMPLE))
+
+
+class TestCsrfSharedSecret(unittest.TestCase):
+    """F-05-02 (Wave 6): one shared CSRF secret across all workers.
+
+    A per-process random secret breaks session CSRF on multi-worker
+    deployments (observed live in Wave 5E). Each deployment surface
+    must therefore declare the shared secret (or fail fast without it).
+    """
+
+    def test_render_generates_csrf_secret(self):
+        text = _read(RENDER)
+        self.assertRegex(
+            text,
+            r"(?m)^\s*- key: AI_BRIDGE_CSRF_SECRET\s*\n\s*generateValue: true",
+            "render.yaml must generate one shared AI_BRIDGE_CSRF_SECRET",
+        )
+
+    def test_compose_requires_csrf_secret(self):
+        env = _compose_env(PROD_COMPOSE)
+        self.assertIn("AI_BRIDGE_CSRF_SECRET", env)
+        self.assertTrue(
+            env["AI_BRIDGE_CSRF_SECRET"].startswith("${AI_BRIDGE_CSRF_SECRET:?"),
+            "docker-compose.prod.yml must fail fast without AI_BRIDGE_CSRF_SECRET",
+        )
+
+    def test_dockerfile_prod_workers_match_gunicorn(self):
+        text = _read(DOCKERFILE_PROD)
+        m_env = re.search(r"(?m)^ENV AI_BRIDGE_WORKERS=(\d+)", text)
+        self.assertIsNotNone(m_env, "Dockerfile.prod must declare AI_BRIDGE_WORKERS")
+        m_cmd = re.search(r'"-w",\s*"(\d+)"', text)
+        self.assertIsNotNone(m_cmd, "Dockerfile.prod must run gunicorn with -w N")
+        self.assertEqual(
+            m_env.group(1), m_cmd.group(1),
+            "AI_BRIDGE_WORKERS must match the gunicorn -w count or the "
+            "boot fail-fast misfires",
+        )
+        self.assertNotEqual(m_env.group(1), "1", "prod image runs >1 worker")
+
+    def test_deploy_script_generates_csrf_secret(self):
+        text = _read(DEPLOY_PROD)
+        self.assertIn("CSRF_SECRET=$(openssl rand -hex 32)", text)
+        self.assertIn("AI_BRIDGE_CSRF_SECRET=${CSRF_SECRET}", text)
 
 
 if __name__ == "__main__":

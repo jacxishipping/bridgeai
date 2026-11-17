@@ -849,6 +849,14 @@ def create_app(*, admin_token: str | None = None, db_path: Path | None = None, d
     # AI_BRIDGE_CSRF_DISABLED=1 (not recommended). The shared secret
     # comes from the secrets backend (control/csrf.py).
     if os.environ.get("AI_BRIDGE_CSRF_DISABLED", "").strip().lower() not in ("1", "true", "yes"):
+        # F-05-02 (Wave 6): fail fast at boot when the plane runs with
+        # more than one worker and no shared CSRF secret is configured.
+        # Without this, tokens minted on one worker silently fail on the
+        # others (observed live in Wave 5E). Single-worker deployments
+        # keep the per-process random fallback.
+        from .csrf import resolve_csrf_secret
+
+        resolve_csrf_secret()
         app.middleware("http")(csrf_middleware)
     # Browser dashboards call the API cross-origin; allow_credentials=True
     # requires an explicit origin list (not "*"). Extend via
