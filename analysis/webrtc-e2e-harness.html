@@ -506,6 +506,16 @@ $("btnCopy").addEventListener("click", async () => {
 renderCriteria();
 renderResults();
 log("Harness loaded. Serve from http://localhost:5173 (or 127.0.0.1:5173) — see note at top. Steps: 1) paste admin token, 2) List devices, 3) Run full test.");
+// Local-test auto-fill (Wave 5C follow-up): when served by
+// analysis/serve_harness.py, fetch the staging token same-origin and fill
+// the password field, so the browser run never needs the token pasted or
+// printed anywhere. The token is still sent only as an X-Admin-Token
+// header and is never logged. If the endpoint is absent (plain
+// `python3 -m http.server`), this fails silently and the field stays
+// manual — paste the token as before.
+fetch("/staging-token").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+  if (d && d.token) { $("token").value = d.token; log("Staging token auto-filled from local server (not logged)."); }
+}).catch(function () { /* manual paste */ });
 </script>
 </body>
 </html>
