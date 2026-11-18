@@ -53,6 +53,16 @@ export interface DeviceTelemetry {
 }
 
 export type PlatformType = "linux" | "windows" | "darwin";
+
+/**
+ * Backend sync state (UX-06). Stored values are "loading" | "live" |
+ * "error" only; "stale" is derived by getSyncState() when the last
+ * successful sync is older than SYNC_STALE_AFTER_MS (30 s), so no timer
+ * is needed. Initial state is "loading" until the first sync attempt
+ * resolves; unauthenticated (demo) sessions never sync, so views must
+ * only render this when live-authenticated.
+ */
+export type SyncState = "loading" | "live" | "error" | "stale";
 export type DeviceStatus = "online" | "offline" | "unresponsive" | "pending_auth";
 
 export interface EnrolledDevice {
@@ -71,6 +81,13 @@ export interface EnrolledDevice {
   tags: string[];
   telemetry: DeviceTelemetry;
   revoked?: boolean;
+  /**
+   * P1-3: epoch SECONDS at which the device token expires, as returned
+   * by GET /api/devices (`token_expires_at`). Absent for seed/demo
+   * devices and when the backend does not report one. See
+   * state/tokenExpiry.ts for the 72 h warning threshold.
+   */
+  tokenExpiresAt?: number;
 }
 
 export type TaskRiskTier = "tier1_safe" | "tier2_workspace" | "tier3_shell" | "tier4_kernel";
@@ -223,9 +240,27 @@ export interface OperatorProfile {
   workstationMtlsPinned: boolean;
 }
 
+/**
+ * In-app navigation guard (UX-31). A view with unsaved edits registers a
+ * guard; the store's setCurrentView consults it before leaving the view.
+ * Browser back/refresh is deliberately NOT covered here — refresh is
+ * guarded by the view's beforeunload handler instead.
+ */
+export interface NavigationGuard {
+  /** True when leaving the view would discard unsaved work. */
+  isDirty: () => boolean;
+}
+
 export interface DashboardStoreState {
   currentView: ViewId;
-  setCurrentView: (view: ViewId) => void;
+  setCurrentView: (view: ViewId, opts?: { force?: boolean; extra?: { section?: string; tab?: string } }) => void;
+  /** View an intercepted navigation was heading for, while the guard's
+      confirm dialog is open; null when no navigation is pending (UX-31). */
+  pendingNavigation: ViewId | null;
+  registerNavigationGuard: (guard: NavigationGuard) => void;
+  unregisterNavigationGuard: () => void;
+  confirmPendingNavigation: () => void;
+  cancelPendingNavigation: () => void;
   devices: EnrolledDevice[];
   selectedDeviceId: string;
   setSelectedDeviceId: (id: string) => void;
@@ -248,6 +283,14 @@ export interface DashboardStoreState {
   operatorProfile: OperatorProfile;
   gatewayLatencyMs: number;
   gatewayStatus: "online" | "degraded" | "offline";
+  /** Backend sync lifecycle; "stale" is derived via getSyncState(). */
+  syncState: "loading" | "live" | "error";
+  /** Epoch ms of the last successful sync; null before the first one. */
+  lastSyncAt: number | null;
+  /** Error message from the last failed sync, if any (kept until the next success). */
+  syncError?: string;
+  /** Stored syncState, except "stale" when live but lastSyncAt is older than SYNC_STALE_AFTER_MS. */
+  getSyncState: () => SyncState;
   refreshLive?: () => Promise<void>;
 }
 

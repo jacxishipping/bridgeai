@@ -13,6 +13,13 @@ function isLiveAuthenticated(): boolean {
 }
 
 /**
+ * UX-06: a successful sync older than this is "stale" (see
+ * DashboardStore.getSyncState). Matches the 15 s poll interval with
+ * headroom for one missed poll.
+ */
+export const SYNC_STALE_AFTER_MS = 30_000;
+
+/**
  * D-01: demo gating. Every view except "login" and "live" renders seeded
  * demo data, so those views are reachable without credentials only after
  * an explicit choice on the sign-in screen ("Explore demo workspace").
@@ -74,8 +81,10 @@ import type {
   ViewId,
   TaskDispatchParams,
   DashboardStoreState,
+  NavigationGuard,
   OperatorProfile,
   PlatformType,
+  SyncState,
 } from "../types/dashboard";
 
 // Helper to generate deterministic telemetry
@@ -725,7 +734,21 @@ class DashboardStore {
     if (initialView !== route.view) writeRoute(initialView);
     this.state = {
       currentView: initialView,
-      setCurrentView: (view: ViewId) => this.setCurrentView(view),
+      setCurrentView: (view: ViewId, opts?: { force?: boolean; extra?: { section?: string; tab?: string } }) =>
+        this.setCurrentView(view, opts),
+      pendingNavigation: null,
+      registerNavigationGuard: (guard: NavigationGuard) => {
+        this.navigationGuard = guard;
+      },
+      unregisterNavigationGuard: () => {
+        this.navigationGuard = null;
+        if (this.state.pendingNavigation) {
+          this.state = { ...this.state, pendingNavigation: null };
+          this.notify();
+        }
+      },
+      confirmPendingNavigation: () => this.confirmPendingNavigation(),
+      cancelPendingNavigation: () => this.cancelPendingNavigation(),
       devices: SEED_DEVICES,
       selectedDeviceId: SEED_DEVICES.some((d) => d.id === route.device) ? route.device! : "srv-us-east-412",
       setSelectedDeviceId: (id: string) => this.setSelectedDeviceId(id),
@@ -754,6 +777,10 @@ class DashboardStore {
       },
       gatewayLatencyMs: 14,
       gatewayStatus: "online",
+      syncState: "loading",
+      lastSyncAt: null,
+      syncError: undefined,
+      getSyncState: () => this.getSyncState(),
       refreshLive: () => this.refreshLive(),
     };
 
@@ -773,6 +800,9 @@ class DashboardStore {
   }
 
   private eventStreamActive = false;
+
+  /** UX-31: the currently registered in-app navigation guard, if any. */
+  private navigationGuard: NavigationGuard | null = null;
 
   private startEventStream = async (): Promise<void> => {
     if (this.eventStreamActive || typeof fetch === "undefined" || !isLiveAuthenticated()) return;
@@ -810,11 +840,32 @@ class DashboardStore {
     }
   };
 
+  /**
+   * Stored syncState, except "stale" when the last successful sync is
+   * older than SYNC_STALE_AFTER_MS. Derived on read (no timer): callers
+   * re-render on store notifications, so staleness appears on the next
+   * render after the threshold passes (next poll, SSE event, or any
+   * other store update). Views should select syncState + lastSyncAt and
+   * call this helper, or select getSyncState() in a selector.
+   */
+  public getSyncState = (): SyncState => {
+    if (
+      this.state.syncState === "live" &&
+      this.state.lastSyncAt !== null &&
+      Date.now() - this.state.lastSyncAt > SYNC_STALE_AFTER_MS
+    ) {
+      return "stale";
+    }
+    return this.state.syncState;
+  };
+
   public syncWithBackend = async (): Promise<void> => {
     const adminTok = token();
     const sessTok = sessionToken();
     if (!adminTok && !sessTok) return;
     if (!this.eventStreamActive) void this.startEventStream();
+    this.state = { ...this.state, syncState: "loading", syncError: undefined };
+    this.notify();
 
     try {
       const startTime = performance.now();
@@ -834,6 +885,9 @@ class DashboardStore {
       const nextState: Partial<DashboardStoreState> = {
         gatewayLatencyMs: latency,
         gatewayStatus: "online",
+        syncState: "live",
+        lastSyncAt: Date.now(),
+        syncError: undefined,
       };
 
       if (identRes) {
@@ -890,6 +944,9 @@ class DashboardStore {
             workspacePath: typeof d.workspace === "string" ? d.workspace : "Not reported",
             assignedModels: Array.isArray(d.assigned_models) ? d.assigned_models : [],
             tags: Array.isArray(d.tags) ? d.tags : [],
+            // P1-3: keep the raw epoch-seconds expiry from list_devices so
+            // the views can badge expired / expiring-soon tokens.
+            tokenExpiresAt: typeof d.token_expires_at === "number" ? d.token_expires_at : undefined,
             telemetry: {
               cpuPercent: isOnline ? cpuPercent : 0,
               cpuCores: isOnline ? [cpuPercent] : [0],
@@ -1071,8 +1128,18 @@ class DashboardStore {
 
       this.state = { ...this.state, ...nextState };
       this.notify();
-    } catch {
-      this.state = { ...this.state, gatewayStatus: "degraded" };
+    } catch (err) {
+      // Failure keeps the last good data on screen (nothing in
+      // nextState is applied) and surfaces via syncState/syncError so
+      // views can show an error banner with Retry instead of silently
+      // leaving seed/stale data up. gatewayStatus stays readable as
+      // before ("degraded").
+      this.state = {
+        ...this.state,
+        gatewayStatus: "degraded",
+        syncState: "error",
+        syncError: err instanceof Error ? err.message : "Sync with the control plane failed.",
+      };
       this.notify();
     }
   };
@@ -1094,18 +1161,52 @@ class DashboardStore {
     }
   };
 
-  public setCurrentView = (currentView: ViewId): void => {
+  public setCurrentView = (
+    currentView: ViewId,
+    opts?: { force?: boolean; extra?: { section?: string; tab?: string } }
+  ): void => {
     // Navigating to a demo view from the sign-in screen is the explicit,
     // labelled demo entry point: record the choice for this session.
     if (isDemoView(currentView) && this.state.currentView === "login" && !isLiveAuthenticated()) {
       markDemoAcknowledged();
     }
     const gated = gateDemoView(currentView);
-    writeRoute(gated, gated === "device-360-system" ? this.state.selectedDeviceId : undefined);
+    // UX-31: in-app navigation guard. A registered guard with unsaved edits
+    // intercepts the navigation: the target is held in pendingNavigation
+    // and the owning view shows its confirm dialog (Stay / Leave without
+    // saving). Browser back/forward goes through syncRoute, not here, so it
+    // is deliberately not intercepted; refresh is covered by beforeunload.
+    if (!opts?.force && this.navigationGuard?.isDirty() && gated !== this.state.currentView) {
+      if (this.state.pendingNavigation !== gated) {
+        this.state = { ...this.state, pendingNavigation: gated };
+        this.notify();
+      }
+      return;
+    }
+    writeRoute(gated, gated === "device-360-system" ? this.state.selectedDeviceId : undefined, opts?.extra);
     if (this.state.currentView === gated) return;
-    this.state = { ...this.state, currentView: gated };
+    this.state = { ...this.state, currentView: gated, pendingNavigation: null };
     this.notify();
     void this.syncWithBackend();
+  };
+
+  /**
+   * UX-31: the guard's dialog confirmed "Leave without saving" — navigate
+   * to the held target, bypassing the guard once. Called by the owning
+   * view from its ConfirmDestructive onConfirm.
+   */
+  public confirmPendingNavigation = (): void => {
+    const target = this.state.pendingNavigation;
+    if (!target) return;
+    this.state = { ...this.state, pendingNavigation: null };
+    this.setCurrentView(target, { force: true });
+  };
+
+  /** UX-31: the guard's dialog chose "Stay" — drop the held target. */
+  public cancelPendingNavigation = (): void => {
+    if (!this.state.pendingNavigation) return;
+    this.state = { ...this.state, pendingNavigation: null };
+    this.notify();
   };
 
   public syncRoute = (): void => {

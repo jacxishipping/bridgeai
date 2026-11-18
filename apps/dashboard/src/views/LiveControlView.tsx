@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { ArrowUpRight, RefreshCw, ShieldCheck } from "lucide-react";
 import { api, apiOrigin, ApiError, clearCredentials, token, sessionToken } from "../api";
-import { GlassModal, HoldToConfirmButton, JXAlert, JXBadge, JXButton, ProductGlass, ProductModePill, ProductStatusDot } from "../ui";
+import { EmptyState, JXAlert, JXBadge, JXButton, ProductGlass, ProductModePill, ProductStatusDot } from "../ui";
+import { EmergencyStopConfirm } from "../shell/TopHeader";
 import { Brand } from "../Brand";
 import { DensityControl } from "../DensityControl";
 import { LanguageControl } from "../LanguageControl";
-import { PageEmpty } from "../components/PageEmpty";
 import { Freshness } from "../components/Freshness";
 import { useLanguage } from "../i18n";
 import { useDashboardStore } from "../state/dashboardStore";
@@ -235,17 +235,19 @@ export function LiveControlView() {
     finally { setActing(false); }
   };
   if (expired) {
-    return <main className="product-live">
+    return <div className="product-live">
       <header className="product-topbar">
         <div className="product-container flex min-h-14 flex-wrap items-center justify-between gap-3 py-2"><Brand /></div>
       </header>
       <div className="product-container space-y-4 py-6" lang="en" dir="ltr">
         <JXAlert severity="error" title="Session expired" description="Your session expired. No sample data is shown while the session is invalid." />
-        <JXButton color="primary" onClick={() => { clearCredentials(); navigate("login"); }}>Return to sign in</JXButton>
+        <JXButton color="primary" onClick={() => { clearCredentials(); navigate("login"); }}>Sign out</JXButton>
       </div>
-    </main>;
+    </div>;
   }
-  return <main className="product-live">
+  // Inside AppShell now (UX-02): the root is a <div>, not a nested <main>,
+  // so the shell's <main id="main-content"> stays the only main landmark.
+  return <div className="product-live">
     <header className="product-topbar">
       <div className="product-container flex min-h-14 flex-wrap items-center justify-between gap-3 py-2">
         <Brand />
@@ -261,7 +263,7 @@ export function LiveControlView() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h1>{t("Control plane")}</h1>
+            <h1>Live home</h1>
             <ProductModePill live={isLive} detail={apiOrigin.replace(/^https?:\/\//, "")} />
           </div>
           {snapshot ? (
@@ -282,7 +284,7 @@ export function LiveControlView() {
         {isLive ? (
           <JXAlert severity="error" title="Control plane unavailable" description={`${error} Previously loaded data, if shown, may be stale.`} />
         ) : (
-          <PageEmpty
+          <EmptyState
             demo
             title="Connect a control plane to use Live home"
             description="This page stays empty until you sign in. Sample fleet metrics live under Fleet overview — clearly labeled as demo."
@@ -292,7 +294,7 @@ export function LiveControlView() {
             onSecondary={() => navigate("overview")}
           />
         )}
-        {isLive && <JXButton color="neutral" variant="outlined" onClick={signOut}>Return to sign in</JXButton>}
+        {isLive && <JXButton color="neutral" variant="outlined" onClick={signOut}>Sign out</JXButton>}
       </div>}
       {loading && !snapshot && <p role="status" lang="en" dir="ltr" className="py-8 text-sm text-[color:var(--product-text-tertiary)]">Loading your control plane…</p>}
       {snapshot && <>
@@ -309,6 +311,7 @@ export function LiveControlView() {
               </div>
               <JXButton variant="outlined" color={snapshot.health.emergency_stop ? "success" : "error"}
                 disabled={Boolean(error) || snapshot.identity.role !== "admin"}
+                title={error ? "Unavailable while the control plane is unreachable." : snapshot.identity.role !== "admin" ? "An administrator is required to change the emergency stop." : undefined}
                 onClick={() => { setActionError(""); setConfirm(true); }}>{snapshot.health.emergency_stop ? "Clear emergency stop" : "Stop fleet"}</JXButton>
             </div>
             {snapshot.identity.role !== "admin" && <p className="mt-2 text-xs text-[color:var(--product-text-tertiary)]">An administrator is required to change the emergency stop.</p>}
@@ -560,9 +563,9 @@ export function LiveControlView() {
           const waiting = enrolled.length > 0 && online.length === 0;
           if (!enrolled.length) {
             return (
-              <PageEmpty
+              <EmptyState
                 title="No devices enrolled yet"
-                description="Create an enrollment token on Devices, run the control-plane install command on the host, then return here for the first heartbeat."
+                description="Create an enrollment token on Devices, run the control-plane install command on the device, then return here for the first heartbeat."
                 actionLabel="Enroll a device"
                 onAction={() => navigate("devices")}
                 secondaryLabel="Open connections"
@@ -573,9 +576,9 @@ export function LiveControlView() {
           if (waiting) {
             return (
               <div className="space-y-4">
-                <PageEmpty
+                <EmptyState
                   title="Waiting for first heartbeat"
-                  description={`${enrolled.length} device${enrolled.length === 1 ? "" : "s"} enrolled, but none are online yet. Finish the install script on the host, then refresh — this page polls automatically.`}
+                  description={`${enrolled.length} device${enrolled.length === 1 ? "" : "s"} enrolled, but none are online yet. Finish the install script on the device, then refresh — this page polls automatically.`}
                   actionLabel="Refresh now"
                   onAction={() => { void refresh(); }}
                   secondaryLabel="Show install commands"
@@ -598,24 +601,20 @@ export function LiveControlView() {
       </>}
       <footer lang="en" dir="ltr" className="flex flex-wrap items-center justify-between gap-3 border-t border-[color:var(--product-line)] pt-5">
         <p className="text-xs leading-relaxed text-[color:var(--product-text-tertiary)]">Operations Dashboard: view complete fleet telemetry, charts, and device execution.</p>
-        <JXButton color="neutral" variant="text" onClick={() => navigate("overview")} endIcon={<ArrowUpRight className="h-4 w-4" />}>Explore full dashboard</JXButton>
+        <JXButton color="neutral" variant="text" onClick={() => navigate("overview")} endIcon={<ArrowUpRight className="h-4 w-4" />}>View demo workspace</JXButton>
       </footer>
     </div>
-    <div lang="en" dir="ltr"><GlassModal open={confirm} onClose={() => { if (!acting) setConfirm(false); }} title={snapshot?.health.emergency_stop ? "Clear the real emergency stop?" : "Stop the real fleet?"}>
-      <div className="space-y-5">
-        <p className="text-sm leading-relaxed text-[color:var(--product-text-secondary)]">This sends an authenticated request to your control plane and affects real devices. Continue only if you are authorized.</p>
-        {actionError && <JXAlert severity="error" title="Change not confirmed" description={actionError} />}
-        <div className="flex flex-wrap justify-end gap-3">
-          <JXButton color="neutral" variant="outlined" disabled={acting} onClick={() => setConfirm(false)}>Cancel</JXButton>
-          <HoldToConfirmButton
-            label={snapshot?.health.emergency_stop ? "Hold to clear stop" : "Hold to stop fleet"}
-            tone={snapshot?.health.emergency_stop ? "success" : "danger"}
-            variant="solid"
-            holdDurationMs={1200}
-            onConfirm={() => { if (!acting) void changeStop(); }}
-          />
-        </div>
-      </div>
-    </GlassModal></div>
-  </main>;
+    <EmergencyStopConfirm
+      open={confirm}
+      stopped={snapshot?.health.emergency_stop ?? false}
+      isLive
+      title={snapshot?.health.emergency_stop ? "Clear the real emergency stop?" : "Stop the real fleet?"}
+      consequence="This sends an authenticated request to your control plane and affects real devices. Continue only if you are authorized."
+      confirmLabel={snapshot?.health.emergency_stop ? "Hold to clear stop" : "Hold to stop fleet"}
+      holdDurationMs={1200}
+      error={actionError || null}
+      onClose={() => { if (!acting) setConfirm(false); }}
+      onConfirm={() => { if (!acting) void changeStop(); }}
+    />
+  </div>;
 }

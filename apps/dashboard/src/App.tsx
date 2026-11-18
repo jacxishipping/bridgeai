@@ -4,10 +4,12 @@
  * Strict JXUI Primitives & Lucide Icons. ZERO inline styles.
  */
 
-import React, { useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { AppShell } from "./shell/AppShell";
-import { BreadcrumbTrail } from "./ui";
+import { NoticeStack } from "./components/NoticeStack";
 import { useDashboardStore } from "./state/dashboardStore";
+import { readRoute, type LiveSection, type LiveTab } from "./state/navigation";
+import { pushNotice } from "./state/notices";
 import type { ViewId } from "./types/dashboard";
 
 // Import all 15 operational screen views
@@ -34,7 +36,10 @@ export interface ViewMetadata {
   breadcrumbs: string[];
 }
 
+// Canonical labels (UX-15): the title is the sidebar label for the same
+// destination, so nav, title, breadcrumb, and palette agree.
 const VIEWS_WITH_OWN_HEADER: ViewId[] = [
+  "live",
   "overview",
   "devices",
   "device-360-system",
@@ -46,27 +51,79 @@ const VIEWS_WITH_OWN_HEADER: ViewId[] = [
   "interactive-terminal",
   "human-approvals",
   "mcp-and-oauth",
+  // UX-36: these views gained their own <h1> in the UX remediation
+  // (TaskQueueVisionView, FleetOperationsView, AiApiHubView,
+  // DiagnosticsLogsView); without an entry here the shell would render a
+  // second h1 above them.
+  "task-queue-and-vision",
+  "fleet-operations",
+  "ai-api-and-agents",
+  "diagnostics-and-logs",
 ];
+
+/** Live-workspace section labels for the #/live breadcrumb (UX-16). */
+const LIVE_SECTION_LABELS: Record<LiveSection, string> = {
+  devices: "Devices", tasks: "Tasks", approvals: "Approvals", notifications: "Notifications",
+  audit: "Audit", policies: "Policies", connections: "Connections", logs: "Logs", users: "Users",
+};
+const LIVE_TAB_LABELS: Record<LiveTab, string> = {
+  details: "Details", tasks: "Tasks", terminal: "Terminal", desktop: "Desktop",
+};
 
 export const App: React.FC = () => {
   const currentView = useDashboardStore((s) => s.currentView);
   const devices = useDashboardStore((s) => s.devices);
   const selectedDeviceId = useDashboardStore((s) => s.selectedDeviceId);
+  // Live section/tab from the hash, kept in sync on hashchange/popstate so
+  // the #/live breadcrumb reflects the live section the user is in (UX-16).
+  // LiveWorkspace dispatches a synthetic hashchange after its pushState
+  // navigations, so section clicks update this too.
+  const [liveRoute, setLiveRoute] = useState(() => readRoute());
+  useEffect(() => {
+    const sync = () => setLiveRoute(readRoute());
+    window.addEventListener("hashchange", sync);
+    window.addEventListener("popstate", sync);
+    return () => {
+      window.removeEventListener("hashchange", sync);
+      window.removeEventListener("popstate", sync);
+    };
+  }, []);
 
-  const selectedDevice = devices.find((d) => d.id === selectedDeviceId) || devices[0];
-  const selectedHostname = selectedDevice?.hostname || "srv-us-east-412";
+  // A stale/unknown device id never falls back to the first fleet device
+  // (UX-27): the breadcrumb names it "Unknown device" instead.
+  const selectedDevice = devices.find((d) => d.id === selectedDeviceId);
+  const selectedHostname = selectedDevice?.hostname || "Unknown device";
+
+  // An unrecognised hash resolves to login (navigation.ts); say so briefly
+  // on the login landing instead of looking like a logged-out session (UX-13).
+  const lastBadHash = useRef("");
+  useEffect(() => {
+    if (currentView !== "login") return;
+    const hash = window.location.hash;
+    if (readRoute().unknownHash && lastBadHash.current !== hash) {
+      lastBadHash.current = hash;
+      pushNotice({
+        tone: "warning",
+        title: "That page doesn't exist",
+        message: "The link you followed isn't a known page, so you were taken to Sign in instead.",
+      });
+    }
+  }, [currentView]);
 
   // View titles and navigation breadcrumbs metadata for all 15 routes
+  const liveBreadcrumbs = ["AI Bridge", "Live home"];
+  if (liveRoute.section) liveBreadcrumbs.push(LIVE_SECTION_LABELS[liveRoute.section]);
+  if (liveRoute.device && liveRoute.tab && liveRoute.tab !== "details") liveBreadcrumbs.push(LIVE_TAB_LABELS[liveRoute.tab]);
   const viewMeta: Record<ViewId, ViewMetadata> = {
     live: {
-      title: "Control plane",
+      title: "Live home",
       domain: "Live",
-      breadcrumbs: ["AI Bridge", "Control plane"],
+      breadcrumbs: liveBreadcrumbs,
     },
     overview: {
       title: "Fleet overview",
       domain: "Operations Domain",
-      breadcrumbs: ["AI Bridge", "Operations", "Overview"],
+      breadcrumbs: ["AI Bridge", "Operations", "Fleet overview"],
     },
     devices: {
       title: "Devices",
@@ -76,17 +133,17 @@ export const App: React.FC = () => {
     "device-360-system": {
       title: "Device details",
       domain: "Operations Domain",
-      breadcrumbs: ["AI Bridge", "Operations", "Device 360", selectedHostname],
+      breadcrumbs: ["AI Bridge", "Operations", "Device details", selectedHostname],
     },
     "task-queue-and-vision": {
-      title: "Tasks & vision",
+      title: "Tasks",
       domain: "Operations Domain",
-      breadcrumbs: ["AI Bridge", "Operations", "Task Queue & Vision"],
+      breadcrumbs: ["AI Bridge", "Operations", "Tasks"],
     },
     "live-desktop-studio": {
-      title: "Remote desktop",
+      title: "Desktop",
       domain: "Operations Domain",
-      breadcrumbs: ["AI Bridge", "Operations", "Live Desktop"],
+      breadcrumbs: ["AI Bridge", "Operations", "Desktop"],
     },
     "interactive-terminal": {
       title: "Terminal",
@@ -101,37 +158,37 @@ export const App: React.FC = () => {
     "fleet-operations": {
       title: "Fleet operations",
       domain: "Operations Domain",
-      breadcrumbs: ["AI Bridge", "Operations", "Fleet Operations"],
+      breadcrumbs: ["AI Bridge", "Operations", "Fleet operations"],
     },
     "ai-api-and-agents": {
-      title: "AI providers & agents",
+      title: "AI providers",
       domain: "Operations Domain",
-      breadcrumbs: ["AI Bridge", "Operations", "AI API & Agents"],
+      breadcrumbs: ["AI Bridge", "Operations", "AI providers"],
     },
     "human-approvals": {
-      title: "Human approvals",
+      title: "Approvals",
       domain: "Governance Domain",
-      breadcrumbs: ["AI Bridge", "Governance", "Human Approvals"],
+      breadcrumbs: ["AI Bridge", "Governance", "Approvals"],
     },
     "security-policies": {
-      title: "Security policies",
+      title: "Policies",
       domain: "Governance Domain",
-      breadcrumbs: ["AI Bridge", "Governance", "Security Policies"],
+      breadcrumbs: ["AI Bridge", "Governance", "Policies"],
     },
     "audit-trail": {
-      title: "Audit trail",
+      title: "Audit log",
       domain: "Governance Domain",
-      breadcrumbs: ["AI Bridge", "Governance", "Audit Trail"],
+      breadcrumbs: ["AI Bridge", "Governance", "Audit log"],
     },
     "mcp-and-oauth": {
-      title: "MCP & OAuth",
+      title: "Connections",
       domain: "Governance Domain",
-      breadcrumbs: ["AI Bridge", "Governance", "MCP & OAuth"],
+      breadcrumbs: ["AI Bridge", "Governance", "Connections"],
     },
     "diagnostics-and-logs": {
-      title: "Diagnostics & logs",
+      title: "Logs",
       domain: "Governance Domain",
-      breadcrumbs: ["AI Bridge", "Governance", "Diagnostics & Logs"],
+      breadcrumbs: ["AI Bridge", "Governance", "Logs"],
     },
     login: {
       title: "Sign in",
@@ -143,12 +200,14 @@ export const App: React.FC = () => {
   const currentMeta = viewMeta[currentView] || viewMeta.overview;
   useEffect(() => {
     document.title = `${currentMeta.breadcrumbs[currentMeta.breadcrumbs.length - 1]} · AI Bridge${currentView !== "live" && currentView !== "login" ? " · Demo" : ""}`;
-  }, [currentView, currentMeta.title]);
+  }, [currentView, currentMeta]);
 
   const renderActiveView = () => {
     switch (currentView) {
       case "login":
         return <LoginView />;
+      case "live":
+        return <LiveControlView />;
       case "overview":
         return <OverviewView />;
       case "devices":
@@ -183,27 +242,21 @@ export const App: React.FC = () => {
   };
 
   // If current view is login, render full Zero-Trust Login Console
+  // (login stays outside AppShell; every other view, including #/live,
+  // renders inside it so the sidebar, palette, and TopHeader are always
+  // available — UX-02).
   if (currentView === "login") {
-    return <LoginView />;
+    return (<><NoticeStack /><LoginView /></>);
   }
-  if (currentView === "live") return <LiveControlView />;
 
   return (
-    <AppShell currentView={currentView} viewMeta={currentMeta}>
+    <><NoticeStack />
+    <AppShell currentView={currentView} viewMeta={currentMeta} showHeader={!VIEWS_WITH_OWN_HEADER.includes(currentView)}>
       <div className="w-full">
-        {!VIEWS_WITH_OWN_HEADER.includes(currentView) && (
-          <div className="mb-6 flex flex-col justify-between gap-3 border-b border-[var(--product-line)] pb-3 md:flex-row md:items-end">
-            <div className="space-y-2">
-              <BreadcrumbTrail crumbs={currentMeta.breadcrumbs} />
-              <h1 className="text-xl font-bold tracking-tight text-[var(--product-text)]">
-                {currentMeta.title}
-              </h1>
-            </div>
-          </div>
-        )}
         {renderActiveView()}
       </div>
     </AppShell>
+    </>
   );
 };
 

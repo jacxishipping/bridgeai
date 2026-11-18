@@ -165,6 +165,47 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         audit("admin", device_id, "revoke_device", {}, "allowed")
         return {"device_id": device_id, "revoked": True}
 
+    @router.post("/api/devices/{device_id}/rotate-token")
+    def rotate_device_token(device_id: str, x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None)):
+        """Admin-side device-token rotation (P1-3).
+
+        Mirrors the agent self-service rotate (``POST /api/agent/rotate``)
+        but is callable by an admin when the agent cannot rotate itself
+        (compromised or expiring credential). The old token dies
+        immediately: the new hash replaces the stored one and the
+        in-process verify cache is cleared best-effort, exactly as
+        revoke does, so the old token is not usable until the 5 s cache
+        TTL would otherwise expire it.
+        """
+        actor = require_role("admin", x_admin_token, x_session_token)
+        row = conn.execute("SELECT * FROM devices WHERE id=? AND revoked=0", (device_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Device not found or revoked.")
+        _require_row_tenant(row, x_admin_token, x_session_token)
+        new_token = secrets.token_urlsafe(32)
+        issued = dbmod.now()
+        expires = issued + device_ttl_days * 86400
+        conn.execute(
+            "UPDATE devices SET token_hash=?, token_issued_at=?, token_expires_at=? WHERE id=?",
+            (dbmod.hash_token(new_token), issued, expires, device_id),
+        )
+        conn.commit()
+        try:
+            from ...device_routing import clear_verify_cache as _clear_verify_cache
+
+            _clear_verify_cache()
+        except Exception:  # noqa: BLE001 - cache clear is best-effort; rotation already committed
+            pass
+        audit(actor, device_id, "rotate_device_token", {}, "allowed", tenant=_row_tenant(row))
+        # Token is shown exactly once here; only its hash is stored.
+        return {
+            "device_id": device_id,
+            "device_token": new_token,
+            "token_expires_at": expires,
+            "token_ttl_days": device_ttl_days,
+            "note": "Old token is invalid immediately. Store the new token securely; it will not be shown again.",
+        }
+
     @router.put("/api/devices/{device_id}")
     def update_device(device_id: str, body: DeviceUpdateIn, x_admin_token: str | None = Header(default=None), x_session_token: str | None = Header(default=None)):
         actor = require_role("admin", x_admin_token, x_session_token)
@@ -762,12 +803,20 @@ def create_devices_router(ctx: ControlContext) -> APIRouter:
         _require_device_tenant(device_id, x_admin_token, x_session_token)
         from .. import device_mtls
 
-        fp = device_mtls.normalize_fingerprint(str(body.get("fingerprint") or body.get("mtls_fingerprint") or ""))
-        if not fp:
+        # P1-3: a fingerprint key that is present but normalizes to empty
+        # clears the pinned fingerprint (sets the column NULL); only a
+        # body with neither key is a 400. Presence — not truthiness — is
+        # the test, so {"fingerprint": ""} clears instead of erroring.
+        if "fingerprint" not in body and "mtls_fingerprint" not in body:
             raise HTTPException(status_code=400, detail="fingerprint required")
+        fp = device_mtls.normalize_fingerprint(str(body.get("fingerprint") or body.get("mtls_fingerprint") or ""))
         row = conn.execute("SELECT id FROM devices WHERE id=? AND revoked=0", (device_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Device not found.")
+        if not fp:
+            device_mtls.set_device_fingerprint(conn, device_id, "")
+            audit(actor, device_id, "clear_mtls_fingerprint", {}, "allowed")
+            return {"ok": True, "device_id": device_id, "mtls_fingerprint": None}
         device_mtls.set_device_fingerprint(conn, device_id, fp)
         audit(actor, device_id, "set_mtls_fingerprint", {"fingerprint": fp[:16] + "..."}, "allowed")
         return {"ok": True, "device_id": device_id, "mtls_fingerprint": fp}

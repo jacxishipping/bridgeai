@@ -1,8 +1,16 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
-import { JXButton } from "../../ui";
+import { EmptyState, JXButton, normalizeStatusKey, STATUS_TONES, StatusBadge } from "../../ui";
 import { TaskComposer } from "./TaskComposer";
-import { argsOf, deviceName, Empty, Field, fieldClass, LiveDevice, LiveTask, normalizeTaskStatus, Pagination, Payload, ReadState, taskStates, taskStatus, text, time, useRead } from "./shared";
+import { argsOf, deviceName, Field, fieldClass, LiveDevice, LiveTask, normalizeTaskStatus, Pagination, Payload, ReadState, taskStates, text, time, useRead } from "./shared";
+
+/** Option label from the shared status map (UX-05); "all" is not a status. */
+const taskStatusLabel = (value: string) => {
+  if (value === "all") return "All tasks";
+  // The backend calls it needs_approval; the shared map calls it pending_approval.
+  const key = value === "needs_approval" ? "pending_approval" : normalizeStatusKey(value);
+  return STATUS_TONES[key]?.label ?? value.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+};
 
 function TaskEvents({ taskId }: { taskId: string }) {
   const [events, setEvents] = useState<{ event: string; created_at?: number; detail?: Record<string, unknown> }[]>([]);
@@ -64,6 +72,7 @@ export function TasksPanel({ devices, device, canAct, onlyTool, status = "all", 
   const state = useRead(load, true);
   const { data, error, loading, refresh } = state;
   const [composer, setComposer] = useState<{ tool?: string; args?: Record<string, unknown>; device?: LiveDevice }>();
+  const [openTask, setOpenTask] = useState<string | null>(null);
   const tasks = (data?.items || []).filter((task) => (!onlyTool || task.tool === onlyTool) && (status === "all" || normalizeTaskStatus(task.status) === status) &&
     [task.id, task.tool, task.device_id, devices.find(d => d.id === task.device_id)?.name].some(value => value?.toLowerCase().includes(query.toLowerCase())));
   const total = history ? data?.total || 0 : tasks.length;
@@ -75,7 +84,7 @@ export function TasksPanel({ devices, device, canAct, onlyTool, status = "all", 
       <div className="flex flex-wrap gap-3">
         <Field label="Find task"><input className={fieldClass} value={query} maxLength={200} placeholder={history ? "Task ID or tool" : "Task, tool or device"} onChange={e => { setQuery(e.target.value); setPage(1); }} /></Field>
         <Field label="Task status"><select value={status} className={fieldClass} onChange={(e) => { setPage(1); onStatus(e.target.value); }}>
-          {taskStates.map((value) => <option key={value} value={value}>{value === "all" ? "All tasks" : taskStatus(value)}</option>)}
+          {taskStates.map((value) => <option key={value} value={value}>{taskStatusLabel(value)}</option>)}
         </select></Field>
         <JXButton color="neutral" variant="outlined" disabled={loading} onClick={refresh}>Refresh tasks</JXButton>
       </div>
@@ -88,20 +97,19 @@ export function TasksPanel({ devices, device, canAct, onlyTool, status = "all", 
     <ReadState {...state} />
     {error && <p role="alert" className="text-sm text-amber-300">{error} Previously loaded tasks may be stale.</p>}
     {loading && !data && <p role="status" className="py-6 text-sm text-[var(--product-text-tertiary)]">Loading tasks…</p>}
-    {data && !tasks.length && <Empty title={status !== "all" ? "No matching tasks" : "No tasks yet"}>
-      {status !== "all" ? <JXButton color="neutral" variant="outlined" onClick={() => onStatus("all")}>Clear task filter</JXButton> :
-        <p className="text-sm text-[var(--product-text-tertiary)]">{device ? "Submit a task to this device to get started." : "Open a device to submit a task."}</p>}
-    </Empty>}
-    <ul className="divide-y divide-slate-800">{shown.map((task) => {
+    {data && !tasks.length && <EmptyState variant="bare" title={status !== "all" ? "No matching tasks" : "No tasks yet"}
+      description={status !== "all" ? undefined : device ? "Submit a task to this device to get started." : "Open a device to submit a task."}
+      actionLabel={status !== "all" ? "Clear task filter" : undefined} onAction={status !== "all" ? () => onStatus("all") : undefined} />}
+    <ul className="divide-y divide-[var(--product-line)]">{shown.map((task) => {
       const target = devices.find((item) => item.id === task.device_id);
       const safeRetry = task.status === "failed" && ["get_system_info", "get_resource_usage", "get_network_info"].includes(task.tool) &&
         Object.keys(argsOf(task)).length === 0 && target && !target.revoked;
       return <li key={task.id} className="py-4">
-        <details className="group min-w-0">
-          <summary className="cursor-pointer rounded-lg text-sm">
+        <details className="group min-w-0" open={openTask === task.id} onToggle={(e) => setOpenTask(e.currentTarget.open ? task.id : null)}>
+          <summary aria-expanded={openTask === task.id} className="cursor-pointer rounded-lg text-sm">
             <span className="inline-flex max-w-full flex-wrap items-center gap-x-4 gap-y-1 align-middle">
               <span className="break-all font-medium">{task.tool}</span>
-              <span className={task.status === "failed" ? "text-rose-300" : "text-[var(--product-text-secondary)]"}>{taskStatus(task.status)}</span>
+              <StatusBadge status={task.status} />
               {!device && <span className="break-all text-[var(--product-text-tertiary)]">{target ? deviceName(target) : task.device_id}</span>}
               <span className="text-xs text-[var(--product-text-tertiary)]">{time(task.updated_at || task.created_at)}</span>
             </span>

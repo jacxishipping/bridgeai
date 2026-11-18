@@ -4,7 +4,7 @@
  * Pure @jacxishippingorg/jx-ui-react, motion/react, and lucide-react. ZERO inline styles.
  */
 
-import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { motion } from "motion/react";
 import { useScrollShadow } from "../hooks/useScrollShadow";
 import {
@@ -20,7 +20,6 @@ import {
   JXChip,
   JXTextField,
   JXTabs,
-  JXAlert,
   GlassModal,
   BreadcrumbTrail,
   FloatingActionButton,
@@ -30,10 +29,14 @@ import {
   ProductModePill,
   ProductNotice,
   ProductSegmented,
-  ProductStatusDot,
   ProductStepProgress,
+  StatusBadge,
+  ConfirmDestructive,
+  EmptyState,
 } from "../ui";
-import { PageEmpty } from "../components/PageEmpty";
+import { Freshness } from "../components/Freshness";
+import { pushNotice } from "../state/notices";
+import { useLanguage } from "../i18n";
 import {
   Server,
   Activity,
@@ -61,6 +64,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { api, apiOrigin, token, sessionToken } from "../api";
+import { tokenExpiryStatus } from "../state/tokenExpiry";
 import { useDashboardStore } from "../state/dashboardStore";
 import type { EnrolledDevice, PlatformType, DeviceStatus } from "../types/dashboard";
 
@@ -71,6 +75,11 @@ export const DevicesView: React.FC = () => {
   const setCurrentView = useDashboardStore((s) => s.setCurrentView);
   const dispatchTask = useDashboardStore((s) => s.dispatchTask);
   const refreshLive = useDashboardStore((s) => s.refreshLive);
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
+  const getSyncState = useDashboardStore((s) => s.getSyncState);
+  const { date: formatDate } = useLanguage();
   const isLive = typeof window !== "undefined" && Boolean(token() || sessionToken());
   const tableScrollRef = useRef<HTMLDivElement>(null);
   const scrollShadow = useScrollShadow(tableScrollRef);
@@ -79,8 +88,11 @@ export const DevicesView: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<"all" | "online" | "offline" | "unresponsive">("all");
   const [platformFilter, setPlatformFilter] = useState<"all" | "windows" | "linux" | "darwin">("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [sortField, setSortField] = useState<"hostname" | "latency" | "heartbeat">("hostname");
+  const [sortField, setSortField] = useState<"hostname" | "latency" | "heartbeat" | "tokenExpiry">("hostname");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
+  const [groupFilter, setGroupFilter] = useState<string>("all");
+  const [tagFilter, setTagFilter] = useState<string>("all");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   // Enrollment Modal state
   const [enrollModalOpen, setEnrollModalOpen] = useState<boolean>(false);
@@ -88,21 +100,41 @@ export const DevicesView: React.FC = () => {
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [clipboardError, setClipboardError] = useState("");
   const [enrollDeviceName, setEnrollDeviceName] = useState<string>("edge-worker-node");
-  const [enrollArchRole, setEnrollArchRole] = useState<string>("Desktop Automation Host (Windows)");
-  const [sandboxDir, setSandboxDir] = useState<string>("/opt/ai-bridge/workspace");
-  const [tokenExpiry, setTokenExpiry] = useState<string>("24h");
   const [tokenProvisioned, setTokenProvisioned] = useState<boolean>(false);
   const [enrolledToken, setEnrolledToken] = useState<string>("");
   const [showEnrolledToken, setShowEnrolledToken] = useState<boolean>(false);
   const [enrolledDeviceId, setEnrolledDeviceId] = useState<string>("");
   const [enrollError, setEnrollError] = useState<string>("");
   const [isEnrolling, setIsEnrolling] = useState<boolean>(false);
-  const [deviceActionNotice, setDeviceActionNotice] = useState<string | null>(null);
 
   // Quick Dispatch Modal state
   const [dispatchModalDevice, setDispatchModalDevice] = useState<EnrolledDevice | null>(null);
   const [dispatchTool, setDispatchTool] = useState<string>("capture_desktop_screenshot");
-  const [dispatchSuccessMsg, setDispatchSuccessMsg] = useState<string | null>(null);
+  const [dispatchConfirm, setDispatchConfirm] = useState<boolean>(false);
+
+  // Destructive-action confirmation + busy state (UX-03/UX-23)
+  const [confirmAction, setConfirmAction] = useState<{ kind: "revoke" | "delete"; device: EnrolledDevice } | null>(null);
+  const [bulkConfirm, setBulkConfirm] = useState<{ kind: "revoke" | "delete"; devices: EnrolledDevice[] } | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ kind: string; id: string } | null>(null);
+
+  // P1-3: device-token rotation. The new token is shown ONCE in the modal
+  // below and held only in this component's state — it is never written
+  // to localStorage, the store, or the URL, and is cleared on dismiss.
+  const [rotateConfirm, setRotateConfirm] = useState<EnrolledDevice | null>(null);
+  const [rotatedToken, setRotatedToken] = useState<{ device: EnrolledDevice; token: string; expiresAt: number } | null>(null);
+  const [copiedRotatedToken, setCopiedRotatedToken] = useState(false);
+  // P1-3: the rotate endpoint is admin-only; gate the button on api.me()
+  // reporting role "admin", fail-closed (false) when me() fails. The
+  // server still enforces admin on the call itself.
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    let active = true;
+    if (!isLive) { setIsAdmin(false); return; }
+    api.me()
+      .then((me: any) => { if (active) setIsAdmin(me?.role === "admin"); })
+      .catch(() => { if (active) setIsAdmin(false); });
+    return () => { active = false; };
+  }, [isLive]);
 
   // Metrics counters
   const totalCount = devices.length;
@@ -113,17 +145,20 @@ export const DevicesView: React.FC = () => {
   const linuxCount = useMemo(() => devices.filter((d) => d.platform === "linux").length, [devices]);
   const macCount = useMemo(() => devices.filter((d) => d.platform === "darwin").length, [devices]);
 
-  // Global key listener for ⌘N / Ctrl+N to open enrollment modal
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
-        e.preventDefault();
-        setEnrollModalOpen(true);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  // (UX-34) No Ctrl/⌘N binding: it hijacked the browser's new-window shortcut.
+
+  // Group / tag filter options, derived the same way as the live
+  // Inventory (distinct groups / tags from the loaded devices).
+  const deviceGroups = useMemo(
+    () =>
+      [...new Set(devices.map((d) => (d as unknown as { group?: string }).group).filter((g): g is string => Boolean(g)))].sort(),
+    [devices]
+  );
+  const deviceTags = useMemo(() => [...new Set(devices.flatMap((d) => d.tags || []))].sort(), [devices]);
+  const selectedDevices = useMemo(
+    () => devices.filter((d) => selectedIds.includes(d.id)),
+    [devices, selectedIds]
+  );
 
   // Filtered and sorted devices
   const filteredDevices = useMemo(() => {
@@ -137,6 +172,14 @@ export const DevicesView: React.FC = () => {
     // Platform filter
     if (platformFilter !== "all") {
       list = list.filter((d) => d.platform === platformFilter);
+    }
+
+    // Group / tag filters
+    if (groupFilter !== "all") {
+      list = list.filter((d) => (d as unknown as { group?: string }).group === groupFilter);
+    }
+    if (tagFilter !== "all") {
+      list = list.filter((d) => (d.tags || []).includes(tagFilter));
     }
 
     // Search query
@@ -161,12 +204,22 @@ export const DevicesView: React.FC = () => {
         comparison = a.latencyMs - b.latencyMs;
       } else if (sortField === "heartbeat") {
         comparison = new Date(b.lastHeartbeat).getTime() - new Date(a.lastHeartbeat).getTime();
+      } else if (sortField === "tokenExpiry") {
+        // P1-3: expired tokens first, then expiring-soon, then valid, then
+        // devices with no reported expiry; hostname breaks ties so the
+        // order is stable and the at-risk devices stay visible on top.
+        const rank = (d: EnrolledDevice) => {
+          const s = tokenExpiryStatus(d.tokenExpiresAt);
+          return s === "expired" ? 0 : s === "expiring" ? 1 : s === "valid" ? 2 : 3;
+        };
+        comparison = rank(a) - rank(b) || a.hostname.localeCompare(b.hostname);
+        return sortOrder === "asc" ? comparison : -comparison;
       }
       return sortOrder === "asc" ? comparison : -comparison;
     });
 
     return list;
-  }, [devices, statusFilter, platformFilter, searchQuery, sortField, sortOrder]);
+  }, [devices, statusFilter, platformFilter, groupFilter, tagFilter, searchQuery, sortField, sortOrder]);
 
   const controlUrl = apiOrigin.replace(/\/$/, "") || "http://127.0.0.1:8000";
   const hasRealToken = Boolean(enrolledToken);
@@ -217,6 +270,12 @@ export const DevicesView: React.FC = () => {
 
   const handleEnrollDevice = useCallback(async () => {
     setEnrollError("");
+    // Demo preview already shown: the primary button now closes the modal.
+    if (!Boolean(token() || sessionToken()) && tokenProvisioned) {
+      setTokenProvisioned(false);
+      setEnrollModalOpen(false);
+      return;
+    }
     if (Boolean(token() || sessionToken())) {
       setIsEnrolling(true);
       try {
@@ -232,50 +291,128 @@ export const DevicesView: React.FC = () => {
       }
       return;
     }
+    // Demo preview: keep the modal open on an explicit end state — no
+    // token is issued, and auto-closing would read as success (UX-07).
     setTokenProvisioned(true);
-    setTimeout(() => {
-      setTokenProvisioned(false);
-      setEnrollModalOpen(false);
-    }, 800);
-  }, [enrollDeviceName, refreshLive]);
+  }, [enrollDeviceName, refreshLive, tokenProvisioned]);
 
   const handleRevokeDevice = useCallback(
     async (device: EnrolledDevice) => {
-      if (Boolean(token() || sessionToken())) {
-        try {
+      setPendingAction({ kind: "revoke", id: device.id });
+      try {
+        if (Boolean(token() || sessionToken())) {
           await api.revoke(device.id);
           await refreshLive?.();
-          setDeviceActionNotice(`Revoked credentials for ${device.hostname}.`);
-          setTimeout(() => setDeviceActionNotice(null), 3000);
-        } catch (err: any) {
-          setDeviceActionNotice(`Revoke failed: ${err?.message || "Unknown error"}`);
+          pushNotice({ tone: "success", title: `Revoked credentials for ${device.hostname}.` });
+        } else {
+          pushNotice({ tone: "info", title: `Demo: simulated revocation for ${device.hostname}.` });
         }
-        return;
+      } catch (err: any) {
+        pushNotice({ tone: "error", title: `Revoke failed for ${device.hostname}.`, message: err?.message || "Unknown error" });
+      } finally {
+        setPendingAction(null);
       }
-      setDeviceActionNotice(`Simulated revocation for ${device.hostname}.`);
-      setTimeout(() => setDeviceActionNotice(null), 3000);
     },
     [refreshLive]
   );
 
   const handleDeleteDevice = useCallback(
     async (device: EnrolledDevice) => {
-      if (Boolean(token() || sessionToken())) {
-        try {
+      setPendingAction({ kind: "delete", id: device.id });
+      try {
+        if (Boolean(token() || sessionToken())) {
           await api.deleteDevice(device.id);
           await refreshLive?.();
-          setDeviceActionNotice(`Deleted device ${device.hostname}.`);
-          setTimeout(() => setDeviceActionNotice(null), 3000);
-        } catch (err: any) {
-          setDeviceActionNotice(`Delete failed: ${err?.message || "Unknown error"}`);
+          pushNotice({ tone: "success", title: `Deleted device ${device.hostname}.` });
+        } else {
+          pushNotice({ tone: "info", title: `Demo: simulated deletion for ${device.hostname}.` });
         }
-        return;
+      } catch (err: any) {
+        pushNotice({ tone: "error", title: `Delete failed for ${device.hostname}.`, message: err?.message || "Unknown error" });
+      } finally {
+        setPendingAction(null);
       }
-      setDeviceActionNotice(`Simulated deletion for ${device.hostname}.`);
-      setTimeout(() => setDeviceActionNotice(null), 3000);
     },
     [refreshLive]
   );
+
+  // P1-3: rotate a device token (admin). The old token is invalid
+  // immediately; the new one is returned once and shown in the modal
+  // below — never persisted anywhere.
+  const handleRotateDeviceToken = useCallback(
+    async (device: EnrolledDevice) => {
+      setPendingAction({ kind: "rotate-token", id: device.id });
+      try {
+        const res = await api.rotateDeviceToken(device.id);
+        setRotatedToken({ device, token: res.device_token, expiresAt: res.token_expires_at });
+        setCopiedRotatedToken(false);
+        await refreshLive?.();
+        pushNotice({ tone: "success", title: `Rotated token for ${device.hostname}.`, message: "The new token is shown once below — copy it now." });
+      } catch (err: any) {
+        pushNotice({ tone: "error", title: `Token rotation failed for ${device.hostname}.`, message: err?.message || "Unknown error" });
+      } finally {
+        setPendingAction(null);
+      }
+    },
+    [refreshLive]
+  );
+
+  const handleCopyRotatedToken = useCallback(async () => {
+    if (!rotatedToken) return;
+    try {
+      await navigator.clipboard.writeText(rotatedToken.token);
+      setCopiedRotatedToken(true);
+      setTimeout(() => setCopiedRotatedToken(false), 2000);
+    } catch {
+      pushNotice({ tone: "error", title: "Clipboard access was denied.", message: "Select and copy the token manually." });
+    }
+  }, [rotatedToken]);
+
+  // Bulk revoke / delete over the multi-selected devices (UX-34).
+  const handleBulkAction = useCallback(
+    async (kind: "revoke" | "delete", targets: EnrolledDevice[]) => {
+      if (targets.length === 0) return;
+      const live = Boolean(token() || sessionToken());
+      setPendingAction({ kind: `bulk-${kind}`, id: "bulk" });
+      let succeeded = 0;
+      const failures: string[] = [];
+      for (const device of targets) {
+        try {
+          if (live) {
+            if (kind === "revoke") await api.revoke(device.id);
+            else await api.deleteDevice(device.id);
+          }
+          succeeded += 1;
+        } catch {
+          failures.push(device.hostname);
+        }
+      }
+      if (live) await refreshLive?.();
+      setSelectedIds([]);
+      setPendingAction(null);
+      if (failures.length > 0) {
+        pushNotice({
+          tone: "error",
+          title: `Bulk ${kind} partially failed.`,
+          message: `${succeeded} succeeded; failed: ${failures.join(", ")}.`,
+        });
+      } else {
+        pushNotice({
+          tone: "success",
+          title: live
+            ? `Bulk ${kind} completed for ${succeeded} device${succeeded === 1 ? "" : "s"}.`
+            : `Demo: simulated bulk ${kind} for ${succeeded} device${succeeded === 1 ? "" : "s"}.`,
+        });
+      }
+    },
+    [refreshLive]
+  );
+
+  // The risk tier is derived from the tool: run_shell is Tier 3
+  // (elevated shell); the read-only tools are Tier 1.
+  const dispatchTier = dispatchTool === "run_shell" ? "tier3_shell" : "tier1_safe";
+  const dispatchTierLabel =
+    dispatchTool === "run_shell" ? "Tier 3 — Elevated shell" : "Tier 1 — Safe (read-only)";
 
   const handleQuickDispatch = useCallback(
     async (device: EnrolledDevice) => {
@@ -284,21 +421,16 @@ export const DevicesView: React.FC = () => {
           deviceId: device.id,
           tool: dispatchTool,
           args: { format: "png", quality: 90 },
-          riskTier: "tier1_safe",
+          riskTier: dispatchTier,
         });
         const taskId = newTask?.id || (newTask as any)?.task_id || "queued";
-        setDispatchSuccessMsg(
-          `Dispatched ${dispatchTool} to ${device.hostname} (#${taskId}).`
-        );
-        setTimeout(() => {
-          setDispatchModalDevice(null);
-          setDispatchSuccessMsg(null);
-        }, 1200);
+        pushNotice({ tone: "success", title: `Dispatched ${dispatchTool} to ${device.hostname} (#${taskId}).` });
+        setDispatchModalDevice(null);
       } catch (err: any) {
-        setDispatchSuccessMsg(`Dispatch error: ${err?.message || "Failed"}`);
+        pushNotice({ tone: "error", title: `Dispatch of ${dispatchTool} to ${device.hostname} failed.`, message: err?.message || "Failed" });
       }
     },
-    [dispatchTask, dispatchTool]
+    [dispatchTask, dispatchTool, dispatchTier]
   );
 
   return (
@@ -311,6 +443,9 @@ export const DevicesView: React.FC = () => {
               Devices
             </h1>
             <ProductModePill live={isLive} />
+            {isLive && (
+              <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} label="Updated" />
+            )}
           </div>
         </div>
 
@@ -348,6 +483,9 @@ export const DevicesView: React.FC = () => {
               setSearchQuery("");
               setStatusFilter("all");
               setPlatformFilter("all");
+              setGroupFilter("all");
+              setTagFilter("all");
+              setSelectedIds([]);
             }}
             startIcon={<RotateCcw className="w-3.5 h-3.5" />}
           >
@@ -363,10 +501,11 @@ export const DevicesView: React.FC = () => {
         <ProductMetricCard label="Offline" value={offlineCount} hint="No heartbeat" onClick={() => setStatusFilter("offline")} />
       </div>
 
-      {deviceActionNotice && (
-        <ProductNotice tone={deviceActionNotice.includes("failed") || deviceActionNotice.includes("Failed") ? "error" : "info"}>
-          {deviceActionNotice}
-        </ProductNotice>
+      {isLive && getSyncState() === "error" && (
+        <div role="alert" className="p-3 rounded-xl border border-rose-500/40 bg-rose-950/40 text-xs text-rose-300 flex items-center justify-between gap-3">
+          <span>Could not sync devices: {syncError || "Sync with the control plane failed."}</span>
+          <button type="button" onClick={() => void refreshLive?.()} className="underline">Retry</button>
+        </div>
       )}
 
       {/* Filter Toolbar: Status Chips, Platform Segmented Controls, Search */}
@@ -406,6 +545,47 @@ export const DevicesView: React.FC = () => {
                   ]}
                 />
               </div>
+
+              {(deviceGroups.length > 0 || groupFilter !== "all" || deviceTags.length > 0 || tagFilter !== "all") && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {deviceGroups.length > 0 || groupFilter !== "all" ? (
+                    <>
+                      <span className="text-xs font-mono text-[var(--product-text-tertiary)] uppercase tracking-wider shrink-0">
+                        Group
+                      </span>
+                      <select
+                        aria-label="Filter by group"
+                        value={groupFilter}
+                        onChange={(e) => setGroupFilter(e.target.value)}
+                        className="bg-[var(--product-raised)] border border-[var(--product-line)] text-[var(--product-text-secondary)] rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-indigo-500 text-xs"
+                      >
+                        <option value="all">All groups</option>
+                        {deviceGroups.map((group) => (
+                          <option key={group} value={group}>{group}</option>
+                        ))}
+                      </select>
+                    </>
+                  ) : null}
+                  {deviceTags.length > 0 || tagFilter !== "all" ? (
+                    <>
+                      <span className="text-xs font-mono text-[var(--product-text-tertiary)] uppercase tracking-wider shrink-0">
+                        Tag
+                      </span>
+                      <select
+                        aria-label="Filter by tag"
+                        value={tagFilter}
+                        onChange={(e) => setTagFilter(e.target.value)}
+                        className="bg-[var(--product-raised)] border border-[var(--product-line)] text-[var(--product-text-secondary)] rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-indigo-500 text-xs"
+                      >
+                        <option value="all">All tags</option>
+                        {deviceTags.map((tag) => (
+                          <option key={tag} value={tag}>{tag}</option>
+                        ))}
+                      </select>
+                    </>
+                  ) : null}
+                </div>
+              )}
             </div>
 
             {/* Monospace Search and Sorting Row */}
@@ -415,6 +595,7 @@ export const DevicesView: React.FC = () => {
                   value={searchQuery}
                   onChange={(val) => setSearchQuery(val)}
                   placeholder="Search devices…"
+                  aria-label="Search devices"
                   startIcon={<Search className="w-4 h-4 text-[var(--product-text-tertiary)]" />}
                   size="md"
                   clearable
@@ -432,14 +613,17 @@ export const DevicesView: React.FC = () => {
                   <option value="hostname">Hostname</option>
                   <option value="latency">Latency</option>
                   <option value="heartbeat">Heartbeat</option>
+                  <option value="tokenExpiry">Token expiry</option>
                 </select>
-                <button
-                  type="button"
+                <JXButton
+                  variant="outlined"
+                  color="neutral"
+                  size="sm"
+                  aria-label={`Sort order: ${sortOrder === "asc" ? "ascending" : "descending"}. Activate to reverse.`}
                   onClick={() => setSortOrder(sortOrder === "asc" ? "desc" : "asc")}
-                  className="px-2.5 py-1.5 rounded-lg bg-[var(--product-raised)] hover:bg-[var(--product-raised)] text-[var(--product-text-secondary)] border border-[var(--product-line)] flex-shrink-0"
                 >
                   {sortOrder === "asc" ? "ASC ↑" : "DESC ↓"}
-                </button>
+                </JXButton>
               </div>
             </div>
           </div>
@@ -453,22 +637,71 @@ export const DevicesView: React.FC = () => {
         />
         <JXCardContent>
           <div className="space-y-2">
+            {selectedIds.length > 0 && (
+              <div role="status" className="flex flex-wrap items-center gap-2 p-3 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)] text-xs">
+                <span className="text-[var(--product-text-secondary)] font-semibold">
+                  {selectedIds.length} device{selectedIds.length === 1 ? "" : "s"} selected
+                </span>
+                <JXButton
+                  variant="soft"
+                  color="warning"
+                  size="sm"
+                  disabled={pendingAction?.id === "bulk"}
+                  loading={pendingAction?.id === "bulk" && pendingAction?.kind === "bulk-revoke"}
+                  onClick={() => setBulkConfirm({ kind: "revoke", devices: selectedDevices })}
+                >
+                  Revoke selected
+                </JXButton>
+                <JXButton
+                  variant="soft"
+                  color="error"
+                  size="sm"
+                  disabled={pendingAction?.id === "bulk"}
+                  loading={pendingAction?.id === "bulk" && pendingAction?.kind === "bulk-delete"}
+                  onClick={() => setBulkConfirm({ kind: "delete", devices: selectedDevices })}
+                >
+                  Delete selected
+                </JXButton>
+                <JXButton
+                  variant="text"
+                  color="neutral"
+                  size="sm"
+                  onClick={() => setSelectedIds([])}
+                >
+                  Clear selection
+                </JXButton>
+              </div>
+            )}
             <div ref={tableScrollRef} tabIndex={0} role="region" aria-label="Device inventory" className="overflow-x-auto scroll-shadow" data-scroll-left={scrollShadow.left} data-scroll-right={scrollShadow.right}>
               <table className="product-table-sticky-first w-full text-left border-collapse text-sm min-w-[640px]">
+                <caption className="sr-only">Device inventory</caption>
                 <thead>
                   <tr className="border-b border-[var(--product-line)] text-xs text-[var(--product-text-tertiary)]">
-                    <th className="py-3 px-3">Status</th>
-                    <th className="py-3 px-3">Device</th>
-                    <th className="py-3 px-3">OS</th>
-                    <th className="py-3 px-3">Last seen</th>
-                    <th className="py-3 px-3 sticky right-0 bg-[var(--product-raised)] text-right pr-4">Actions</th>
+                    <th scope="col" className="py-3 px-3">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all devices"
+                        checked={filteredDevices.length > 0 && filteredDevices.every((d) => selectedIds.includes(d.id))}
+                        onChange={(e) => {
+                          if (e.target.checked) setSelectedIds(filteredDevices.map((d) => d.id));
+                          else setSelectedIds([]);
+                        }}
+                      />
+                    </th>
+                    <th scope="col" className="py-3 px-3">Status</th>
+                    <th scope="col" aria-sort={sortField === "hostname" ? (sortOrder === "asc" ? "ascending" : "descending") : "none"} className="py-3 px-3">Device</th>
+                    <th scope="col" className="py-3 px-3">OS</th>
+                    <th scope="col" aria-sort={sortField === "heartbeat" ? (sortOrder === "asc" ? "ascending" : "descending") : "none"} className="py-3 px-3">Last seen</th>
+                    <th scope="col" className="py-3 px-3 sticky right-0 bg-[var(--product-raised)] text-right pr-4">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/60">
+                <tbody className="divide-y divide-[var(--product-line)]">
                   {filteredDevices.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="p-4">
-                        <PageEmpty
+                      <td colSpan={6} className="p-4">
+                        <EmptyState
+                          variant="card"
+                          demo={!isLive}
                           title="No matching devices"
                           description="Try clearing filters, or enroll a new edge agent."
                           actionLabel="Add device"
@@ -481,6 +714,9 @@ export const DevicesView: React.FC = () => {
                             setSearchQuery("");
                             setStatusFilter("all");
                             setPlatformFilter("all");
+                            setGroupFilter("all");
+                            setTagFilter("all");
+                            setSelectedIds([]);
                           }}
                         />
                       </td>
@@ -490,7 +726,6 @@ export const DevicesView: React.FC = () => {
                       const isOnline = device.status === "online";
                       const isUnresponsive = device.status === "unresponsive";
                       const isSelected = device.id === selectedDeviceId;
-                      const statusTone = isOnline ? "online" : isUnresponsive ? "warn" : "offline";
 
                       return (
                         <tr
@@ -499,11 +734,24 @@ export const DevicesView: React.FC = () => {
                             isSelected ? "bg-indigo-950/20" : ""
                           }`}
                         >
-                          {/* 1. Status ping dot */}
+                          {/* Multi-select checkbox */}
                           <td className="py-3 px-3 whitespace-nowrap">
-                            <ProductStatusDot
-                              status={statusTone}
-                              pulse={isOnline}
+                            <input
+                              type="checkbox"
+                              aria-label={`Select ${device.hostname}`}
+                              checked={selectedIds.includes(device.id)}
+                              onChange={(e) => {
+                                setSelectedIds(e.target.checked
+                                  ? [...selectedIds, device.id]
+                                  : selectedIds.filter((id) => id !== device.id));
+                              }}
+                            />
+                          </td>
+
+                          {/* 1. Status badge */}
+                          <td className="py-3 px-3 whitespace-nowrap">
+                            <StatusBadge
+                              status={isUnresponsive ? "degraded" : device.status}
                               label={isOnline ? "Online" : isUnresponsive ? "Unresponsive" : "Offline"}
                             />
                           </td>
@@ -515,6 +763,14 @@ export const DevicesView: React.FC = () => {
                                 <span className="font-medium text-[var(--product-text)]">
                                   {device.hostname}
                                 </span>
+                                {/* P1-3: token-expiry badge from list_devices' token_expires_at.
+                                    Warning within 72 h, error once expired (see state/tokenExpiry.ts). */}
+                                {(() => {
+                                  const expiryStatus = tokenExpiryStatus(device.tokenExpiresAt);
+                                  if (expiryStatus === "expired") return <StatusBadge status="error" label="Token expired" />;
+                                  if (expiryStatus === "expiring") return <StatusBadge status="warning" label="Token expiring soon" />;
+                                  return null;
+                                })()}
                               </div>
                             </div>
                           </td>
@@ -537,7 +793,7 @@ export const DevicesView: React.FC = () => {
 
                           {/* 4. Cadence / Latency */}
                           <td className="py-3 px-3">
-                            <span className="text-xs tabular-nums text-[var(--product-text-tertiary)]">{new Date(device.lastHeartbeat).toLocaleTimeString()}</span>
+                            <span className="text-xs tabular-nums text-[var(--product-text-tertiary)]">{formatDate(new Date(device.lastHeartbeat), { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })}</span>
                           </td>
 
                           {/* 7. Sticky Actions (Right) */}
@@ -564,7 +820,7 @@ export const DevicesView: React.FC = () => {
                                   setSelectedDeviceId(device.id);
                                   setCurrentView("device-360-system");
                                 }}
-                                aria-label="Details"
+                                aria-label={`Details for ${device.hostname}`}
                                 className="sm:hidden p-2"
                               >
                                 <ArrowRight className="w-4 h-4" />
@@ -585,7 +841,7 @@ export const DevicesView: React.FC = () => {
                                 color="neutral"
                                 size="sm"
                                 onClick={() => setDispatchModalDevice(device)}
-                                aria-label="Run task"
+                                aria-label={`Run task on ${device.hostname}`}
                                 className="sm:hidden p-2 bg-[var(--product-raised)] hover:bg-[var(--product-raised)]"
                               >
                                 <Play className="w-4 h-4 text-emerald-400" />
@@ -595,7 +851,9 @@ export const DevicesView: React.FC = () => {
                                 variant="soft"
                                 color="warning"
                                 size="sm"
-                                onClick={() => handleRevokeDevice(device)}
+                                disabled={pendingAction?.id === device.id}
+                                loading={pendingAction?.id === device.id && pendingAction?.kind === "revoke"}
+                                onClick={() => setConfirmAction({ kind: "revoke", device })}
                                 startIcon={<Ban className="w-3 h-3 sm:w-4 sm:h-4" />}
                                 className="text-[11px] sm:text-xs hidden sm:inline-flex"
                               >
@@ -605,18 +863,51 @@ export const DevicesView: React.FC = () => {
                                 variant="soft"
                                 color="warning"
                                 size="sm"
-                                onClick={() => handleRevokeDevice(device)}
-                                aria-label="Revoke"
+                                disabled={pendingAction?.id === device.id}
+                                onClick={() => setConfirmAction({ kind: "revoke", device })}
+                                aria-label={`Revoke credentials for ${device.hostname}`}
                                 className="sm:hidden p-2"
                               >
                                 <Ban className="w-4 h-4" />
                               </JXButton>
 
+                              {/* P1-3: rotate the device token (admin endpoint; live only).
+                                  Non-admin callers never see the button (fail-closed on me()). */}
+                              {isLive && isAdmin && (
+                                <>
+                                  <JXButton
+                                    variant="soft"
+                                    color="neutral"
+                                    size="sm"
+                                    disabled={pendingAction?.id === device.id}
+                                    loading={pendingAction?.id === device.id && pendingAction?.kind === "rotate-token"}
+                                    onClick={() => setRotateConfirm(device)}
+                                    startIcon={<KeyRound className="w-3 h-3 sm:w-4 sm:h-4" />}
+                                    className="text-[11px] sm:text-xs hidden sm:inline-flex"
+                                  >
+                                    Rotate token
+                                  </JXButton>
+                                  <JXButton
+                                    variant="soft"
+                                    color="neutral"
+                                    size="sm"
+                                    disabled={pendingAction?.id === device.id}
+                                    onClick={() => setRotateConfirm(device)}
+                                    aria-label={`Rotate token for ${device.hostname}`}
+                                    className="sm:hidden p-2"
+                                  >
+                                    <KeyRound className="w-4 h-4" />
+                                  </JXButton>
+                                </>
+                              )}
+
                               <JXButton
                                 variant="soft"
                                 color="error"
                                 size="sm"
-                                onClick={() => handleDeleteDevice(device)}
+                                disabled={pendingAction?.id === device.id}
+                                loading={pendingAction?.id === device.id && pendingAction?.kind === "delete"}
+                                onClick={() => setConfirmAction({ kind: "delete", device })}
                                 startIcon={<Trash2 className="w-3 h-3 sm:w-4 sm:h-4" />}
                                 className="text-[11px] sm:text-xs hidden sm:inline-flex"
                               >
@@ -626,8 +917,9 @@ export const DevicesView: React.FC = () => {
                                 variant="soft"
                                 color="error"
                                 size="sm"
-                                onClick={() => handleDeleteDevice(device)}
-                                aria-label="Delete"
+                                disabled={pendingAction?.id === device.id}
+                                onClick={() => setConfirmAction({ kind: "delete", device })}
+                                aria-label={`Delete ${device.hostname}`}
                                 className="sm:hidden p-2"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -663,9 +955,15 @@ export const DevicesView: React.FC = () => {
           onClose={() => setEnrollModalOpen(false)}
           title={isLive ? "Enroll new device" : "Preview device enrollment"}
         >
-          <div className="space-y-4 max-w-xl w-full text-xs font-mono">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleEnrollDevice();
+            }}
+            className="space-y-4 max-w-xl w-full text-xs font-mono"
+          >
             <ProductStepProgress
-              steps={["Name", "Token", "Install", "Heartbeat"]}
+              steps={["Name", "Token", "Install"]}
               current={hasRealToken ? 2 : 0}
             />
             <p className="text-[var(--product-text-tertiary)] text-xs">
@@ -675,7 +973,12 @@ export const DevicesView: React.FC = () => {
             </p>
             {hasRealToken && (
               <ProductNotice tone="success">
-                Token ready. Copy the install command, run it on the host, then watch Live home for the first heartbeat.
+                Token ready. Copy the install command, run it on the device, then watch Live home for the first heartbeat.
+              </ProductNotice>
+            )}
+            {!isLive && tokenProvisioned && (
+              <ProductNotice tone="info">
+                This was a preview — no token was issued.
               </ProductNotice>
             )}
             {clipboardError && <p role="alert" className="text-rose-300">{clipboardError}</p>}
@@ -683,10 +986,11 @@ export const DevicesView: React.FC = () => {
 
             {/* Device Name */}
             <div className="space-y-1">
-              <label className="text-[var(--product-text-secondary)] font-semibold text-xs block">
+              <label htmlFor="enroll-device-name" className="text-[var(--product-text-secondary)] font-semibold text-xs block">
                 Device Name
               </label>
               <JXTextField
+                id="enroll-device-name"
                 value={enrollDeviceName}
                 onChange={(val) => setEnrollDeviceName(val)}
                 placeholder="edge-worker-node"
@@ -714,70 +1018,6 @@ export const DevicesView: React.FC = () => {
                 </div>
               </div>
             )}
-
-            {/* Target Architecture & Role — UI hint only; enroll API does not consume this field */}
-            <div className="space-y-1">
-              <label className="text-[var(--product-text-secondary)] font-semibold text-xs block">
-                Target Architecture & Role{" "}
-                <span className="font-normal text-[var(--product-text-tertiary)]">(display only — not sent to enroll)</span>
-              </label>
-              <select
-                aria-label="Target architecture and role"
-                value={enrollArchRole}
-                onChange={(e) => setEnrollArchRole(e.target.value)}
-                className="w-full bg-[var(--product-raised)] border border-[var(--product-line)] text-[var(--product-text-secondary)] rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-indigo-500"
-              >
-                <option value="Standard Worker (Linux x86_64 / arm64)">
-                  Standard Worker (Linux x86_64 / arm64)
-                </option>
-                <option value="Desktop Automation Host (Windows)">
-                  Desktop Automation Host (Windows only — WebRTC stream / SoM)
-                </option>
-                <option value="Confidential Compute Isolated Enclave (Intel SGX / AMD SEV) — not wired">
-                  Confidential Compute (SGX / SEV) — decorative, not wired
-                </option>
-              </select>
-            </div>
-
-            {/* Sandbox Path — decorative; enroll API does not accept sandbox_dir */}
-            <div className="space-y-1">
-              <label className="text-[var(--product-text-secondary)] font-semibold text-xs block">
-                Sandbox Home Directory{" "}
-                <span className="font-normal text-[var(--product-text-tertiary)]">(not wired to enroll API)</span>
-              </label>
-              <JXTextField
-                value={sandboxDir}
-                onChange={(val) => setSandboxDir(val)}
-                placeholder="/opt/ai-bridge/workspace"
-                size="md"
-              />
-              <span className="text-[11px] text-[var(--product-text-tertiary)]">
-                Preview-only path label. Enrollment issues a device token only; agent workspace is configured on the host install script / policy, not by this field.
-              </span>
-            </div>
-
-            {/* Expiration choices */}
-            <div className="space-y-1">
-              <label className="text-[var(--product-text-secondary)] font-semibold text-xs block">
-                Token Expiration Window
-              </label>
-              <div className="grid grid-cols-3 gap-2">
-                {["1h", "24h", "7d"].map((exp) => (
-                  <button
-                    key={exp}
-                    type="button"
-                    onClick={() => setTokenExpiry(exp)}
-                    className={`py-2 px-3 rounded-xl border text-center transition-all ${
-                      tokenExpiry === exp
-                        ? "bg-indigo-600/30 border-indigo-500 text-indigo-200 font-bold"
-                        : "bg-[var(--product-raised)] border-[var(--product-line)] text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-                    }`}
-                  >
-                    {exp === "1h" ? "1 Hour" : exp === "24h" ? "24 Hours" : "7 Days"}
-                  </button>
-                ))}
-              </div>
-            </div>
 
             {/* Script Platform Tabs */}
             <div className="space-y-2 pt-2 border-t border-[var(--product-line)]">
@@ -821,6 +1061,7 @@ export const DevicesView: React.FC = () => {
                   variant="contained"
                   color="primary"
                   size="sm"
+                  type="button"
                   disabled={!hasRealToken}
                   onClick={handleCopyEnrollCommand}
                   startIcon={
@@ -838,6 +1079,37 @@ export const DevicesView: React.FC = () => {
               </div>
             </div>
 
+            {/* Navigate to the newly enrolled device (UX-07/UX-39) */}
+            {enrolledDeviceId && (
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[var(--product-line)]">
+                <JXButton
+                  variant="outlined"
+                  color="primary"
+                  size="sm"
+                  type="button"
+                  onClick={() => {
+                    setSelectedDeviceId(enrolledDeviceId);
+                    setEnrollModalOpen(false);
+                    setCurrentView("device-360-system");
+                  }}
+                >
+                  Open device
+                </JXButton>
+                <JXButton
+                  variant="outlined"
+                  color="neutral"
+                  size="sm"
+                  type="button"
+                  onClick={() => {
+                    setEnrollModalOpen(false);
+                    setCurrentView("live");
+                  }}
+                >
+                  Go to Live home
+                </JXButton>
+              </div>
+            )}
+
             {/* Modal Actions */}
             <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-[var(--product-line)]">
               <span className="text-[11px] text-[var(--product-text-tertiary)]">
@@ -852,6 +1124,7 @@ export const DevicesView: React.FC = () => {
                   variant="soft"
                   color="neutral"
                   size="sm"
+                  type="button"
                   onClick={() => setEnrollModalOpen(false)}
                 >
                   {enrolledToken ? "Close" : "Cancel"}
@@ -860,8 +1133,8 @@ export const DevicesView: React.FC = () => {
                   variant="contained"
                   color="primary"
                   size="sm"
+                  type="submit"
                   loading={isEnrolling}
-                  onClick={handleEnrollDevice}
                   className="bg-indigo-600 hover:bg-indigo-500"
                 >
                   {isLive
@@ -874,25 +1147,100 @@ export const DevicesView: React.FC = () => {
                 </JXButton>
               </div>
             </div>
-          </div>
+          </form>
         </GlassModal>
       )}
 
       {/* Quick Dispatch Tool Modal */}
+      {/* P1-3: rotate-token confirmation (hold-to-confirm: the old token dies immediately). */}
+      <ConfirmDestructive
+        open={rotateConfirm !== null}
+        title="Rotate device token"
+        objectName={rotateConfirm ? `${rotateConfirm.hostname} (${rotateConfirm.id})` : undefined}
+        consequence="Rotate: invalidates the device's current token immediately. The device must be given the new token to reconnect, and the new token is shown only once."
+        confirmLabel="Rotate token"
+        requireHold
+        tone="warning"
+        onConfirm={() => {
+          const device = rotateConfirm;
+          setRotateConfirm(null);
+          if (device) void handleRotateDeviceToken(device);
+        }}
+        onCancel={() => setRotateConfirm(null)}
+      />
+      {/* P1-3: new token, shown exactly once. Dismissing clears it from
+          component state; it is never persisted (no store, no storage, no URL). */}
+      {rotatedToken && (
+        <GlassModal
+          open={Boolean(rotatedToken)}
+          onClose={() => { setRotatedToken(null); setCopiedRotatedToken(false); }}
+          title={`New token for ${rotatedToken.device.hostname}`}
+        >
+          <div className="space-y-4 max-w-md w-full text-xs">
+            <p className="text-amber-300">
+              Shown once — copy it now. It will not be shown again, and the old token no longer works.
+            </p>
+            <div className="space-y-1">
+              <label htmlFor="rotated-device-token" className="text-[var(--product-text-secondary)] font-semibold block">
+                Device token
+              </label>
+              <input
+                id="rotated-device-token"
+                readOnly
+                value={rotatedToken.token}
+                autoComplete="off"
+                className="w-full bg-[var(--product-raised)] border border-[var(--product-line)] text-[var(--product-text-secondary)] rounded-xl px-3 py-2 font-mono break-all"
+              />
+            </div>
+            <p className="text-[var(--product-text-secondary)]">
+              Expires {formatDate(new Date(rotatedToken.expiresAt * 1000), { dateStyle: "medium", timeStyle: "short" })}.
+            </p>
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[var(--product-line)]">
+              <JXButton
+                variant="soft"
+                color="neutral"
+                size="sm"
+                type="button"
+                onClick={handleCopyRotatedToken}
+                startIcon={copiedRotatedToken ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
+              >
+                {copiedRotatedToken ? "Copied!" : "Copy token"}
+              </JXButton>
+              <JXButton
+                variant="contained"
+                color="primary"
+                size="sm"
+                type="button"
+                onClick={() => { setRotatedToken(null); setCopiedRotatedToken(false); }}
+                className="bg-indigo-600 hover:bg-indigo-500"
+              >
+                Done — I copied it
+              </JXButton>
+            </div>
+          </div>
+        </GlassModal>
+      )}
       {dispatchModalDevice && (
         <GlassModal
           open={Boolean(dispatchModalDevice)}
           onClose={() => setDispatchModalDevice(null)}
           title={`Dispatch Tool: ${dispatchModalDevice.hostname}`}
         >
-          <div className="space-y-4 max-w-md w-full text-xs font-mono">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              setDispatchConfirm(true);
+            }}
+            className="space-y-4 max-w-md w-full text-xs font-mono"
+          >
             <p className="text-[var(--product-text-tertiary)]">
-              Execute a remote MCP diagnostic or automation tool invocation on node {dispatchModalDevice.id}.
+              Dispatch a remote diagnostic or automation tool on device {dispatchModalDevice.id}.
             </p>
 
             <div className="space-y-1">
-              <label className="text-[var(--product-text-secondary)] font-semibold">Select Tool</label>
+              <label htmlFor="dispatch-tool-select" className="text-[var(--product-text-secondary)] font-semibold">Select Tool</label>
               <select
+                id="dispatch-tool-select"
                 aria-label="Select dispatch tool"
                 value={dispatchTool}
                 onChange={(e) => setDispatchTool(e.target.value)}
@@ -903,19 +1251,23 @@ export const DevicesView: React.FC = () => {
                 <option value="get_system_info">get_system_info (read)</option>
                 <option value="list_desktop_windows">list_desktop_windows (desktop)</option>
                 <option value="get_desktop_status">get_desktop_status (desktop honesty)</option>
-                <option value="run_shell">run_shell (shell — requires approval / tier)</option>
+                <option value="run_shell">run_shell (Tier 3 — Elevated shell, requires approval)</option>
               </select>
             </div>
 
-            {dispatchSuccessMsg && (
-              <JXAlert severity="success" title="Dispatch Status" description={dispatchSuccessMsg} />
-            )}
+            <p className="text-[var(--product-text-secondary)]">
+              Tier: {dispatchTierLabel}
+              {dispatchTool === "run_shell"
+                ? " — dispatch requires approval and hold-to-confirm."
+                : ""}
+            </p>
 
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--product-line)]">
               <JXButton
                 variant="soft"
                 color="neutral"
                 size="sm"
+                type="button"
                 onClick={() => setDispatchModalDevice(null)}
               >
                 Cancel
@@ -924,14 +1276,72 @@ export const DevicesView: React.FC = () => {
                 variant="contained"
                 color="primary"
                 size="sm"
-                onClick={() => handleQuickDispatch(dispatchModalDevice)}
+                type="submit"
                 className="bg-indigo-600 hover:bg-indigo-500"
               >
-                Execute Tool
+                Dispatch
               </JXButton>
             </div>
-          </div>
+          </form>
         </GlassModal>
+      )}
+
+      {/* Destructive-action confirmations (UX-03) */}
+      <ConfirmDestructive
+        open={confirmAction !== null}
+        title={confirmAction?.kind === "revoke" ? "Revoke device credentials" : "Delete device"}
+        objectName={confirmAction ? `${confirmAction.device.hostname} (${confirmAction.device.id})` : undefined}
+        consequence={
+          confirmAction?.kind === "revoke"
+            ? "Revoke: invalidates the device's credentials; the device can re-enroll."
+            : "Delete: removes the device record."
+        }
+        confirmLabel={confirmAction?.kind === "revoke" ? "Revoke credentials" : "Delete device"}
+        onConfirm={() => {
+          const action = confirmAction;
+          setConfirmAction(null);
+          if (action) {
+            void (action.kind === "revoke" ? handleRevokeDevice(action.device) : handleDeleteDevice(action.device));
+          }
+        }}
+        onCancel={() => setConfirmAction(null)}
+      />
+      <ConfirmDestructive
+        open={bulkConfirm !== null}
+        title={bulkConfirm?.kind === "revoke" ? "Revoke credentials for selected devices" : "Delete selected devices"}
+        objectName={bulkConfirm ? bulkConfirm.devices.map((d) => d.hostname).join(", ") : undefined}
+        consequence={
+          bulkConfirm?.kind === "revoke"
+            ? `Revoke: invalidates the credentials of ${bulkConfirm?.devices.length ?? 0} device(s); each device can re-enroll.`
+            : `Delete: removes the records of ${bulkConfirm?.devices.length ?? 0} device(s).`
+        }
+        confirmLabel={bulkConfirm?.kind === "revoke" ? "Revoke selected" : "Delete selected"}
+        onConfirm={() => {
+          const bulk = bulkConfirm;
+          setBulkConfirm(null);
+          if (bulk) void handleBulkAction(bulk.kind, bulk.devices);
+        }}
+        onCancel={() => setBulkConfirm(null)}
+      />
+      {dispatchModalDevice && (
+        <ConfirmDestructive
+          open={dispatchConfirm}
+          title="Dispatch tool"
+          objectName={`${dispatchTool} (${dispatchTierLabel}) on ${dispatchModalDevice.hostname} (${dispatchModalDevice.id})`}
+          consequence={
+            dispatchTool === "run_shell"
+              ? "This dispatches an elevated shell task (Tier 3) on the device. It runs with elevated privileges and requires approval."
+              : `This dispatches ${dispatchTool} on the device.`
+          }
+          confirmLabel="Dispatch"
+          requireHold={dispatchTool === "run_shell"}
+          tone="warning"
+          onConfirm={() => {
+            setDispatchConfirm(false);
+            void handleQuickDispatch(dispatchModalDevice);
+          }}
+          onCancel={() => setDispatchConfirm(false)}
+        />
       )}
     </div>
   );

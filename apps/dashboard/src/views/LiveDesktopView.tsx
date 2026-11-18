@@ -18,9 +18,13 @@ import {
   JXButton,
   JXSelect,
   JXAlert,
+  JXLinearProgress,
   ProductModePill,
-  ProductStatusDot,
+  StatusBadge,
+  EmptyState,
 } from "../ui";
+import { Freshness } from "../components/Freshness";
+import { pushNotice } from "../state/notices";
 import {
   Monitor,
   Mouse,
@@ -54,6 +58,7 @@ import {
 } from "lucide-react";
 import { useDashboardStore } from "../state/dashboardStore";
 import { api, token, sessionToken } from "../api";
+import { readRoute, updateRouteParams } from "../state/navigation";
 import { PageEmpty } from "../components/PageEmpty";
 
 function isLiveMode(): boolean {
@@ -144,14 +149,23 @@ export const LiveDesktopView: React.FC = () => {
   const devices = useDashboardStore((s) => s.devices);
   const selectedDeviceId = useDashboardStore((s) => s.selectedDeviceId);
   const setSelectedDeviceId = useDashboardStore((s) => s.setSelectedDeviceId);
+  // UX-06: sync state for the header Freshness indicator (live only).
+  const syncState = useDashboardStore((s) => s.getSyncState());
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
   // Never fall back to seed inventory when signed out — desktop actions require live mode.
+  // UX-27: never fall back to the first fleet device either. A stale ?device=
+  // id renders an explicit "Device not available" state below instead of
+  // silently showing the wrong device.
   const selectedDevice = isLiveMode()
-    ? (devices.find((d) => d.id === selectedDeviceId) || devices[0])
+    ? devices.find((d) => d.id === selectedDeviceId)
     : undefined;
 
-  // Control modes (maps to canonical session modes: view_only, human_control, ai_assisted)
-  const [controlMode, setControlMode] = useState<"observer" | "takeover">("takeover");
-  const [sessionMode, setSessionMode] = useState<"view_only" | "human_control" | "ai_assisted">("human_control");
+  // Control modes (maps to canonical session modes: view_only, human_control, ai_assisted).
+  // Observer-first (UX-33): input forwarding stays off until the operator
+  // explicitly chooses Takeover. The mode tabs are the Takeover action.
+  const [controlMode, setControlMode] = useState<"observer" | "takeover">("observer");
+  const [sessionMode, setSessionMode] = useState<"view_only" | "human_control" | "ai_assisted">("view_only");
   const [mouseLinked, setMouseLinked] = useState<boolean>(true);
   const [keyForwarded, setKeyForwarded] = useState<boolean>(true);
   const [clipboardSync, setClipboardSync] = useState<boolean>(true);
@@ -163,7 +177,16 @@ export const LiveDesktopView: React.FC = () => {
   const [recentMacroNotice, setRecentMacroNotice] = useState<string | null>(null);
   const [windowsList, setWindowsList] = useState<WindowItem[]>(() => (isLiveMode() ? [] : INITIAL_WINDOWS));
   const [activeWindowId, setActiveWindowId] = useState<string>("win-1");
-  const [snapshotTaken, setSnapshotTaken] = useState<boolean>(false);
+
+  // WebRTC offer wait (UX-33): persistent "waiting for agent offer" state
+  // with elapsed time + Cancel, instead of a silent ~15 s poll.
+  const [offerWait, setOfferWait] = useState<{ sessionId: string } | null>(null);
+  const [offerWaitElapsedSec, setOfferWaitElapsedSec] = useState<number>(0);
+  const offerWaitCancelledRef = useRef<boolean>(false);
+  // Persistent session-status line, shown until dismissed.
+  const [sessionStatus, setSessionStatus] = useState<string | null>(null);
+  // Explanatory panel for "why no stream" (UX-33).
+  const [streamHelpOpen, setStreamHelpOpen] = useState<boolean>(false);
 
   // Live desktop stream, WebRTC & monitor state
   const [liveFrameUrl, setLiveFrameUrl] = useState<string | null>(null);
@@ -178,6 +201,13 @@ export const LiveDesktopView: React.FC = () => {
   const [selectedMonitorIndex, setSelectedMonitorIndex] = useState<number>(0);
   const [isStreamActive, setIsStreamActive] = useState<boolean>(true);
   const [webrtcSessionId, setWebrtcSessionId] = useState<string | null>(null);
+  // UX-13: desktop-session deep link (?session=<id>). Sessions are
+  // ephemeral: the id is written when a session starts, and on load the
+  // control plane is asked whether it still knows the session.
+  const [routeSessionId, setRouteSessionId] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : readRoute().session ?? null
+  );
+  const [sessionNotFound, setSessionNotFound] = useState<boolean>(false);
   const [webrtcConnected, setWebrtcConnected] = useState<boolean>(false);
   const [webrtcStats, setWebrtcStats] = useState<{
     fps: number;
@@ -202,7 +232,7 @@ export const LiveDesktopView: React.FC = () => {
   const [pendingIntent, setPendingIntent] = useState<PendingAgentIntent | null>(null);
   const [countdownRemainingMs, setCountdownRemainingMs] = useState<number>(0);
 
-  // Audio: mute toggle only; live WASAPI Opus capture is not shipped (silent/opt-in placeholder).
+  // Audio: mute toggle only; live remote-audio capture is not shipped (silent/opt-in placeholder).
   const [isAudioMuted, setIsAudioMuted] = useState<boolean>(true);
   const [desktopAudioOptIn, setDesktopAudioOptIn] = useState<boolean>(false);
   const [desktopAudioCaptureLive, setDesktopAudioCaptureLive] = useState<boolean>(false);
@@ -246,6 +276,35 @@ export const LiveDesktopView: React.FC = () => {
       }
     }
   });
+
+  // UX-13: resolve the ?session= deep link. Live only: ask the control
+  // plane whether it still knows the session. Known → the session is
+  // shown in the session-status line; unknown → an explicit "Session not
+  // available" state (sessions end, so a stale link is expected, not an
+  // error). Skipped for the session this view already owns.
+  useEffect(() => {
+    if (!routeSessionId || !isLiveMode() || routeSessionId === webrtcSessionId) return;
+    let cancelled = false;
+    void api
+      .getSessionV1(routeSessionId)
+      .then((res: any) => {
+        if (cancelled) return;
+        if (res && typeof res === "object" && (res.session_id || res.id || res.status)) {
+          setSessionNotFound(false);
+          setSessionStatus(
+            `Linked session ${routeSessionId}${res.status ? ` — ${res.status}` : ""}. Start the stream to attach to it.`
+          );
+        } else {
+          setSessionNotFound(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSessionNotFound(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [routeSessionId, webrtcSessionId]);
 
   const sendDataChannelEvent = useCallback((payload: Record<string, unknown>) => {
     const dc = inputDcRef.current;
@@ -418,7 +477,7 @@ export const LiveDesktopView: React.FC = () => {
     }
   }, [somOverlay, sendDataChannelEvent, selectedDevice?.id]);
 
-  // Fetch list of files currently on remote host storage
+  // Fetch list of files currently on remote device storage
   const fetchRemoteFiles = useCallback(async () => {
     if (inputDcRef.current?.readyState === "open") {
       sendDataChannelEvent({ action: "file_list" });
@@ -534,7 +593,7 @@ export const LiveDesktopView: React.FC = () => {
                 ? { ...prev, percent: 100, status: "completed", speed_kbps: res.speed_kbps || 120 }
                 : prev
             );
-            setRecentMacroNotice(`Uploaded file ${file.name} successfully to remote host`);
+            setRecentMacroNotice(`Uploaded file ${file.name} successfully to the remote device`);
             setTimeout(() => setRecentMacroNotice(null), 3000);
             void fetchRemoteFiles();
           } else {
@@ -555,7 +614,7 @@ export const LiveDesktopView: React.FC = () => {
 
   const requestFileDownload = useCallback(
     (fileItem: RemoteFileItem) => {
-      setRecentMacroNotice(`Downloading ${fileItem.name} from remote host...`);
+      setRecentMacroNotice(`Downloading ${fileItem.name} from the remote device...`);
       if (inputDcRef.current?.readyState === "open") {
         sendDataChannelEvent({ action: "file_download_request", path: fileItem.full_path });
       } else if (selectedDevice?.id) {
@@ -652,6 +711,37 @@ export const LiveDesktopView: React.FC = () => {
     [webrtcSessionId, releaseAllRemoteKeys]
   );
 
+  // UX-11: Esc releases control. The veto window owns Esc only while a
+  // pending agent intent exists (handled above); outside that window Esc
+  // switches back to Observer mode and releases held keys, so Esc can
+  // always release the session. Skipped inside open dialogs and text fields.
+  useEffect(() => {
+    if (controlMode !== "takeover" || pendingIntent) return;
+    const handleEscapeRelease = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (document.querySelector("dialog[open]")) return;
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest("input, textarea, select, [contenteditable]")) return;
+      releaseAllRemoteKeys();
+      void applySessionMode("view_only");
+      setRecentMacroNotice("Released control — switched to Observer mode (Esc).");
+      setTimeout(() => setRecentMacroNotice(null), 3000);
+    };
+    window.addEventListener("keydown", handleEscapeRelease);
+    return () => window.removeEventListener("keydown", handleEscapeRelease);
+  }, [controlMode, pendingIntent, applySessionMode, releaseAllRemoteKeys]);
+
+  // Elapsed-time ticker for the offer wait (UX-33).
+  useEffect(() => {
+    if (!offerWait) return;
+    const startedAt = Date.now();
+    setOfferWaitElapsedSec(0);
+    const interval = setInterval(() => {
+      setOfferWaitElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 500);
+    return () => clearInterval(interval);
+  }, [offerWait]);
+
   const handleSealSessionRecording = useCallback(async () => {
     const sid = webrtcSessionId || "session_active";
     if (!isLiveMode()) {
@@ -694,7 +784,7 @@ export const LiveDesktopView: React.FC = () => {
         } else {
           setLiveFrameMeta({
             error: String(res?.error || ""),
-            note: String(res?.note || "Desktop session not currently active or headless node."),
+            note: String(res?.note || "Desktop session not currently active or headless device."),
           });
         }
       } catch (err: any) {
@@ -874,6 +964,22 @@ export const LiveDesktopView: React.FC = () => {
   // Forward keyboard events in takeover mode when logged in
   const handleCanvasKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
+      // UX-11: Esc releases control — unless an agent-intent veto is pending,
+      // in which case the global veto listener owns Esc. The release Esc is
+      // never forwarded to the remote device.
+      if (e.key === "Escape") {
+        if (pendingIntent) return;
+        if (controlMode === "takeover") {
+          e.preventDefault();
+          e.stopPropagation();
+          releaseAllRemoteKeys();
+          void applySessionMode("view_only");
+          setRecentMacroNotice("Released control — switched to Observer mode (Esc).");
+          setTimeout(() => setRecentMacroNotice(null), 3000);
+          canvasContainerRef.current?.blur();
+        }
+        return;
+      }
       if (!isLiveMode() || controlMode !== "takeover" || !keyForwarded || !selectedDevice?.id) return;
       if (
         sendDataChannelEvent({
@@ -907,7 +1013,7 @@ export const LiveDesktopView: React.FC = () => {
           .catch(() => {});
       }
     },
-    [controlMode, keyForwarded, selectedDevice?.id, sendDataChannelEvent]
+    [controlMode, keyForwarded, selectedDevice?.id, sendDataChannelEvent, pendingIntent, applySessionMode, releaseAllRemoteKeys]
   );
 
   const handleCanvasKeyUp = useCallback(
@@ -924,7 +1030,7 @@ export const LiveDesktopView: React.FC = () => {
   );
 
   const dispatchMacro = (macroName: string) => {
-    setRecentMacroNotice(`Dispatched macro [${macroName}] to target node ${selectedDevice?.hostname || "srv-us-east-412"}`);
+    setRecentMacroNotice(`Dispatched macro [${macroName}] to target device ${selectedDevice?.hostname || "srv-us-east-412"}`);
     setTimeout(() => setRecentMacroNotice(null), 3000);
 
     if (isLiveMode() && selectedDevice?.id) {
@@ -945,17 +1051,84 @@ export const LiveDesktopView: React.FC = () => {
     }
   };
 
-  const handleCaptureSnapshot = () => {
-    setSnapshotTaken(true);
-    setRecentMacroNotice("High-res desktop frame buffer captured (3840×2160 PNG)");
+  // UX-08: capture a REAL PNG. The old handler only fetched a frame and
+  // showed a notice claiming a "3840x2160 PNG" had been captured — no file
+  // was ever produced. Now the current video frame (WebRTC) or the polled
+  // fallback frame is drawn to a canvas and downloaded as a PNG. When no
+  // frame is available at all, the notice says so honestly instead.
+  const handleCaptureSnapshot = useCallback(() => {
+    const downloadPng = (canvas: HTMLCanvasElement) => {
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          pushNotice({
+            tone: "error",
+            title: "Snapshot failed",
+            message: "Could not encode the desktop frame as a PNG.",
+          });
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        a.href = url;
+        a.download = `desktop-snapshot-${selectedDevice?.hostname || "device"}-${stamp}.png`;
+        a.click();
+        URL.revokeObjectURL(url);
+        pushNotice({
+          tone: "success",
+          title: "Snapshot saved",
+          message: `Downloaded ${a.download}.`,
+        });
+      }, "image/png");
+    };
+
+    const video = videoRef.current;
+    if (webrtcConnected && video && video.videoWidth > 0 && video.videoHeight > 0) {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        downloadPng(canvas);
+        return;
+      }
+    }
+
+    if (liveFrameUrl) {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          pushNotice({ tone: "error", title: "Snapshot failed", message: "Could not encode the desktop frame as a PNG." });
+          return;
+        }
+        ctx.drawImage(img, 0, 0);
+        downloadPng(canvas);
+      };
+      img.onerror = () => {
+        pushNotice({
+          tone: "error",
+          title: "Snapshot failed",
+          message: "The last desktop frame could not be loaded for capture.",
+        });
+      };
+      img.src = liveFrameUrl;
+      return;
+    }
+
     if (isLiveMode() && selectedDevice?.id) {
       void fetchLiveFrame(1.0, 85);
     }
-    setTimeout(() => {
-      setSnapshotTaken(false);
-      setRecentMacroNotice(null);
-    }, 2500);
-  };
+    pushNotice({
+      tone: "info",
+      title: "Preview only — no frame to save",
+      message: "No desktop frame is available yet, so no PNG was produced. Start the stream or wait for the next frame, then capture again.",
+    });
+  }, [webrtcConnected, liveFrameUrl, selectedDevice?.hostname, selectedDevice?.id, fetchLiveFrame]);
 
   const webrtcSessionIdRef = useRef<string | null>(null);
   webrtcSessionIdRef.current = webrtcSessionId;
@@ -965,6 +1138,12 @@ export const LiveDesktopView: React.FC = () => {
     if (activeSid && isLiveMode()) {
       void api.terminateSessionV1(activeSid).catch(() => {});
     }
+    // UX-13: the session is over, so its deep link goes away with it —
+    // including the component state, or the probe below would re-flag
+    // the just-terminated session as "not available".
+    updateRouteParams({ session: undefined });
+    setRouteSessionId(null);
+    setSessionNotFound(false);
     releaseAllRemoteKeys();
     mediaStreamRef.current = null;
     if (videoRef.current) {
@@ -998,6 +1177,8 @@ export const LiveDesktopView: React.FC = () => {
     }
     setWebrtcSessionId(null);
     setWebrtcConnected(false);
+    setOfferWait(null);
+    setSessionStatus(null);
   }, [releaseAllRemoteKeys]);
 
   cleanupWebrtcRef.current = cleanupWebrtc;
@@ -1099,6 +1280,15 @@ export const LiveDesktopView: React.FC = () => {
     };
   }, []);
 
+  // UX-33: cancel a pending offer wait. Terminates the session server-side
+  // and stops the poll loop via offerWaitCancelledRef.
+  const handleCancelOfferWait = useCallback(() => {
+    offerWaitCancelledRef.current = true;
+    setOfferWait(null);
+    setSessionStatus(null);
+    cleanupWebrtc();
+  }, [cleanupWebrtc]);
+
   const handleStartWebrtc = async () => {
     if (!isLiveMode() || !selectedDevice?.id) {
       setRecentMacroNotice("WebRTC signaling active in live control plane mode");
@@ -1113,6 +1303,8 @@ export const LiveDesktopView: React.FC = () => {
       return;
     }
     cleanupWebrtc();
+    setOfferWait(null);
+    offerWaitCancelledRef.current = false;
     try {
       const sess = await api.createSessionV1({
         device_id: selectedDevice.id,
@@ -1124,6 +1316,11 @@ export const LiveDesktopView: React.FC = () => {
       if (sess?.session_id) {
         const sid = String(sess.session_id);
         setWebrtcSessionId(sid);
+        // UX-13: the running session is linkable (?session=<id>).
+        setRouteSessionId(sid);
+        setSessionNotFound(false);
+        updateRouteParams({ session: sid });
+        setSessionStatus(`Session ${sid} — created, waiting for agent offer…`);
         setRecentMacroNotice(`WebRTC session [${sid}] initialized (${sess.status || "waiting"})`);
         setTimeout(() => setRecentMacroNotice(null), 3000);
 
@@ -1134,8 +1331,12 @@ export const LiveDesktopView: React.FC = () => {
           currentSess.offer_type || currentSess.offer?.type || "offer";
 
         // If the remote Windows Agent is generating the SDP offer asynchronously, poll until it arrives
-        for (let attempt = 0; attempt < 30 && !offerSdp; ++attempt) {
+        if (!offerSdp) {
+          setOfferWait({ sessionId: sid });
+        }
+        for (let attempt = 0; attempt < 30 && !offerSdp && !offerWaitCancelledRef.current; ++attempt) {
           await new Promise((r) => setTimeout(r, 500));
+          if (offerWaitCancelledRef.current) break;
           try {
             const polled = await api.getSessionV1(sid);
             if (polled) {
@@ -1149,6 +1350,23 @@ export const LiveDesktopView: React.FC = () => {
           } catch {
             // Continue polling
           }
+        }
+        setOfferWait(null);
+
+        // UX-33: poll exhaustion is a sticky error, not silence. The notice
+        // persists (error tone) and the session-status line keeps the id.
+        if (!offerSdp) {
+          if (offerWaitCancelledRef.current) {
+            setSessionStatus(null);
+            return;
+          }
+          pushNotice({
+            tone: "error",
+            title: "Agent did not answer",
+            message: `Session ${sid}: no desktop offer arrived after 15 s. Check that the device is online and its agent is running, then choose Start stream again.`,
+          });
+          setSessionStatus(`Session ${sid} — no offer received. Agent did not answer after 15 s.`);
+          return;
         }
 
         if (typeof RTCPeerConnection !== "undefined" && offerSdp) {
@@ -1226,7 +1444,7 @@ export const LiveDesktopView: React.FC = () => {
                         }
                       : prev
                   );
-                  setRecentMacroNotice(`Transferred ${data.filename} (${data.file_size} bytes) to remote host`);
+                  setRecentMacroNotice(`Transferred ${data.filename} (${data.file_size} bytes) to the remote device`);
                   setTimeout(() => setRecentMacroNotice(null), 3500);
                   void fetchRemoteFiles();
                 }
@@ -1275,6 +1493,7 @@ export const LiveDesktopView: React.FC = () => {
             if (st === "connected") {
               setIsReconnecting(false);
               setWebrtcConnected(true);
+              setSessionStatus(`Session ${sid} — connected.`);
               setRecentMacroNotice(`WebRTC live H.264 stream connected [${sid.slice(0, 8)}]`);
               setTimeout(() => setRecentMacroNotice(null), 3000);
             } else if (st === "disconnected") {
@@ -1330,7 +1549,11 @@ export const LiveDesktopView: React.FC = () => {
         }
       }
     } catch (err: any) {
-      setRecentMacroNotice(err?.message || "Could not start WebRTC session");
+      setOfferWait(null);
+      const message = err?.message || "Could not start WebRTC session";
+      pushNotice({ tone: "error", title: "Could not start WebRTC session", message });
+      setSessionStatus(`Session start failed — ${message}`);
+      setRecentMacroNotice(message);
       setTimeout(() => setRecentMacroNotice(null), 3000);
     }
   };
@@ -1384,10 +1607,15 @@ export const LiveDesktopView: React.FC = () => {
   const live = isLiveMode();
   const navigate = useDashboardStore((s) => s.setCurrentView);
   const liveDevices = live ? devices : [];
+  // UX-27: no fallback to the first fleet device. A requested id with no
+  // match renders the "Device not available" state below.
   const desktopDevice = live
-    ? (liveDevices.find((d) => d.id === selectedDeviceId) || liveDevices[0])
+    ? liveDevices.find((d) => d.id === selectedDeviceId)
     : undefined;
-  // WebRTC desktop stream / SoM / WASAPI overlays apply to Windows desktop hosts only.
+  const deviceNotAvailable = Boolean(
+    live && liveDevices.length > 0 && selectedDeviceId && !desktopDevice
+  );
+  // WebRTC desktop stream / SoM / WASAPI overlays apply to Windows devices only.
   const isWindowsStreamHost = Boolean(
     desktopDevice && String(desktopDevice.platform || "").toLowerCase() === "windows"
   );
@@ -1418,13 +1646,16 @@ export const LiveDesktopView: React.FC = () => {
     };
   }, [live]);
 
+  // UX-25: plain-language audio state. Desktop audio is not shipped in
+  // this build, so the tooltip says so instead of naming the audio stack
+  // or the environment variable that would enable it.
   const audioHonestyTitle = desktopAudioCaptureLive
     ? isAudioMuted
-      ? "Unmute remote host audio (WASAPI Opus)"
-      : "Mute remote host audio"
+      ? "Unmute remote device audio"
+      : "Mute remote device audio"
     : desktopAudioOptIn
-      ? "Desktop audio opt-in is on, but capture is a silent PCM placeholder (WASAPI live capture not shipped)"
-      : "Remote desktop audio is off by default — requires AI_BRIDGE_DESKTOP_AUDIO=1 and real WASAPI capture (not shipped)";
+      ? "Desktop audio is not available in this build — audio stays silent even when unmuted"
+      : "Desktop audio is not available in this build";
 
   return (
     <div className="space-y-5">
@@ -1434,19 +1665,51 @@ export const LiveDesktopView: React.FC = () => {
           <ProductModePill live={live} detail={live ? "WebRTC control" : "Preview only"} />
         </div>
         {live && (
-          <ProductStatusDot
-            status={webrtcConnected ? "online" : "idle"}
-            pulse={webrtcConnected}
-            label={webrtcConnected ? "Stream connected" : "No stream"}
-          />
+          <div className="flex flex-wrap items-center gap-3">
+            <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} />
+            {syncState === "error" && syncError && (
+              <span role="alert" className="text-xs text-rose-300">
+                {syncError}
+              </span>
+            )}
+            <StatusBadge
+              status={webrtcConnected ? "online" : "idle"}
+              label={webrtcConnected ? "Stream connected" : "No stream"}
+            />
+          </div>
         )}
       </header>
+
+      {/* UX-39: in-page section nav. Buttons + scrollIntoView (not hash
+          anchors — a hash change would trip the dashboard router). */}
+      <nav aria-label="Desktop studio sections" className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-mono uppercase tracking-wider text-[var(--product-text-tertiary)]">Sections:</span>
+        {(
+          [
+            ["studio-controls", "Controls"],
+            ["desktop-stream", "Desktop stream"],
+            ["file-transfer", "File transfer"],
+            ["windows", "Windows"],
+          ] as Array<[string, string]>
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() =>
+              document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })
+            }
+            className="px-2.5 py-1.5 min-h-11 sm:min-h-0 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] hover:text-[var(--product-text)] transition-colors"
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
 
       {!live && (
         <PageEmpty
           demo
           title="Desktop streaming requires a connected control plane"
-          description="Sign in to stream a real enrolled device. Demo mode does not open WebRTC or send input to hosts."
+          description="Sign in to stream a real enrolled device. Demo mode does not open WebRTC or send input to devices."
           actionLabel="Connect server"
           onAction={() => navigate("login")}
           secondaryLabel="Open Live home"
@@ -1463,21 +1726,55 @@ export const LiveDesktopView: React.FC = () => {
         />
       )}
 
+      {/* UX-27: the requested device id matches nothing in the fleet — say so
+          explicitly instead of showing the first device's desktop. */}
+      {deviceNotAvailable && (
+        <EmptyState
+          variant="card"
+          title="Device not available"
+          description={`The device “${selectedDeviceId}” is not in the current fleet. The link may be stale, or the device may have been removed.`}
+          actionLabel="Open fleet inventory"
+          onAction={() => navigate("devices")}
+          secondaryLabel="Use first available device"
+          onSecondary={() => setSelectedDeviceId(liveDevices[0].id)}
+        />
+      )}
+
       {live && desktopDevice && !isWindowsStreamHost && (
         <JXAlert
           severity="warning"
           title="Desktop stream unavailable on this device"
           description={
             streamUnavailableReason ||
-            "Select a Windows desktop automation host. Linux and macOS agents do not expose a WebRTC desktop track."
+            "Select a Windows device. Linux and macOS agents do not expose a WebRTC desktop track."
           }
         />
       )}
 
+      {/* UX-13: the linked session id is unknown to the control plane —
+          say so explicitly; sessions end, so a stale link is expected. */}
+      {sessionNotFound && (
+        <EmptyState
+          variant="card"
+          title="Session not available"
+          description={`The desktop session “${routeSessionId}” is not known to the control plane. It may have ended, or the link may be stale.`}
+          actionLabel="Start a new session"
+          onAction={() => {
+            setRouteSessionId(null);
+            setSessionNotFound(false);
+            updateRouteParams({ session: undefined });
+            document.getElementById("desktop-stream")?.scrollIntoView({ block: "start" });
+          }}
+        />
+      )}
+
+      {/* The studio below only renders for a real, matched device (UX-27). */}
+      {!deviceNotAvailable && (
+        <>
       {/* Top Header & Breadcrumb Bar */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-[var(--product-line)]">
         <div className="flex items-center gap-3">
-          <div className="w-72">
+          <div className="w-full sm:w-72">
             <JXSelect
               options={(live ? liveDevices : []).map((d) => ({
                 id: d.id,
@@ -1492,29 +1789,31 @@ export const LiveDesktopView: React.FC = () => {
           {liveMonitors.length > 0 && (
             <div className="flex items-center gap-1.5 font-mono text-xs">
               {liveMonitors.map((mon) => (
-                <button
+                <JXButton
                   key={mon.index}
-                  type="button"
+                  size="sm"
+                  color={selectedMonitorIndex === mon.index ? "primary" : "neutral"}
+                  variant={selectedMonitorIndex === mon.index ? "contained" : "outlined"}
+                  aria-pressed={selectedMonitorIndex === mon.index}
                   onClick={() => handleSwitchMonitor(mon.index)}
-                  className={`px-2 py-0.5 rounded-lg border transition-colors ${
-                    selectedMonitorIndex === mon.index
-                      ? "bg-indigo-950/60 border-indigo-500/60 text-indigo-300"
-                      : "bg-[var(--product-canvas)] border-[var(--product-line)] text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-                  }`}
                 >
                   {mon.name || `Display ${mon.index}`} ({mon.width}×{mon.height})
-                </button>
+                </JXButton>
               ))}
             </div>
           )}
         </div>
         <div className="flex items-center gap-2 font-mono text-xs">
           <div className="hidden lg:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)]">
-            <Activity className="w-3 h-3 text-emerald-400" />
-            <span>{webrtcConnected ? `H.264 ${webrtcStats.fps} FPS` : "Stream idle"}</span>
+            <StatusBadge
+              status={webrtcConnected ? "running" : "idle"}
+              label={webrtcConnected ? `H.264 ${webrtcStats.fps} FPS` : "Stream idle"}
+            />
             <span className="text-[var(--product-text-dim)]">|</span>
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color="neutral"
+              variant="text"
               onClick={() => {
                 const modes: Array<"auto" | "5000" | "3500" | "2200" | "1200" | "600"> = [
                   "auto",
@@ -1531,7 +1830,6 @@ export const LiveDesktopView: React.FC = () => {
                   applyBitrate(parseInt(nextMode, 10));
                 }
               }}
-              className="hover:text-indigo-300 transition-colors flex items-center gap-1 underline underline-offset-2"
               title="Toggle Adaptive Bitrate Ladder mode"
             >
               <span>
@@ -1539,192 +1837,237 @@ export const LiveDesktopView: React.FC = () => {
                   ? `ABR ${(targetBitrateKbps / 1000).toFixed(1)}M [AUTO]`
                   : `ABR ${(parseInt(abrMode, 10) / 1000).toFixed(1)}M [FIXED]`}
               </span>
-            </button>
+            </JXButton>
             <span className="text-[var(--product-text-dim)]">|</span>
             <span>RTT {webrtcStats.rttMs}ms</span>
             <span className="text-[var(--product-text-dim)]">|</span>
             <span>Drop {webrtcStats.droppedFrames}</span>
           </div>
-          <button
-            type="button"
+          <JXButton
+            size="sm"
+            color="neutral"
+            variant="outlined"
+            aria-pressed={isStreamActive}
             onClick={() => setIsStreamActive((prev) => !prev)}
-            className="px-2.5 py-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] hover:border-[var(--product-line)] flex items-center gap-1.5"
           >
-            <RefreshCw className={`w-3 h-3 ${isStreamActive ? "text-emerald-400" : "text-[var(--product-text-dim)]"}`} />
-            <span>{isStreamActive ? "Stream Polling [ON]" : "Stream Polling [PAUSED]"}</span>
-          </button>
-          <button
-            type="button"
+            <RefreshCw className={`w-3 h-3 ${isStreamActive ? "text-emerald-400" : "text-[var(--product-text-dim)]"}`} aria-hidden="true" />
+            <span>Stream polling</span>
+            <StatusBadge status={isStreamActive ? "active" : "paused"} />
+          </JXButton>
+          <JXButton
+            size="sm"
+            color={live && !isWindowsStreamHost ? "neutral" : "primary"}
+            variant="outlined"
             onClick={() => {
-              if (!isWindowsStreamHost) {
-                setRecentMacroNotice(
-                  streamUnavailableReason || "WebRTC desktop stream requires a Windows host"
-                );
-                setTimeout(() => setRecentMacroNotice(null), 3500);
+              // UX-33: never a dead disabled button — when no stream is
+              // possible this opens the explanatory panel instead.
+              if (live && !isWindowsStreamHost) {
+                setStreamHelpOpen((prev) => !prev);
                 return;
               }
               void handleStartWebrtc();
             }}
-            disabled={live && !isWindowsStreamHost}
             title={
               live && !isWindowsStreamHost
-                ? streamUnavailableReason || "Windows desktop host required"
+                ? "Why is there no stream? Open the explanation."
                 : "Start or reconnect WebRTC desktop session"
             }
-            className={`px-2.5 py-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] flex items-center gap-1.5 ${
-              live && !isWindowsStreamHost
-                ? "text-[var(--product-text-dim)] opacity-60 cursor-not-allowed"
-                : "text-indigo-300 hover:border-indigo-500/50"
-            }`}
+            aria-expanded={live && !isWindowsStreamHost ? streamHelpOpen : undefined}
           >
-            <Radio className="w-3 h-3 text-indigo-400" />
+            <Radio className="w-3 h-3 text-indigo-400" aria-hidden="true" />
             <span>
               {live && !isWindowsStreamHost
-                ? "Stream unavailable"
+                ? "Why no stream?"
                 : webrtcSessionId
                   ? `WebRTC #${webrtcSessionId.slice(0, 6)}`
                   : "Start stream"}
             </span>
-          </button>
+          </JXButton>
           {webrtcSessionId && (
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color="error"
+              variant="outlined"
               onClick={() => cleanupWebrtc()}
-              className="px-2.5 py-1 rounded-lg bg-rose-950/40 border border-rose-500/40 text-rose-300 hover:bg-rose-950/60 flex items-center gap-1.5"
               title="Terminate active WebRTC session"
             >
               <span>Stop stream</span>
-            </button>
+            </JXButton>
           )}
         </div>
       </div>
 
-      {/* Floating Dual-Control Takeover Bar — takeover/SoM/audio overlays are Windows stream hosts only */}
+      {/* UX-33: explanatory panel for "why no stream" — opened by the enabled
+          "Why no stream?" button above. Which devices qualify is stated here. */}
+      {live && !isWindowsStreamHost && streamHelpOpen && (
+        <div className="space-y-2">
+          <JXAlert
+            severity="info"
+            title="Why is there no stream?"
+            description={
+              streamUnavailableReason ||
+              "No Windows device is selected. Live desktop streaming needs a Windows device that is online with desktop capture enabled. Linux and macOS agents do not expose a WebRTC desktop track."
+            }
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <JXButton size="sm" color="primary" variant="outlined" onClick={() => navigate("devices")}>
+              Open fleet inventory
+            </JXButton>
+            <span className="text-xs text-[var(--product-text-tertiary)]">
+              Qualifying devices: Windows, online, desktop capture enabled.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* UX-33: persistent offer-wait state with elapsed time and Cancel. */}
+      {offerWait && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-indigo-500/40"
+        >
+          <span className="text-xs font-mono text-indigo-300">
+            Waiting for agent offer… {offerWaitElapsedSec}s elapsed (session {offerWait.sessionId})
+          </span>
+          <JXButton size="sm" color="neutral" variant="outlined" onClick={handleCancelOfferWait}>
+            Cancel
+          </JXButton>
+        </div>
+      )}
+
+      {/* UX-33: session-status line, persisted until dismissed. */}
+      {sessionStatus && !offerWait && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)]"
+        >
+          <span className="text-xs font-mono text-[var(--product-text-secondary)]">{sessionStatus}</span>
+          <JXButton
+            size="sm"
+            color="neutral"
+            variant="text"
+            onClick={() => setSessionStatus(null)}
+            aria-label="Dismiss session status"
+          >
+            <X className="w-3.5 h-3.5" aria-hidden="true" />
+          </JXButton>
+        </div>
+      )}
+
+      {/* Floating Dual-Control Takeover Bar — takeover/SoM/audio overlays are Windows devices only */}
       <div
+        id="studio-controls"
         className={`p-3 rounded-2xl bg-[var(--product-surface)]/90 border border-[var(--product-line)] shadow-xl flex flex-wrap items-center justify-between gap-3 ${
           live && !isWindowsStreamHost ? "opacity-70" : ""
         }`}
       >
+        <h2 className="sr-only">Studio controls</h2>
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           {/* Mode Segmented Switch */}
           {/* Both control rows are wider than a 390px phone, so they scroll inside
               themselves instead of pushing the whole view sideways. */}
           <div className="flex max-w-full overflow-x-auto p-1 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)]">
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color="primary"
+              variant={controlMode === "observer" ? "contained" : "outlined"}
+              aria-pressed={controlMode === "observer"}
               disabled={live && !isWindowsStreamHost}
               onClick={() => void applySessionMode("view_only")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                controlMode === "observer"
-                  ? "bg-[var(--product-raised)] text-[var(--product-text)] shadow"
-                  : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-              }`}
             >
-              <Monitor className="w-3.5 h-3.5" />
-              <span>Observer Mode</span>
-            </button>
-            <button
-              type="button"
+              <Monitor className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Observer</span>
+            </JXButton>
+            <JXButton
+              size="sm"
+              color="primary"
+              variant={controlMode === "takeover" && sessionMode === "human_control" ? "contained" : "outlined"}
+              aria-pressed={controlMode === "takeover" && sessionMode === "human_control"}
               disabled={live && !isWindowsStreamHost}
               onClick={() => void applySessionMode("human_control")}
-              title={live && !isWindowsStreamHost ? "Operator takeover requires a Windows stream host" : undefined}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                controlMode === "takeover" && sessionMode === "human_control"
-                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                  : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-              }`}
+              title={live && !isWindowsStreamHost ? "Operator takeover requires a Windows device" : "Take control of the remote device"}
             >
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span>Operator Takeover [Active]</span>
-            </button>
-            <button
-              type="button"
+              <span>Takeover</span>
+            </JXButton>
+            <JXButton
+              size="sm"
+              color="primary"
+              variant={sessionMode === "ai_assisted" ? "contained" : "outlined"}
+              aria-pressed={sessionMode === "ai_assisted"}
               disabled={live && !isWindowsStreamHost}
               onClick={() => void applySessionMode("ai_assisted")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                sessionMode === "ai_assisted"
-                  ? "bg-cyan-700 text-white shadow-md shadow-cyan-700/30"
-                  : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-              }`}
             >
-              <Cpu className="w-3.5 h-3.5" />
-              <span>AI-Assisted</span>
-            </button>
+              <Cpu className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>AI-assisted</span>
+            </JXButton>
           </div>
 
           <div className="h-6 w-px bg-[var(--product-raised)] hidden sm:block mx-1"></div>
 
           {/* Kinematic Input Toggles */}
           <div className="flex min-w-0 max-w-full items-center gap-1.5 overflow-x-auto">
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color={mouseLinked ? "primary" : "neutral"}
+              variant="outlined"
+              aria-pressed={mouseLinked}
               onClick={() => setMouseLinked(!mouseLinked)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
-                mouseLinked
-                  ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                  : "bg-[var(--product-canvas)] text-[var(--product-text-dim)] border-[var(--product-line)]"
-              }`}
             >
-              <Mouse className="w-3.5 h-3.5" />
+              <Mouse className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Mouse Link</span>
               <span className={`w-1.5 h-1.5 rounded-full ${mouseLinked ? "bg-emerald-400" : "bg-[var(--product-text-dim)]"}`}></span>
-            </button>
+            </JXButton>
 
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color={keyForwarded ? "primary" : "neutral"}
+              variant="outlined"
+              aria-pressed={keyForwarded}
               onClick={() => setKeyForwarded(!keyForwarded)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
-                keyForwarded
-                  ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                  : "bg-[var(--product-canvas)] text-[var(--product-text-dim)] border-[var(--product-line)]"
-              }`}
             >
-              <Keyboard className="w-3.5 h-3.5" />
+              <Keyboard className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Key Forward</span>
               <span className={`w-1.5 h-1.5 rounded-full ${keyForwarded ? "bg-emerald-400" : "bg-[var(--product-text-dim)]"}`}></span>
-            </button>
+            </JXButton>
 
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color={clipboardSync ? "primary" : "neutral"}
+              variant="outlined"
+              aria-pressed={clipboardSync}
+              aria-label={clipboardSync ? "Clipboard sync on" : "Clipboard sync off"}
               onClick={() => void handleSyncClipboard()}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
-                clipboardSync
-                  ? "bg-indigo-500/10 text-indigo-300 border-indigo-500/30"
-                  : "bg-[var(--product-canvas)] text-[var(--product-text-dim)] border-[var(--product-line)]"
-              }`}
             >
-              <ClipboardCopy className="w-3.5 h-3.5" />
+              <ClipboardCopy className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Clipboard Sync</span>
+              {/* UX-28: the on/off state is text, not colour alone. */}
+              <span>{clipboardSync ? "On" : "Off"}</span>
               <span className={`w-1.5 h-1.5 rounded-full ${clipboardSync ? "bg-indigo-400" : "bg-[var(--product-text-dim)]"}`}></span>
-            </button>
+            </JXButton>
 
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color={pointerLockActive ? "primary" : "neutral"}
+              variant="outlined"
+              aria-pressed={pointerLockActive}
               onClick={togglePointerLock}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
-                pointerLockActive
-                  ? "bg-indigo-600/20 text-indigo-300 border-indigo-500/40"
-                  : "bg-[var(--product-canvas)] text-[var(--product-text-dim)] border-[var(--product-line)]"
-              }`}
               title="Lock mouse cursor inside stream canvas for direct precision control (Press Esc to unlock)"
             >
-              <Crosshair className="w-3.5 h-3.5" />
+              <Crosshair className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Pointer Lock</span>
               <span className={`w-1.5 h-1.5 rounded-full ${pointerLockActive ? "bg-indigo-400 animate-pulse" : "bg-[var(--product-text-dim)]"}`}></span>
-            </button>
+            </JXButton>
 
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color={!isAudioMuted && desktopAudioCaptureLive ? "primary" : "neutral"}
+              variant="outlined"
+              aria-pressed={!isAudioMuted && desktopAudioCaptureLive}
               disabled={live && !isWindowsStreamHost}
               onClick={() => setIsAudioMuted(!isAudioMuted)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
-                !isAudioMuted && desktopAudioCaptureLive
-                  ? "bg-emerald-600/20 text-emerald-300 border-emerald-500/40"
-                  : "bg-[var(--product-canvas)] text-[var(--product-text-dim)] border-[var(--product-line)]"
-              }`}
               title={audioHonestyTitle}
             >
-              {isAudioMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-400" />}
+              {isAudioMuted ? <VolumeX className="w-3.5 h-3.5" aria-hidden="true" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />}
               <span>
                 {desktopAudioCaptureLive
                   ? isAudioMuted
@@ -1735,38 +2078,38 @@ export const LiveDesktopView: React.FC = () => {
                     : "Audio off (opt-in)"}
               </span>
               <span className={`w-1.5 h-1.5 rounded-full ${!isAudioMuted && desktopAudioCaptureLive ? "bg-emerald-400 animate-pulse" : "bg-[var(--product-text-dim)]"}`}></span>
-            </button>
+            </JXButton>
 
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color={fileDrawerOpen || activeTransfer ? "primary" : "neutral"}
+              variant="outlined"
+              aria-pressed={fileDrawerOpen}
+              aria-expanded={fileDrawerOpen}
               onClick={() => {
                 const next = !fileDrawerOpen;
                 setFileDrawerOpen(next);
                 if (next) void fetchRemoteFiles();
               }}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
-                fileDrawerOpen || activeTransfer
-                  ? "bg-cyan-600/20 text-cyan-300 border-cyan-500/40"
-                  : "bg-[var(--product-canvas)] text-[var(--product-text-tertiary)] border-[var(--product-line)] hover:text-[var(--product-text-secondary)]"
-              }`}
-              title="Open host file transfer manager (Drag & drop files onto stream or select files)"
+              title="Open device file transfer manager (Drag & drop files onto stream or select files)"
             >
-              <Upload className="w-3.5 h-3.5 text-cyan-400" />
+              <Upload className="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
               <span>Files</span>
               {activeTransfer && (
-                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-cyan-400" aria-hidden="true" />
               )}
-            </button>
+            </JXButton>
 
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color="error"
+              variant="outlined"
               onClick={handleSealSessionRecording}
-              className="px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-950/50 transition-all"
               title="Seal encrypted session recording and commit Merkle proof to immutable audit trail"
             >
               <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
               <span>REC · Seal Audit</span>
-            </button>
+            </JXButton>
           </div>
         </div>
 
@@ -1774,38 +2117,41 @@ export const LiveDesktopView: React.FC = () => {
         <div className="flex items-center gap-2">
           {/* Scale Switcher */}
           <div className="flex p-1 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] font-mono text-xs">
-            <button
-              type="button"
+            <JXButton
+              size="sm"
+              color="primary"
+              variant={scalingMode === "fit" ? "contained" : "text"}
+              aria-pressed={scalingMode === "fit"}
               onClick={() => setScalingMode("fit")}
-              className={`px-2.5 py-1 rounded-lg ${
-                scalingMode === "fit" ? "bg-[var(--product-raised)] text-[var(--product-text)]" : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-              }`}
             >
               Fit
-            </button>
-            <button
-              type="button"
+            </JXButton>
+            <JXButton
+              size="sm"
+              color="primary"
+              variant={scalingMode === "native" ? "contained" : "text"}
+              aria-pressed={scalingMode === "native"}
               onClick={() => setScalingMode("native")}
-              className={`px-2.5 py-1 rounded-lg ${
-                scalingMode === "native" ? "bg-[var(--product-raised)] text-[var(--product-text)]" : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-              }`}
             >
               1:1 Native
-            </button>
-            <button
-              type="button"
+            </JXButton>
+            <JXButton
+              size="sm"
+              color="primary"
+              variant={scalingMode === "fill" ? "contained" : "text"}
+              aria-pressed={scalingMode === "fill"}
               onClick={() => setScalingMode("fill")}
-              className={`px-2.5 py-1 rounded-lg ${
-                scalingMode === "fill" ? "bg-[var(--product-raised)] text-[var(--product-text)]" : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-              }`}
             >
               Fill
-            </button>
+            </JXButton>
           </div>
 
           {/* SoM Toggle — Windows OCR/SoM path only */}
-          <button
-            type="button"
+          <JXButton
+            size="sm"
+            color={somOverlay && isWindowsStreamHost ? "primary" : "neutral"}
+            variant="outlined"
+            aria-pressed={somOverlay && isWindowsStreamHost}
             disabled={live && !isWindowsStreamHost}
             onClick={() => {
               if (live && !isWindowsStreamHost) {
@@ -1817,30 +2163,27 @@ export const LiveDesktopView: React.FC = () => {
             }}
             title={
               live && !isWindowsStreamHost
-                ? "Vision SoM requires a Windows desktop host"
+                ? "Vision SoM requires a Windows device"
                 : "Toggle Set-of-Marks overlay"
             }
-            className={`px-3 py-1.5 rounded-xl text-xs font-mono font-semibold flex items-center gap-1.5 border transition-all ${
-              somOverlay && isWindowsStreamHost
-                ? "bg-indigo-600/20 text-indigo-300 border-indigo-500/40"
-                : "bg-[var(--product-canvas)] text-[var(--product-text-tertiary)] border-[var(--product-line)]"
-            }`}
           >
-            <Crosshair className="w-3.5 h-3.5 text-indigo-400" />
+            <Crosshair className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
             <span>
               Vision SoM [{live && !isWindowsStreamHost ? "N/A" : somOverlay ? "ON" : "OFF"}]
             </span>
-          </button>
+          </JXButton>
 
-          {/* Screenshot Button */}
-          <button
-            type="button"
-            onClick={handleCaptureSnapshot}
-            title="Capture Desktop Snapshot"
-            className="p-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] hover:text-[var(--product-text)] hover:border-[var(--product-line)] transition-colors"
+          {/* Screenshot Button — downloads a real PNG of the current frame (UX-08). */}
+          <JXButton
+            size="sm"
+            color="neutral"
+            variant="outlined"
+            onClick={() => void handleCaptureSnapshot()}
+            title="Capture desktop snapshot (downloads a PNG)"
+            aria-label="Capture desktop snapshot (downloads a PNG)"
           >
-            <Camera className="w-4 h-4" />
-          </button>
+            <Camera className="w-4 h-4" aria-hidden="true" />
+          </JXButton>
         </div>
       </div>
 
@@ -1861,7 +2204,7 @@ export const LiveDesktopView: React.FC = () => {
                 key={macro}
                 type="button"
                 onClick={() => dispatchMacro(macro)}
-                className="px-2.5 py-1 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)] hover:border-[var(--product-line)] hover:bg-[var(--product-raised)] text-[var(--product-text-secondary)] font-mono text-xs transition-all active:scale-95"
+                className="px-2.5 py-1 min-h-11 sm:min-h-0 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)] hover:border-[var(--product-line)] hover:bg-[var(--product-raised)] text-[var(--product-text-secondary)] font-mono text-xs transition-all active:scale-95"
               >
                 {macro}
               </button>
@@ -1869,26 +2212,44 @@ export const LiveDesktopView: React.FC = () => {
             <button
               type="button"
               onClick={() => dispatchMacro("Unlock Screen")}
-              className="px-2.5 py-1 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)] hover:border-[var(--product-line)] text-emerald-400 font-mono text-xs transition-all active:scale-95 flex items-center gap-1"
+              className="px-2.5 py-1 min-h-11 sm:min-h-0 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)] hover:border-[var(--product-line)] text-emerald-400 font-mono text-xs transition-all active:scale-95 flex items-center gap-1"
             >
               <Unlock className="w-3 h-3 text-emerald-400" />
               <span>Unlock Screen</span>
             </button>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="px-2.5 py-1 rounded-lg bg-cyan-950/70 border border-cyan-500/50 hover:border-cyan-400 text-cyan-300 font-mono text-xs transition-all active:scale-95 flex items-center gap-1"
-              title="Upload file directly to remote host (/transfers)"
+            {/* UX-10: the file transfer is a data-submitting control, so it is
+                a real <form> (Enter submits); UX-28: the hidden input has an
+                accessible name. UX-39: the accept list is a picker hint for
+                the common transfer types (documents, archives, images,
+                video); the backend accepts any file type
+                (POST /api/v1/devices/{id}/files/upload takes any filename —
+                see src/ai_bridge/control/v1_routes.py), so this list is a
+                UX choice, not a backend constraint, and "All files" in the
+                picker still transfers anything. */}
+            <form
+              className="inline-flex"
+              onSubmit={(e) => {
+                e.preventDefault();
+                fileInputRef.current?.click();
+              }}
             >
-              <Upload className="w-3 h-3 text-cyan-400" />
-              <span>Transfer File</span>
-            </button>
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileInputChange}
-              className="hidden"
-            />
+              <button
+                type="submit"
+                className="px-2.5 py-1 min-h-11 sm:min-h-0 rounded-lg bg-cyan-950/70 border border-cyan-500/50 hover:border-cyan-400 text-cyan-300 font-mono text-xs transition-all active:scale-95 flex items-center gap-1"
+                title="Upload file directly to remote device (/transfers)"
+              >
+                <Upload className="w-3 h-3 text-cyan-400" />
+                <span>Transfer File</span>
+              </button>
+              <input
+                type="file"
+                ref={fileInputRef}
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.zip,.tar,.gz,.tgz,.7z,.png,.jpg,.jpeg,.gif,.webp,.svg,.mp4,.mov"
+                onChange={handleFileInputChange}
+                className="hidden"
+                aria-label="Choose file to transfer to remote device"
+              />
+            </form>
           </div>
         </div>
 
@@ -1904,10 +2265,32 @@ export const LiveDesktopView: React.FC = () => {
         </div>
       </div>
 
+      {/* UX-11: visible keyboard-forwarding hint + explicit release control.
+          The hint sits above the stage so it is seen before focus lands. */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-[var(--product-text-tertiary)]">
+          Keyboard input is sent to the remote device while the desktop area is focused.
+          {controlMode === "takeover" ? " You are in control — press Esc to release." : " Observer mode — input is not forwarded."}
+        </p>
+        {controlMode === "takeover" && (
+          <JXButton
+            size="sm"
+            color="primary"
+            variant="outlined"
+            onClick={() => void applySessionMode("view_only")}
+          >
+            Release control (Esc)
+          </JXButton>
+        )}
+      </div>
+
       {/* Desktop Stream Viewport Canvas */}
       <div
+        id="desktop-stream"
         ref={canvasContainerRef}
         tabIndex={0}
+        role="application"
+        aria-label="Remote desktop. Keyboard input is sent to the remote computer."
         onMouseMove={handleCanvasMouseMove}
         onMouseDown={handleCanvasMouseDown}
         onMouseUp={handleCanvasMouseUp}
@@ -1919,7 +2302,7 @@ export const LiveDesktopView: React.FC = () => {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className="relative w-full aspect-video min-h-[560px] max-h-[760px] rounded-2xl bg-[var(--product-canvas)] border border-[var(--product-line)]/80 overflow-hidden shadow-2xl select-none group focus:outline-none focus:border-indigo-500/60"
+        className="relative w-full aspect-video min-h-[320px] sm:min-h-[560px] max-h-[760px] rounded-2xl bg-[var(--product-canvas)] border border-[var(--product-line)]/80 overflow-hidden shadow-2xl select-none group focus:outline-none focus:border-indigo-500/60"
       >
         <video
           ref={videoRef}
@@ -1953,7 +2336,7 @@ export const LiveDesktopView: React.FC = () => {
               <Upload className="w-10 h-10 text-cyan-400" />
             </div>
             <div className="text-center px-4 font-mono">
-              <p className="font-semibold text-white text-base">Drop file to transfer directly to remote host</p>
+              <p className="font-semibold text-white text-base">Drop file to transfer directly to the remote device</p>
               <p className="text-xs text-cyan-300/80 mt-1">Streamed via WebRTC DataChannel (64 KB chunks, SHA-256 verified)</p>
             </div>
           </div>
@@ -1993,7 +2376,7 @@ export const LiveDesktopView: React.FC = () => {
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-[var(--product-text-secondary)] font-semibold">ubuntu@srv-us-east-412:~</span>
-                <span className="text-[10px] px-1.5 rounded bg-[var(--product-raised)] text-[var(--product-text-tertiary)]">X11/GNOME 46</span>
+                <span className="text-[11px] px-1.5 rounded bg-[var(--product-raised)] text-[var(--product-text-tertiary)]">X11/GNOME 46</span>
               </div>
             </div>
 
@@ -2050,13 +2433,13 @@ export const LiveDesktopView: React.FC = () => {
 
               <div className="flex-1 p-2.5 font-mono text-[11px] leading-relaxed text-[var(--product-text-secondary)] space-y-1 overflow-hidden">
                 <div className="text-[var(--product-text-dim)]">sarah@srv-us-east-412:~$ docker ps</div>
-                <div className="text-emerald-400 text-[10px]">CONTAINER ID   NAMES               STATUS</div>
-                <div className="text-[var(--product-text-secondary)] text-[10px]">8f9a21e4cc     bridge-ingress-gw   Up 14h (healthy)</div>
-                <div className="text-[var(--product-text-secondary)] text-[10px]">02c91fa09b     vector-indexer      Up 3h</div>
-                <div className="text-[var(--product-text-secondary)] text-[10px]">e45a90d81c     webrtc-streamer     Up 14h</div>
+                <div className="text-emerald-400 text-[11px]">CONTAINER ID   NAMES               STATUS</div>
+                <div className="text-[var(--product-text-secondary)] text-[11px]">8f9a21e4cc     bridge-ingress-gw   Up 14h (healthy)</div>
+                <div className="text-[var(--product-text-secondary)] text-[11px]">02c91fa09b     vector-indexer      Up 3h</div>
+                <div className="text-[var(--product-text-secondary)] text-[11px]">e45a90d81c     webrtc-streamer     Up 14h</div>
                 <div className="mt-2 text-[var(--product-text-dim)]">sarah@srv-us-east-412:~$ tail -f audit.log</div>
-                <div className="text-[var(--product-text-tertiary)] text-[10px]">[14:37:58] Agent Sonnet requested keyboard event</div>
-                <div className="text-cyan-400 text-[10px]">[14:38:01] Dual-Control arbiter: Granting operator priority</div>
+                <div className="text-[var(--product-text-tertiary)] text-[11px]">[14:37:58] Agent Sonnet requested keyboard event</div>
+                <div className="text-cyan-400 text-[11px]">[14:38:01] Dual-Control arbiter: Granting operator priority</div>
                 <div className="text-emerald-400 flex items-center gap-1 mt-2">
                   <span>sarah@srv-us-east-412:~$</span>
                   <span className="w-2 h-3.5 bg-emerald-400 inline-block animate-pulse"></span>
@@ -2071,26 +2454,27 @@ export const LiveDesktopView: React.FC = () => {
                   <Activity className="w-3.5 h-3.5 text-indigo-400" />
                   <span>System Performance Realtime Telemetry</span>
                 </div>
-                <span className="text-[11px] text-[var(--product-text-tertiary)]">
-                  {webrtcConnected ? `Session active · ${webrtcStats.fps} fps` : "No active encode session"}
-                </span>
+                <StatusBadge
+                  status={webrtcConnected ? "running" : "idle"}
+                  label={webrtcConnected ? `Session active · ${webrtcStats.fps} fps` : "No active encode session"}
+                />
               </div>
 
               <div className="grid grid-cols-4 gap-2 pt-1 font-mono">
                 <div className="p-2 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)]">
-                  <span className="text-[10px] text-[var(--product-text-dim)] uppercase block">CPU UTIL</span>
+                  <span className="text-[11px] text-[var(--product-text-dim)] uppercase block">CPU UTIL</span>
                   <span className="text-sm font-bold text-[var(--product-text-secondary)]">24.2%</span>
                 </div>
                 <div className="p-2 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)]">
-                  <span className="text-[10px] text-[var(--product-text-dim)] uppercase block">GPU VRAM</span>
+                  <span className="text-[11px] text-[var(--product-text-dim)] uppercase block">GPU VRAM</span>
                   <span className="text-sm font-bold text-emerald-400">4.8 GB</span>
                 </div>
                 <div className="p-2 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)]">
-                  <span className="text-[10px] text-[var(--product-text-dim)] uppercase block">NETWORK I/O</span>
+                  <span className="text-[11px] text-[var(--product-text-dim)] uppercase block">NETWORK I/O</span>
                   <span className="text-sm font-bold text-indigo-300">14.8 Mb/s</span>
                 </div>
                 <div className="p-2 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)]">
-                  <span className="text-[10px] text-[var(--product-text-dim)] uppercase block">AGENT-TO-GROUND</span>
+                  <span className="text-[11px] text-[var(--product-text-dim)] uppercase block">AGENT-TO-GROUND</span>
                   <span className="text-sm font-bold text-cyan-400">PASSIVE</span>
                 </div>
               </div>
@@ -2124,10 +2508,10 @@ export const LiveDesktopView: React.FC = () => {
                     className={`absolute ${posClass} border-2 border-indigo-400/80 bg-indigo-500/10 rounded-xl flex items-start justify-between p-1.5 transition-all pointer-events-auto cursor-pointer hover:bg-indigo-500/25 hover:border-indigo-300 shadow-lg`}
                     title={`Click to target SoM #${elem.id}: ${elem.label} (${elem.type})`}
                   >
-                    <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-mono text-[10px] font-bold shadow-md">
+                    <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-mono text-[11px] font-bold shadow-md">
                       #{elem.id}
                     </span>
-                    <span className="font-mono text-[9px] text-indigo-200 bg-[var(--product-canvas)]/90 px-1.5 py-0.5 rounded border border-indigo-500/30 truncate max-w-[130px]">
+                    <span className="font-mono text-[11px] text-indigo-200 bg-[var(--product-canvas)]/90 px-1.5 py-0.5 rounded border border-indigo-500/30 truncate max-w-[130px]">
                       {elem.label}
                     </span>
                   </div>
@@ -2137,26 +2521,26 @@ export const LiveDesktopView: React.FC = () => {
               <>
                 {/* Fallback default initial grounding targets */}
                 <div className="absolute left-[4%] top-[10%] w-[60%] h-[56%] border-2 border-indigo-400/70 bg-indigo-500/5 rounded-xl flex items-start justify-between p-2">
-                  <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-mono text-[10px] font-bold shadow-md">
+                  <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-mono text-[11px] font-bold shadow-md">
                     SoM #1 • Editor Workspace
                   </span>
-                  <span className="font-mono text-[10px] text-indigo-300 bg-[var(--product-canvas)]/80 px-1.5 py-0.5 rounded border border-indigo-500/30">
+                  <span className="font-mono text-[11px] text-indigo-300 bg-[var(--product-canvas)]/80 px-1.5 py-0.5 rounded border border-indigo-500/30">
                     Target: active_buffer
                   </span>
                 </div>
                 <div className="absolute left-[66%] top-[10%] w-[30%] h-[80%] border-2 border-emerald-400/70 bg-emerald-500/5 rounded-xl flex items-start justify-between p-2">
-                  <span className="px-2 py-0.5 rounded bg-emerald-800 text-white font-mono text-[10px] font-bold shadow-md">
+                  <span className="px-2 py-0.5 rounded bg-emerald-800 text-white font-mono text-[11px] font-bold shadow-md">
                     SoM #2 • Command Shell
                   </span>
-                  <span className="font-mono text-[10px] text-emerald-300 bg-[var(--product-canvas)]/80 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                  <span className="font-mono text-[11px] text-emerald-300 bg-[var(--product-canvas)]/80 px-1.5 py-0.5 rounded border border-emerald-500/30">
                     Target: bash_pty
                   </span>
                 </div>
                 <div className="absolute left-[4%] top-[70%] w-[60%] h-[24%] border-2 border-cyan-400/70 bg-cyan-500/5 rounded-xl flex items-start justify-between p-2">
-                  <span className="px-2 py-0.5 rounded bg-cyan-800 text-white font-mono text-[10px] font-bold shadow-md">
+                  <span className="px-2 py-0.5 rounded bg-cyan-800 text-white font-mono text-[11px] font-bold shadow-md">
                     SoM #3 • Telemetry Metrics
                   </span>
-                  <span className="font-mono text-[10px] text-cyan-300 bg-[var(--product-canvas)]/80 px-1.5 py-0.5 rounded border border-cyan-500/30">
+                  <span className="font-mono text-[11px] text-cyan-300 bg-[var(--product-canvas)]/80 px-1.5 py-0.5 rounded border border-cyan-500/30">
                     Target: gpu_vitals
                   </span>
                 </div>
@@ -2171,7 +2555,7 @@ export const LiveDesktopView: React.FC = () => {
           <div className="w-5 h-5 rounded-full border-2 border-indigo-400 bg-indigo-500/20 flex items-center justify-center animate-pulse">
             <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
           </div>
-          <div className="px-2 py-0.5 rounded bg-indigo-600 text-white font-mono text-[10px] font-semibold shadow-lg">
+          <div className="px-2 py-0.5 rounded bg-indigo-600 text-white font-mono text-[11px] font-semibold shadow-lg">
             Agent: Claude-3.5-Sonnet (X: 1420, Y: 840)
           </div>
         </div>
@@ -2181,7 +2565,7 @@ export const LiveDesktopView: React.FC = () => {
           <div className="w-4 h-4 rounded-full border-2 border-emerald-400 bg-emerald-500/30 flex items-center justify-center">
             <span className="w-1 h-1 rounded-full bg-emerald-300"></span>
           </div>
-          <div className="px-2 py-0.5 rounded bg-[var(--product-surface)]/90 backdrop-blur-md border border-emerald-500/40 text-emerald-300 font-mono text-[10px] font-semibold shadow-lg">
+          <div className="px-2 py-0.5 rounded bg-[var(--product-surface)]/90 backdrop-blur-md border border-emerald-500/40 text-emerald-300 font-mono text-[11px] font-semibold shadow-lg">
             Operator: Sarah J. (X: {operatorCoords.x}, Y: {operatorCoords.y})
           </div>
         </div>
@@ -2206,24 +2590,29 @@ export const LiveDesktopView: React.FC = () => {
               {/* Action Intent Banner with Countdown & Veto Action */}
               <div className="pointer-events-auto p-2.5 rounded-xl bg-[var(--product-canvas)]/95 border border-cyan-500/60 shadow-2xl flex flex-col items-center gap-1.5 min-w-[220px]">
                 <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-cyan-300">
-                  <Zap className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+                  <Zap className="w-3.5 h-3.5 text-cyan-400" />
                   <span>Anticipated AI Action</span>
                 </div>
                 <div className="text-[11px] font-mono text-[var(--product-text-secondary)] font-semibold truncate max-w-[200px]">
                   {pendingIntent.target_label}
                 </div>
-                {/* Countdown progress indicator */}
-                <div className="w-full bg-[var(--product-raised)] rounded-full h-1.5 overflow-hidden">
-                  <div className="bg-cyan-500 h-full animate-pulse w-full" />
-                </div>
+                {/* Countdown progress indicator — UX-24: a real progress
+                    bar (remaining fraction of the grace period, via the
+                    shared JXLinearProgress), not a pulsing placeholder;
+                    pulse is reserved for live/online indicators. */}
+                <JXLinearProgress
+                  value={pendingIntent.countdown_ms > 0 ? (countdownRemainingMs / pendingIntent.countdown_ms) * 100 : 0}
+                  label={`AI action executes in ${(countdownRemainingMs / 1000).toFixed(1)} seconds`}
+                  className="h-1.5"
+                />
                 <div className="flex items-center justify-between w-full pt-1 gap-2">
-                  <span className="font-mono text-[10px] text-[var(--product-text-tertiary)]">
+                  <span className="font-mono text-[11px] text-[var(--product-text-tertiary)]">
                     Executing in {(countdownRemainingMs / 1000).toFixed(1)}s
                   </span>
                   <button
                     type="button"
                     onClick={handleVetoAction}
-                    className="px-2.5 py-0.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-mono text-[10px] font-bold shadow-md transition-all active:scale-95 flex items-center gap-1"
+                    className="px-2.5 py-0.5 min-h-11 sm:min-h-0 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-mono text-[11px] font-bold shadow-md transition-all active:scale-95 flex items-center gap-1"
                   >
                     <span>Veto [Esc]</span>
                   </button>
@@ -2233,15 +2622,8 @@ export const LiveDesktopView: React.FC = () => {
           </div>
         )}
 
-        {/* Takeover Active Warning Banner if Takeover Mode */}
-        {controlMode === "takeover" && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none z-20">
-            <div className="px-4 py-1.5 rounded-full bg-[var(--product-canvas)]/90 backdrop-blur-md border border-indigo-500/60 shadow-xl flex items-center gap-2 font-mono text-xs text-indigo-300">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span className="font-semibold">Operator Takeover Active — Agent Input Suppressed</span>
-            </div>
-          </div>
-        )}
+        {/* UX-33/UX-39: the duplicate "Operator Takeover Active" banner was
+            removed — the takeover bar above is the single indicator. */}
 
         {/* Pointer Lock Status Badge */}
         {pointerLockActive && (
@@ -2267,36 +2649,40 @@ export const LiveDesktopView: React.FC = () => {
 
       {/* Bi-Directional File Transfer Manager & Drawer */}
       {fileDrawerOpen && (
-        <div className="p-4 rounded-2xl bg-[var(--product-canvas)]/95 border border-cyan-500/40 backdrop-blur-md shadow-2xl flex flex-col gap-3 font-mono text-xs">
+        <div id="file-transfer" className="p-4 rounded-2xl bg-[var(--product-canvas)]/95 border border-cyan-500/40 backdrop-blur-md shadow-2xl flex flex-col gap-3 font-mono text-xs">
+          <h2 className="sr-only">File transfer</h2>
           <div className="flex items-center justify-between border-b border-[var(--product-line)] pb-2">
             <div className="flex items-center gap-2 text-cyan-400 font-semibold">
               <Folder className="w-4 h-4 text-cyan-400" />
-              <span>Remote File Transfer & Storage (`/transfers`)</span>
+              <span>Device file transfer & storage (`/transfers`)</span>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
+              <JXButton
+                size="sm"
+                color="primary"
+                variant="outlined"
                 onClick={() => fileInputRef.current?.click()}
-                className="px-2.5 py-1 rounded-lg bg-cyan-600/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-600/30 flex items-center gap-1.5 transition-all"
               >
-                <Upload className="w-3.5 h-3.5 text-cyan-400" />
+                <Upload className="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
                 <span>Upload File</span>
-              </button>
+              </JXButton>
               <button
                 type="button"
                 onClick={() => void fetchRemoteFiles()}
-                className="px-2 py-1 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)] text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)] transition-colors"
+                className="px-2 py-1 min-h-11 sm:min-h-0 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)] text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)] transition-colors"
                 title="Refresh remote files"
+                aria-label="Refresh remote files"
               >
-                <RefreshCw className="w-3.5 h-3.5" />
+                <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
               </button>
               <button
                 type="button"
                 onClick={() => setFileDrawerOpen(false)}
-                className="px-2 py-1 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)] text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)] transition-colors"
+                className="px-2 py-1 min-h-11 sm:min-h-0 rounded-lg bg-[var(--product-surface)] border border-[var(--product-line)] text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)] transition-colors"
                 title="Close file manager"
+                aria-label="Close file manager"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
               </button>
             </div>
           </div>
@@ -2314,15 +2700,24 @@ export const LiveDesktopView: React.FC = () => {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-cyan-400 font-bold">{activeTransfer.percent}%</span>
-                  <span className="text-[var(--product-text-tertiary)] text-[11px]">
-                    {activeTransfer.status === "completed"
-                      ? "Completed"
-                      : activeTransfer.status === "verifying"
-                      ? "Verifying SHA-256..."
-                      : activeTransfer.status === "error"
-                      ? "Failed"
-                      : `${activeTransfer.speed_kbps} KB/s`}
-                  </span>
+                  <StatusBadge
+                    status={
+                      activeTransfer.status === "completed"
+                        ? "completed"
+                        : activeTransfer.status === "error"
+                          ? "failed"
+                          : "running"
+                    }
+                    label={
+                      activeTransfer.status === "completed"
+                        ? "Completed"
+                        : activeTransfer.status === "verifying"
+                          ? "Verifying SHA-256…"
+                          : activeTransfer.status === "error"
+                            ? "Failed"
+                            : `${activeTransfer.speed_kbps} KB/s`
+                    }
+                  />
                 </div>
               </div>
 
@@ -2351,11 +2746,11 @@ export const LiveDesktopView: React.FC = () => {
             </div>
           )}
 
-          {/* Transferred Files on Remote Host */}
+          {/* Transferred files on the remote device */}
           <div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto">
             {recentTransfers.length === 0 ? (
               <div className="p-4 text-center text-[var(--product-text-dim)] text-xs">
-                No transferred files found on remote host. Drag and drop any file onto the stream or click Upload File.
+                No transferred files found on the remote device. Drag and drop any file onto the stream or click Upload File.
               </div>
             ) : (
               recentTransfers.map((f) => (
@@ -2366,7 +2761,7 @@ export const LiveDesktopView: React.FC = () => {
                   <div className="flex items-center gap-2.5 truncate max-w-[70%]">
                     <FileText className="w-3.5 h-3.5 text-[var(--product-text-tertiary)] shrink-0" />
                     <span className="text-[var(--product-text-secondary)] truncate">{f.name}</span>
-                    <span className="text-[var(--product-text-dim)] text-[10px] shrink-0">
+                    <span className="text-[var(--product-text-dim)] text-[11px] shrink-0">
                       {(f.size_bytes / 1024).toFixed(1)} KB
                     </span>
                   </div>
@@ -2374,7 +2769,7 @@ export const LiveDesktopView: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => requestFileDownload(f)}
-                      className="px-2 py-1 rounded-lg bg-[var(--product-raised)] hover:bg-[var(--product-raised)] text-cyan-300 text-[11px] flex items-center gap-1 transition-colors"
+                      className="px-2 py-1 min-h-11 sm:min-h-0 rounded-lg bg-[var(--product-raised)] hover:bg-[var(--product-raised)] text-cyan-300 text-[11px] flex items-center gap-1 transition-colors"
                       title="Download file to browser"
                     >
                       <Download className="w-3 h-3 text-cyan-400" />
@@ -2384,10 +2779,10 @@ export const LiveDesktopView: React.FC = () => {
                       type="button"
                       onClick={() => {
                         void navigator.clipboard?.writeText(f.full_path).catch(() => {});
-                        setRecentMacroNotice(`Copied host path to clipboard: ${f.full_path}`);
+                        setRecentMacroNotice(`Copied device path to clipboard: ${f.full_path}`);
                         setTimeout(() => setRecentMacroNotice(null), 2500);
                       }}
-                      className="px-2 py-1 rounded-lg bg-[var(--product-raised)] hover:bg-[var(--product-raised)] text-[var(--product-text-secondary)] text-[11px] transition-colors"
+                      className="px-2 py-1 min-h-11 sm:min-h-0 rounded-lg bg-[var(--product-raised)] hover:bg-[var(--product-raised)] text-[var(--product-text-secondary)] text-[11px] transition-colors"
                       title="Copy absolute remote path"
                     >
                       Copy Path
@@ -2401,7 +2796,8 @@ export const LiveDesktopView: React.FC = () => {
       )}
 
       {/* Active Windows HUD Tray (Collapsible & Focusable) */}
-      <div className="p-3 rounded-2xl bg-[var(--product-surface)]/90 border border-[var(--product-line)] shadow-xl flex flex-col md:flex-row items-center justify-between gap-4">
+      <div id="windows" className="p-3 rounded-2xl bg-[var(--product-surface)]/90 border border-[var(--product-line)] shadow-xl flex flex-col md:flex-row items-center justify-between gap-4">
+        <h2 className="sr-only">Windows</h2>
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
           <span className="font-mono text-xs uppercase tracking-wider text-[var(--product-text-tertiary)] pl-1 hidden sm:inline">
             Windows
@@ -2412,7 +2808,7 @@ export const LiveDesktopView: React.FC = () => {
               <div
                 key={win.id}
                 onClick={() => focusWindow(win.id)}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-mono cursor-pointer transition-all ${
+                className={`flex items-center gap-2 px-3 py-1.5 min-h-11 sm:min-h-0 rounded-xl border text-xs font-mono cursor-pointer transition-all ${
                   isFocused
                     ? "bg-indigo-950/60 border-indigo-500 text-[var(--product-text)] shadow-md shadow-indigo-600/10"
                     : "bg-[var(--product-canvas)]/70 border-[var(--product-line)] text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)] hover:border-[var(--product-line)]"
@@ -2424,7 +2820,7 @@ export const LiveDesktopView: React.FC = () => {
                 {win.icon === "monitor" && <Activity className="w-3.5 h-3.5 text-amber-400" />}
                 <div className="flex flex-col text-left">
                   <span className="font-semibold text-[var(--product-text-secondary)]">{win.name}</span>
-                  <span className="text-[10px] text-[var(--product-text-dim)]">{win.desc}</span>
+                  <span className="text-[11px] text-[var(--product-text-dim)]">{win.desc}</span>
                 </div>
                 {isFocused && <span className="w-2 h-2 rounded-full bg-emerald-400 ml-1"></span>}
               </div>
@@ -2434,32 +2830,37 @@ export const LiveDesktopView: React.FC = () => {
 
         {/* Window Manager Actions */}
         <div className="flex items-center gap-2 w-full md:w-auto justify-end">
-          <button
-            type="button"
+          <JXButton
+            size="sm"
+            color="neutral"
+            variant="outlined"
             onClick={() => focusWindow(activeWindowId)}
-            className="px-3 py-1.5 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] hover:bg-[var(--product-raised)] text-[var(--product-text-secondary)] font-mono text-xs flex items-center gap-1.5 transition-colors"
           >
-            <Crosshair className="w-3.5 h-3.5 text-indigo-400" />
+            <Crosshair className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
             <span>Focus Active</span>
-          </button>
-          <button
-            type="button"
+          </JXButton>
+          <JXButton
+            size="sm"
+            color="neutral"
+            variant="outlined"
             onClick={() => dispatchMacro(`Minimize ${activeWindow.name}`)}
-            className="px-3 py-1.5 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] hover:bg-[var(--product-raised)] text-[var(--product-text-secondary)] font-mono text-xs flex items-center gap-1.5 transition-colors"
           >
-            <Minimize2 className="w-3.5 h-3.5" />
+            <Minimize2 className="w-3.5 h-3.5" aria-hidden="true" />
             <span>Minimize</span>
-          </button>
-          <button
-            type="button"
+          </JXButton>
+          <JXButton
+            size="sm"
+            color="error"
+            variant="outlined"
             onClick={() => dispatchMacro(`Graceful Stop PID ${activeWindow.pid}`)}
-            className="px-3 py-1.5 rounded-xl bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 text-rose-300 font-mono text-xs flex items-center gap-1.5 transition-colors"
           >
-            <Power className="w-3.5 h-3.5 text-rose-400" />
+            <Power className="w-3.5 h-3.5 text-rose-400" aria-hidden="true" />
             <span>Graceful Stop</span>
-          </button>
+          </JXButton>
         </div>
       </div>
+        </>
+      )}
 
     </div>
   );

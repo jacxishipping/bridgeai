@@ -1,10 +1,14 @@
 import React, { useCallback, useState } from "react";
 import { api } from "../../api";
 import { GlassModal, JXButton } from "../../ui";
+import { Freshness } from "../../components/Freshness";
 import { TasksPanel } from "./TasksPanel";
 import { deviceName, deviceStatus, Field, fieldClass, LiveDevice, message, Payload, ReadState, time, useRead } from "./shared";
+import { useLanguage } from "../../i18n";
+import { useDashboardStore } from "../../state/dashboardStore";
 
 function DeviceDetails({ device, admin, refreshFleet }: { device: LiveDevice; admin: boolean; refreshFleet: () => void }) {
+  const { t } = useLanguage();
   const load = useCallback(() => api.deviceOverview(device.id), [device.id]);
   const state = useRead(load);
   const { data, error, loading, refresh } = state;
@@ -18,7 +22,7 @@ function DeviceDetails({ device, admin, refreshFleet }: { device: LiveDevice; ad
   return <section aria-label="Device details" className="space-y-5">
     <dl className="grid gap-5 text-sm sm:grid-cols-2">
       {[
-        ["Hostname", device.hostname || "Not reported"], ["Operating system", device.os || "Not reported"],
+        ["Hostname", device.hostname || t("Not reported")], ["Operating system", device.os || t("Not reported")],
         ["Status", deviceStatus(device)], ["Last seen", time(device.last_seen)],
         ["Group", device.group || "None"], ["Tags", device.tags?.join(", ") || "None"],
       ].map(([label, value]) => <div key={label}><dt className="text-[var(--product-text-tertiary)]">{label}</dt><dd className="mt-1 break-all">{value}</dd></div>)}
@@ -62,10 +66,15 @@ function DeviceDetails({ device, admin, refreshFleet }: { device: LiveDevice; ad
 export function DeviceWorkspace({ device, devices, tab, canAct, admin, refreshFleet, setTab, back }:
   { device: LiveDevice; devices: LiveDevice[]; tab: string; canAct: boolean; admin: boolean; refreshFleet: () => void; setTab: (tab: string) => void; back: () => void }) {
   const [status, setStatus] = useState("all");
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncState = useDashboardStore((s) => s.getSyncState());
   return <div className="space-y-5">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <h2 dir="auto" className="break-all text-base font-semibold">{deviceName(device)}</h2>
-      <JXButton color="neutral" variant="text" onClick={back}>All devices</JXButton>
+      <div className="flex flex-wrap items-center gap-3">
+        <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} />
+        <JXButton color="neutral" variant="text" onClick={back}>All devices</JXButton>
+      </div>
     </div>
     <nav aria-label="Device workspace" className="product-section-tabs flex flex-wrap gap-2 pb-1">
       {["details", "tasks", "terminal", "desktop"].map((value) => <JXButton key={value} color="neutral"

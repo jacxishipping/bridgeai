@@ -57,7 +57,7 @@ import {
   ApiError,
 } from '../api';
 import { messages, languages, resolveLocale, translate } from '../i18n/catalogs';
-import { viewIds, readRoute } from '../state/navigation';
+import { viewIds, readRoute, writeRoute, updateRouteParams } from '../state/navigation';
 import { navigationItems, navGroupOrder } from '../shell/navigation';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -251,6 +251,117 @@ export async function runTier1Tests() {
       expect(modal).toContain('window.addEventListener("keydown", onKeyDown)');
       expect(modal).toContain('aria-label="Search pages and devices"');
       expect(modal).toContain('Pages or devices…');
+    });
+
+    it('F3.6: [UX-13] readRoute parses task/workflow/session deep links and list filters (view-scoped)', async () => {
+      const prevWindow = (globalThis as any).window;
+      const setHash = (hash: string) => {
+        const win: any = {
+          location: { hash },
+          history: {
+            pushState: (_s: unknown, _t: string, url: string) => { win.location.hash = url; },
+            replaceState: (_s: unknown, _t: string, url: string) => { win.location.hash = url; },
+          },
+        };
+        (globalThis as any).window = win;
+      };
+      try {
+        setHash('#/task-queue-and-vision?task=TSK-89214&q=shell&status=failed');
+        let route = readRoute();
+        expect(route.view).toBe('task-queue-and-vision');
+        expect(route.task).toBe('TSK-89214');
+        expect(route.q).toBe('shell');
+        expect(route.status).toBe('failed');
+        // An unknown status value is ignored, not applied.
+        setHash('#/task-queue-and-vision?status=bogus');
+        expect(readRoute().status).toBe(undefined);
+        // Entity params are view-scoped: ?task= on another route is ignored.
+        setHash('#/devices?task=TSK-89214');
+        route = readRoute();
+        expect(route.view).toBe('devices');
+        expect(route.task).toBe(undefined);
+        setHash('#/autonomous-workflows?workflow=WF-1092');
+        expect(readRoute().workflow).toBe('WF-1092');
+        setHash('#/live-desktop-studio?session=abc123');
+        expect(readRoute().session).toBe('abc123');
+      } finally {
+        if (prevWindow === undefined) delete (globalThis as any).window;
+        else (globalThis as any).window = prevWindow;
+      }
+    });
+
+    it('F3.7: [UX-13] writeRoute/updateRouteParams round-trip the deep link without dropping other params', async () => {
+      const prevWindow = (globalThis as any).window;
+      const win: any = {
+        location: { hash: '#/task-queue-and-vision' },
+        history: {
+          pushState: (_s: unknown, _t: string, url: string) => { win.location.hash = url; },
+          replaceState: (_s: unknown, _t: string, url: string) => { win.location.hash = url; },
+        },
+      };
+      (globalThis as any).window = win;
+      try {
+        writeRoute('task-queue-and-vision', undefined, { task: 'TSK-1', q: 'shell' });
+        expect(win.location.hash).toBe('#/task-queue-and-vision?task=TSK-1&q=shell');
+        updateRouteParams({ status: 'failed' }, true);
+        expect(readRoute().status).toBe('failed');
+        expect(readRoute().task).toBe('TSK-1');
+        expect(readRoute().q).toBe('shell');
+        updateRouteParams({ task: undefined });
+        expect(readRoute().task).toBe(undefined);
+        expect(readRoute().q).toBe('shell');
+      } finally {
+        if (prevWindow === undefined) delete (globalThis as any).window;
+        else (globalThis as any).window = prevWindow;
+      }
+    });
+
+    it('F3.8: [UX-31] navigation guard intercepts setCurrentView while dirty; confirm leaves, cancel stays', async () => {
+      const saved = snapshotStoreState();
+      try {
+        expect(dashboardStore.getState().currentView).toBe('login');
+        dashboardStore.getState().registerNavigationGuard({ isDirty: () => true });
+        dashboardStore.setCurrentView('live');
+        expect(dashboardStore.getState().currentView).toBe('login');
+        expect(dashboardStore.getState().pendingNavigation).toBe('live');
+        dashboardStore.getState().cancelPendingNavigation();
+        expect(dashboardStore.getState().pendingNavigation).toBe(null);
+        expect(dashboardStore.getState().currentView).toBe('login');
+        dashboardStore.setCurrentView('live');
+        expect(dashboardStore.getState().pendingNavigation).toBe('live');
+        dashboardStore.getState().confirmPendingNavigation();
+        expect(dashboardStore.getState().currentView).toBe('live');
+        expect(dashboardStore.getState().pendingNavigation).toBe(null);
+        // With the guard unregistered, navigation proceeds directly.
+        dashboardStore.getState().unregisterNavigationGuard();
+        dashboardStore.setCurrentView('login');
+        expect(dashboardStore.getState().currentView).toBe('login');
+      } finally {
+        dashboardStore.getState().unregisterNavigationGuard();
+        restoreStoreState(saved);
+      }
+    });
+
+    it('F3.9: [source-level] UX-25/UX-39 residuals: tier legend + glossary, plain audio copy, file accept list, mono token', async () => {
+      const tasks = readSource('views/TaskQueueVisionView.tsx');
+      expect(tasks).toContain('Tier 1 — read-only');
+      expect(tasks).toContain('Tier 4 — kernel');
+      expect(tasks).toContain('GlossaryModal');
+      expect(tasks).toContain('Task not available');
+      const glossary = readSource('components/Glossary.tsx');
+      expect(glossary).toContain('Tier 1 is read-only');
+      expect(glossary).toContain('Set-of-Marks');
+      const desktop = readSource('views/LiveDesktopView.tsx');
+      expect(desktop).toContain('Desktop audio is not available in this build');
+      expect(desktop).not.toContain('WASAPI Opus');
+      expect(desktop).not.toContain('AI_BRIDGE_DESKTOP_AUDIO');
+      expect(desktop).toContain('accept=".pdf,.doc,.docx');
+      expect(desktop).toContain('Session not available');
+      const css = readSource('tailwind.css');
+      expect(css).toContain('--font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace');
+      const policies = readSource('views/SecurityPoliciesView.tsx');
+      expect(policies).toContain('registerNavigationGuard');
+      expect(policies).toContain('Leave without saving?');
     });
   }, { tier: 'tier1', featureId: 'F3' });
 
@@ -663,7 +774,9 @@ export async function runTier1Tests() {
   describe('F12: Dual-Control Operator Takeover', () => {
     it('F12.1: [source-level] LiveDesktopView models observer/takeover control modes', async () => {
       const src = readSource('views/LiveDesktopView.tsx');
-      expect(src).toContain('useState<"observer" | "takeover">("takeover")');
+      // UX-33: observer is the safe default — takeover requires an explicit
+      // operator action, so the source must default to "observer".
+      expect(src).toContain('useState<"observer" | "takeover">("observer")');
     });
 
     it('F12.2: [source-level] Desktop input forwarding is gated on takeover mode', async () => {

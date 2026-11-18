@@ -4,10 +4,10 @@
  * ZERO inline styles. ZERO custom CSS.
  */
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
-  JXAlert,
+  ConfirmDestructive,
   JXCard,
   JXCardHeader,
   JXCardContent,
@@ -15,8 +15,9 @@ import {
   JXBadge,
   JXSelect,
   JXTextField,
-  JXGrid,
-  JXGridItem,
+  JXTabs,
+  StatusBadge,
+  EmptyState,
 } from "../ui";
 import {
   Bot,
@@ -50,9 +51,14 @@ import {
   X,
   Send,
   MessageSquare,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { useDashboardStore } from "../state/dashboardStore";
 import { api, sessionToken, token } from "../api";
+import { pushNotice } from "../state/notices";
+import { Freshness } from "../components/Freshness";
+import { useLanguage, formatDate } from "../i18n";
 
 interface ProviderConnector {
   id: string;
@@ -172,17 +178,35 @@ interface CustomAgent {
   mcp_servers?: McpServerItem[];
 }
 
+/**
+ * UX-18: map common failure statuses to plain-language explanations with a
+ * next step, instead of echoing the raw server string. `uncertain` (the
+ * api.ts flag for "the request may have reached the server") is surfaced
+ * explicitly — for a remote-control product, not knowing whether a command
+ * ran is itself a safety issue. Callers that mutate add a pushNotice with
+ * a "Check status" deep link (see the save/create/delete handlers).
+ */
 function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const status = (error as { status?: number })?.status;
+  const uncertain = (error as { uncertain?: boolean })?.uncertain;
+  const raw = error instanceof Error ? error.message : String(error);
+  if (status === 401) return "Your session expired. Sign in again to continue.";
+  if (status === 403) return "Access denied (403). Your account may lack permission for this action — ask an admin to check your role, then try again.";
+  if (status === 409) return "Conflict (409). The server refused this change because the current state conflicts with it — reload the latest data and try again.";
+  if (status === 429) return "Too many requests (429). Wait a minute and try again.";
+  if (status && status >= 500) return `Control plane error (${status}). The server failed to complete this — try again, and check the audit trail to see whether it went through.`;
+  if (uncertain) return `${raw} Outcome unknown — the server may have received this request. Check the audit trail before submitting again.`;
+  return raw;
 }
 
-function relativeTime(timestamp?: number | null): string {
+function relativeTime(timestamp: number | null | undefined, locale: string): string {
   if (!timestamp) return "never";
+  const rtf = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
   const seconds = Math.max(0, Math.floor(Date.now() / 1000 - timestamp));
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
+  if (seconds < 60) return rtf.format(-seconds, "second");
+  if (seconds < 3600) return rtf.format(-Math.floor(seconds / 60), "minute");
+  if (seconds < 86400) return rtf.format(-Math.floor(seconds / 3600), "hour");
+  return rtf.format(-Math.floor(seconds / 86400), "day");
 }
 
 function formatInterval(seconds: number): string {
@@ -274,6 +298,13 @@ curl -X POST "https://bridge.internal/v1/tools/dispatch" \\
 
 export const AiApiHubView: React.FC = () => {
   const devices = useDashboardStore((s) => s.devices);
+  // UX-39: sub-tab state (Providers / Agents / MCP / Chat).
+  const [activeTab, setActiveTab] = useState<"providers" | "agents" | "mcp" | "chat">("providers");
+  // UX-06: sync freshness in the header when live; UX-29: timestamps and
+  // numbers go through useLanguage() with an explicit timeZone.
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const { locale, date, number } = useLanguage();
 
   // Provider connector state. D-03: the cards below show live state only
   // (from GET /api/settings/ai) or "Not configured". Previous hardcoded
@@ -356,9 +387,13 @@ export const AiApiHubView: React.FC = () => {
   const [aiModel, setAiModel] = useState("");
   const [aiBaseUrl, setAiBaseUrl] = useState("");
   const [aiApiKey, setAiApiKey] = useState("");
+  // UX-21: show/hide for the secret fields (AI key, MCP bearer token,
+  // MCP client secret) so a pasted credential can be verified.
+  const [showAiKey, setShowAiKey] = useState(false);
+  // UX-20: blur validation for the long provider form.
+  const [aiBaseUrlTouched, setAiBaseUrlTouched] = useState(false);
   const [aiSaving, setAiSaving] = useState(false);
   const [aiClearing, setAiClearing] = useState(false);
-  const [aiNotice, setAiNotice] = useState<{ severity: "success" | "error" | "info"; text: string } | null>(null);
 
   // Custom 24/7 agents
   const [agents, setAgents] = useState<CustomAgent[]>([]);
@@ -375,7 +410,8 @@ export const AiApiHubView: React.FC = () => {
   const [agentAllowedTools, setAgentAllowedTools] = useState<string[]>([]);
   const [agentMemory, setAgentMemory] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
-  const [agentNotice, setAgentNotice] = useState<{ severity: "success" | "error" | "info"; text: string } | null>(null);
+  // UX-03: pending agent deletion; only runs from ConfirmDestructive.
+  const [deleteAgentConfirm, setDeleteAgentConfirm] = useState<CustomAgent | null>(null);
   const [agentRunsOpen, setAgentRunsOpen] = useState<Record<string, boolean>>({});
   const [expandedRunTrace, setExpandedRunTrace] = useState<Record<string, boolean>>({});
   const [askTargetAgent, setAskTargetAgent] = useState<CustomAgent | null>(null);
@@ -417,10 +453,8 @@ export const AiApiHubView: React.FC = () => {
   const [copilotDevice, setCopilotDevice] = useState("");
   const [copilotProvider, setCopilotProvider] = useState("");
   const [copilotBusy, setCopilotBusy] = useState(false);
-  const [copilotError, setCopilotError] = useState<string | null>(null);
   const [copilotExpandedSteps, setCopilotExpandedSteps] = useState<Record<string, boolean>>({});
   const [copilotLiveEvents, setCopilotLiveEvents] = useState<Array<{ step?: number; tool?: string; device?: string; status: string }>>([]);
-  const [copilotSaveNotice, setCopilotSaveNotice] = useState<string | null>(null);
   const [mcpToolPolicies, setMcpToolPolicies] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -447,8 +481,6 @@ export const AiApiHubView: React.FC = () => {
     const nextHistory = [...copilotMessages, userMsg];
     setCopilotMessages(nextHistory);
     setCopilotInput("");
-    setCopilotError(null);
-    setCopilotSaveNotice(null);
     setCopilotLiveEvents([]);
     setCopilotBusy(true);
     try {
@@ -541,7 +573,7 @@ export const AiApiHubView: React.FC = () => {
       };
       setCopilotMessages((prev) => [...prev, assistantMsg]);
     } catch (error) {
-      setCopilotError(describeError(error));
+      pushNotice({ tone: "error", title: "Copilot request failed", message: describeError(error) });
     } finally {
       setCopilotBusy(false);
       setCopilotLiveEvents([]);
@@ -559,13 +591,13 @@ export const AiApiHubView: React.FC = () => {
     if (steps.length === 0) return;
     try {
       const tpl = await api.createWorkflowTemplate({
-        name: `Copilot Flow (${new Date().toLocaleTimeString()})`,
+        name: `Copilot Flow (${formatDate(new Date(), { hour: "2-digit", minute: "2-digit", second: "2-digit" })})`,
         description: msg.content.slice(0, 140),
         steps,
       });
-      setCopilotSaveNotice(`Saved workflow template "${tpl.name}" (${steps.length} step${steps.length === 1 ? "" : "s"}).`);
+      pushNotice({ tone: "success", title: "Workflow template saved", message: `Saved workflow template "${tpl.name}" (${steps.length} step${steps.length === 1 ? "" : "s"}).` });
     } catch (error) {
-      setCopilotError(describeError(error));
+      pushNotice({ tone: "error", title: "Copilot request failed", message: describeError(error) });
     }
   };
 
@@ -579,13 +611,12 @@ export const AiApiHubView: React.FC = () => {
       const res = await api.updateMcpToolPolicies(next);
       if (res?.policies) setMcpToolPolicies(res.policies);
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: describeError(error) });
     }
   };
 
   const handleCopilotClear = (): void => {
     setCopilotMessages([]);
-    setCopilotError(null);
     try {
       window.localStorage.removeItem("ai_bridge_copilot_messages");
     } catch {
@@ -602,15 +633,25 @@ export const AiApiHubView: React.FC = () => {
   const [mcpUrl, setMcpUrl] = useState("");
   const [mcpAuthType, setMcpAuthType] = useState("bearer");
   const [mcpAuthToken, setMcpAuthToken] = useState("");
+  const [showMcpToken, setShowMcpToken] = useState(false);
   const [mcpAuthHeader, setMcpAuthHeader] = useState("");
   const [mcpOAuthClientId, setMcpOAuthClientId] = useState("");
   const [mcpOAuthClientSecret, setMcpOAuthClientSecret] = useState("");
+  const [showMcpSecret, setShowMcpSecret] = useState(false);
+  // UX-20: blur validation for the long MCP form.
+  const [mcpNameTouched, setMcpNameTouched] = useState(false);
+  const [mcpUrlTouched, setMcpUrlTouched] = useState(false);
   const [mcpOAuthAuthUrl, setMcpOAuthAuthUrl] = useState("");
   const [mcpOAuthTokenUrl, setMcpOAuthTokenUrl] = useState("");
   const [mcpOAuthScopes, setMcpOAuthScopes] = useState("");
   const [mcpDiscovering, setMcpDiscovering] = useState(false);
   const [mcpSyncing, setMcpSyncing] = useState<Record<string, boolean>>({});
-  const [mcpNotice, setMcpNotice] = useState<{ severity: "success" | "error" | "info"; text: string } | null>(null);
+  // UX-06: MCP servers refresh on a 10 s interval, so a failed poll must not
+  // stack a new persistent error notice every 10 s (the old inline notice
+  // was a single slot). Push only when the message changes; clear on success.
+  const lastMcpLoadErrorRef = useRef<string | null>(null);
+  // UX-03: pending MCP-service disconnect; only runs from ConfirmDestructive.
+  const [deleteMcpConfirm, setDeleteMcpConfirm] = useState<McpServerItem | null>(null);
   const [mcpToolsExpanded, setMcpToolsExpanded] = useState<Record<string, boolean>>({});
   const [aiCatalogTools, setAiCatalogTools] = useState<string[]>([]);
   const [aiFleetDevices, setAiFleetDevices] = useState<{ id: string; hostname?: string; name?: string; status?: string }[]>([]);
@@ -658,7 +699,7 @@ export const AiApiHubView: React.FC = () => {
         setAiModel(settings.model || "");
       }
     } catch (error) {
-      setAiNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "Could not save provider", message: describeError(error) });
     }
   };
 
@@ -668,13 +709,13 @@ export const AiApiHubView: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLive]);
 
-  const handleSaveAi = async (): Promise<void> => {
+  const handleSaveAi = async (event?: React.FormEvent): Promise<void> => {
+    event?.preventDefault();
     if (aiProvider === "custom" && !aiBaseUrl.trim()) {
-      setAiNotice({ severity: "error", text: "A base URL is required for a custom AI provider, e.g. https://openrouter.ai/api/v1" });
+      pushNotice({ tone: "error", title: "Could not save provider", message: "A base URL is required for a custom AI provider, e.g. https://openrouter.ai/api/v1" });
       return;
     }
     setAiSaving(true);
-    setAiNotice(null);
     try {
       const result = await api.saveAiSettings({
         provider: aiProvider,
@@ -683,12 +724,12 @@ export const AiApiHubView: React.FC = () => {
         base_url: aiProvider === "custom" ? aiBaseUrl.trim() : undefined,
         test_connection: true,
       });
-      setAiNotice({ severity: "success", text: result?.message || "AI provider connected." });
+      pushNotice({ tone: "success", title: result?.message || "AI provider connected." });
       setAiApiKey("");
       await loadAiSettings();
     } catch (error) {
       const text = describeError(error);
-      setAiNotice({ severity: "error", text });
+      pushNotice({ tone: "error", title: "Could not save provider", message: text, actionLabel: "Check audit trail", actionHref: "#/audit-trail" });
     } finally {
       setAiSaving(false);
     }
@@ -696,14 +737,13 @@ export const AiApiHubView: React.FC = () => {
 
   const handleClearAi = async (): Promise<void> => {
     setAiClearing(true);
-    setAiNotice(null);
     try {
       const result = await api.saveAiSettings({ provider: aiProvider, clear: true });
-      setAiNotice({ severity: "success", text: result?.message || "Provider settings cleared." });
+      pushNotice({ tone: "success", title: "Provider saved", message: result?.message || "Provider settings cleared." });
       setAiApiKey("");
       await loadAiSettings();
     } catch (error) {
-      setAiNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "Could not save provider", message: describeError(error) });
     } finally {
       setAiClearing(false);
     }
@@ -715,7 +755,7 @@ export const AiApiHubView: React.FC = () => {
       const result = await api.agents();
       setAgents(result.agents || []);
     } catch (error) {
-      if (!silent) setAgentNotice({ severity: "error", text: describeError(error) });
+      if (!silent) pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
     }
   };
 
@@ -728,9 +768,14 @@ export const AiApiHubView: React.FC = () => {
         api.mcpToolPolicies().catch(() => ({ policies: {} })),
       ]);
       setMcpServers(res.servers || []);
+      lastMcpLoadErrorRef.current = null;
       if (polRes?.policies) setMcpToolPolicies(polRes.policies);
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      const text = describeError(error);
+      if (lastMcpLoadErrorRef.current !== text) {
+        lastMcpLoadErrorRef.current = text;
+        pushNotice({ tone: "error", title: "MCP Service Notice", message: text });
+      }
     } finally {
       setMcpLoading(false);
     }
@@ -773,7 +818,6 @@ export const AiApiHubView: React.FC = () => {
     setAgentAllowedTools([]);
     setAgentMemory("");
     setAgentFormOpen(true);
-    setAgentNotice(null);
   };
 
   const handleEditAgent = (agent: CustomAgent): void => {
@@ -789,7 +833,6 @@ export const AiApiHubView: React.FC = () => {
     setAgentAllowedTools(agent.allowed_tools || []);
     setAgentMemory(agent.memory || "");
     setAgentFormOpen(true);
-    setAgentNotice(null);
   };
 
   const handleCloseAgentForm = (): void => {
@@ -805,22 +848,21 @@ export const AiApiHubView: React.FC = () => {
 
   const handleDiscoverMcpOAuth = async (): Promise<void> => {
     if (!mcpUrl.trim()) {
-      setMcpNotice({ severity: "error", text: "Enter the MCP Endpoint URL first to auto-discover OAuth2 endpoints." });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: "Enter the MCP Endpoint URL first to auto-discover OAuth2 endpoints." });
       return;
     }
     setMcpDiscovering(true);
-    setMcpNotice(null);
     try {
       const meta = await api.discoverMcpOAuth(mcpUrl.trim());
       if (meta.ok) {
         if (meta.authorization_endpoint) setMcpOAuthAuthUrl(meta.authorization_endpoint);
         if (meta.token_endpoint) setMcpOAuthTokenUrl(meta.token_endpoint);
-        setMcpNotice({ severity: "success", text: `Discovered OAuth2 endpoints from ${meta.issuer || mcpUrl}.` });
+        pushNotice({ tone: "success", title: "MCP Service", message: `Discovered OAuth2 endpoints from ${meta.issuer || mcpUrl}.` });
       } else {
-        setMcpNotice({ severity: "info", text: meta.error || "No .well-known OAuth metadata found; enter endpoints manually." });
+        pushNotice({ tone: "info", title: "MCP Service Notice", message: meta.error || "No .well-known OAuth metadata found; enter endpoints manually." });
       }
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: describeError(error) });
     } finally {
       setMcpDiscovering(false);
     }
@@ -828,7 +870,6 @@ export const AiApiHubView: React.FC = () => {
 
   const handleStartMcpOAuth = async (serverId: string): Promise<void> => {
     setMcpLoading(true);
-    setMcpNotice(null);
     try {
       const res = await api.startMcpOAuth(serverId);
       if (!res.authorize_url) {
@@ -837,9 +878,10 @@ export const AiApiHubView: React.FC = () => {
       const onMsg = (evt: MessageEvent) => {
         if (evt.data && evt.data.type === "mcp_oauth_complete" && evt.data.server_id === serverId) {
           window.removeEventListener("message", onMsg);
-          setMcpNotice({
-            severity: evt.data.ok ? "success" : "error",
-            text: evt.data.message || (evt.data.ok ? "OAuth2 authorized." : "OAuth2 failed."),
+          pushNotice({
+            tone: evt.data.ok ? "success" : "error",
+            title: evt.data.ok ? "MCP Service" : "MCP Service Notice",
+            message: evt.data.message || (evt.data.ok ? "OAuth2 authorized." : "OAuth2 failed."),
           });
           void loadMcpServers();
         }
@@ -850,22 +892,22 @@ export const AiApiHubView: React.FC = () => {
         window.removeEventListener("message", onMsg);
         window.location.href = res.authorize_url;
       } else {
-        setMcpNotice({ severity: "info", text: "Complete OAuth2 authorization in the popup window." });
+        pushNotice({ tone: "info", title: "MCP Service Notice", message: "Complete OAuth2 authorization in the popup window." });
       }
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: describeError(error) });
     } finally {
       setMcpLoading(false);
     }
   };
 
-  const handleCreateMcpServer = async (): Promise<void> => {
+  const handleCreateMcpServer = async (event?: React.FormEvent): Promise<void> => {
+    event?.preventDefault();
     if (!mcpName.trim() || !mcpUrl.trim()) {
-      setMcpNotice({ severity: "error", text: "MCP service name and URL are required." });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: "MCP service name and URL are required." });
       return;
     }
     setMcpLoading(true);
-    setMcpNotice(null);
     try {
       const res = await api.createMcpServer({
         name: mcpName.trim(),
@@ -881,7 +923,7 @@ export const AiApiHubView: React.FC = () => {
         enabled: true,
       });
       const createdId = res.server?.id;
-      setMcpNotice({ severity: "success", text: res.message || `Connected to ${mcpName}. Discovered ${res.tools_count} tools.` });
+      pushNotice({ tone: "success", title: res.message || `Connected to ${mcpName}. Discovered ${res.tools_count} tools.` });
       setMcpName("");
       setMcpUrl("");
       setMcpAuthType("bearer");
@@ -898,7 +940,8 @@ export const AiApiHubView: React.FC = () => {
         await handleStartMcpOAuth(createdId);
       }
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      const text = describeError(error);
+      pushNotice({ tone: "error", title: "Could not connect MCP service", message: text, actionLabel: "Check audit trail", actionHref: "#/audit-trail" });
     } finally {
       setMcpLoading(false);
     }
@@ -908,10 +951,10 @@ export const AiApiHubView: React.FC = () => {
     setMcpSyncing((prev) => ({ ...prev, [serverId]: true }));
     try {
       const res = await api.syncMcpServer(serverId);
-      setMcpNotice({ severity: res.ok ? "success" : "error", text: res.message || "MCP server synchronized." });
+      pushNotice({ tone: res.ok ? "success" : "error", title: res.ok ? "MCP Service" : "MCP Service Notice", message: res.message || "MCP server synchronized." });
       await loadMcpServers();
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: describeError(error) });
     } finally {
       setMcpSyncing((prev) => ({ ...prev, [serverId]: false }));
     }
@@ -921,10 +964,10 @@ export const AiApiHubView: React.FC = () => {
     setMcpLoading(true);
     try {
       await api.updateMcpServer(srv.id, { enabled: !srv.enabled });
-      setMcpNotice({ severity: "success", text: `MCP service "${srv.name}" ${srv.enabled ? "disabled" : "enabled"}.` });
+      pushNotice({ tone: "success", title: "MCP Service", message: `MCP service "${srv.name}" ${srv.enabled ? "disabled" : "enabled"}.` });
       await loadMcpServers();
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: describeError(error) });
     } finally {
       setMcpLoading(false);
     }
@@ -934,42 +977,42 @@ export const AiApiHubView: React.FC = () => {
     setMcpLoading(true);
     try {
       const res = await api.executeMcpTool(srvId, toolName, {});
-      setMcpNotice({
-        severity: "info",
-        text: `MCP tool ${toolName} returned: ${JSON.stringify(res?.result ?? res).slice(0, 180)}`,
+      pushNotice({
+        tone: "info",
+        title: "MCP Service Notice",
+        message: `MCP tool ${toolName} returned: ${JSON.stringify(res?.result ?? res).slice(0, 180)}`,
       });
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: describeError(error) });
     } finally {
       setMcpLoading(false);
     }
   };
 
   const handleDeleteMcpServer = async (server: McpServerItem): Promise<void> => {
-    if (!window.confirm(`Disconnect MCP service "${server.name}"? Agents using it will lose access to its tools.`)) return;
     setMcpLoading(true);
     try {
       await api.deleteMcpServer(server.id);
-      setMcpNotice({ severity: "success", text: `MCP service "${server.name}" removed.` });
+      pushNotice({ tone: "success", title: "MCP Service", message: `MCP service "${server.name}" removed.` });
       await loadMcpServers();
     } catch (error) {
-      setMcpNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "MCP Service Notice", message: describeError(error) });
     } finally {
       setMcpLoading(false);
     }
   };
 
-  const handleSaveAgent = async (): Promise<void> => {
+  const handleSaveAgent = async (event?: React.FormEvent): Promise<void> => {
+    event?.preventDefault();
     if (!agentName.trim() || !agentInstruction.trim() || agentDeviceIds.length === 0) {
-      setAgentNotice({ severity: "error", text: "Give the agent a name, an objective, and at least one device." });
+      pushNotice({ tone: "error", title: "Could not update agent", message: "Give the agent a name, an objective, and at least one device." });
       return;
     }
     if (agentProvider === "custom" && !agentBaseUrl.trim()) {
-      setAgentNotice({ severity: "error", text: "A base URL is required for the custom AI provider." });
+      pushNotice({ tone: "error", title: "Could not update agent", message: "A base URL is required for the custom AI provider." });
       return;
     }
     setAgentBusy(true);
-    setAgentNotice(null);
     try {
       if (editingAgentId) {
         await api.updateAgent(editingAgentId, {
@@ -984,7 +1027,7 @@ export const AiApiHubView: React.FC = () => {
           mcp_server_ids: agentMcpServerIds,
           memory: agentMemory,
         });
-        setAgentNotice({ severity: "success", text: `${agentName.trim()} updated successfully.` });
+        pushNotice({ tone: "success", title: `${agentName.trim()} updated successfully.` });
       } else {
         await api.createAgent({
           name: agentName.trim(),
@@ -998,12 +1041,13 @@ export const AiApiHubView: React.FC = () => {
           allowed_tools: agentAllowedTools.length > 0 ? agentAllowedTools : undefined,
           mcp_server_ids: agentMcpServerIds,
         });
-        setAgentNotice({ severity: "success", text: `${agentName.trim()} is live and will run on its interval.` });
+        pushNotice({ tone: "success", title: `${agentName.trim()} is live and will run on its interval.` });
       }
       handleCloseAgentForm();
       await loadAgents(true);
     } catch (error) {
-      setAgentNotice({ severity: "error", text: describeError(error) });
+      const text = describeError(error);
+      pushNotice({ tone: "error", title: "Could not save agent", message: text, actionLabel: "Check audit trail", actionHref: "#/audit-trail" });
     } finally {
       setAgentBusy(false);
     }
@@ -1013,10 +1057,10 @@ export const AiApiHubView: React.FC = () => {
     setAgentBusy(true);
     try {
       await api.updateAgent(agent.id, { enabled: !agent.enabled });
-      setAgentNotice({ severity: "success", text: agent.enabled ? `${agent.name} paused.` : `${agent.name} resumed.` });
+      pushNotice({ tone: "success", title: "Custom agents", message: agent.enabled ? `${agent.name} paused.` : `${agent.name} resumed.` });
       await loadAgents(true);
     } catch (error) {
-      setAgentNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
     } finally {
       setAgentBusy(false);
     }
@@ -1026,24 +1070,23 @@ export const AiApiHubView: React.FC = () => {
     setAgentBusy(true);
     try {
       await api.runAgentNow(agent.id);
-      setAgentNotice({ severity: "info", text: `Run queued for ${agent.name}. Results appear after the next cycle.` });
+      pushNotice({ tone: "info", title: "Agent run", message: `Run queued for ${agent.name}. Results appear after the next cycle.` });
       window.setTimeout(() => void loadAgents(true), 2500);
     } catch (error) {
-      setAgentNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
     } finally {
       setAgentBusy(false);
     }
   };
 
   const handleDeleteAgent = async (agent: CustomAgent): Promise<void> => {
-    if (!window.confirm(`Delete ${agent.name}? Its run history is removed too.`)) return;
     setAgentBusy(true);
     try {
       await api.deleteAgent(agent.id);
-      setAgentNotice({ severity: "success", text: `${agent.name} deleted.` });
+      pushNotice({ tone: "success", title: "Custom agents", message: `${agent.name} deleted.` });
       await loadAgents(true);
     } catch (error) {
-      setAgentNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
     } finally {
       setAgentBusy(false);
     }
@@ -1058,7 +1101,7 @@ export const AiApiHubView: React.FC = () => {
         const result = await api.agentRuns(agent.id);
         setAgentRuns((prev) => ({ ...prev, [agent.id]: result.runs || [] }));
       } catch (error) {
-        setAgentNotice({ severity: "error", text: describeError(error) });
+        pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
       } finally {
         setAgentRunsLoading((prev) => ({ ...prev, [agent.id]: false }));
       }
@@ -1092,31 +1135,33 @@ export const AiApiHubView: React.FC = () => {
     try {
       await api.clearAgentMemoryChunks(agent.id).catch(() => null);
       await api.updateAgent(agent.id, { memory: "" });
-      setAgentNotice({ severity: "success", text: `Memory cleared for ${agent.name}.` });
+      pushNotice({ tone: "success", title: "Custom agents", message: `Memory cleared for ${agent.name}.` });
       await loadAgents(true);
     } catch (error) {
-      setAgentNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
     } finally {
       setAgentBusy(false);
     }
   };
 
-  const handleSaveAgentMemory = async (): Promise<void> => {
+  const handleSaveAgentMemory = async (event?: React.FormEvent): Promise<void> => {
+    event?.preventDefault();
     if (!memoryTargetAgent) return;
     setAgentBusy(true);
     try {
       await api.updateAgent(memoryTargetAgent.id, { memory: memoryDraft });
-      setAgentNotice({ severity: "success", text: `Updated memory for ${memoryTargetAgent.name}.` });
+      pushNotice({ tone: "success", title: "Custom agents", message: `Updated memory for ${memoryTargetAgent.name}.` });
       setMemoryTargetAgent(null);
       await loadAgents(true);
     } catch (error) {
-      setAgentNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
     } finally {
       setAgentBusy(false);
     }
   };
 
-  const handleAskAgentSubmit = async (): Promise<void> => {
+  const handleAskAgentSubmit = async (event?: React.FormEvent): Promise<void> => {
+    event?.preventDefault();
     if (!askTargetAgent || !askPrompt.trim()) return;
     setAskBusy(true);
     setAskResult(null);
@@ -1125,7 +1170,7 @@ export const AiApiHubView: React.FC = () => {
       setAskResult({ response: res?.response || "", steps: Array.isArray(res?.steps) ? res.steps : [] });
       await loadAgents(true);
     } catch (error) {
-      setAgentNotice({ severity: "error", text: describeError(error) });
+      pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
     } finally {
       setAskBusy(false);
     }
@@ -1164,7 +1209,8 @@ export const AiApiHubView: React.FC = () => {
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
-  const handleExecuteTool = async () => {
+  const handleExecuteTool = async (event?: React.FormEvent) => {
+    event?.preventDefault();
     setIsExecuting(true);
     let parsedArgs: Record<string, unknown> = {};
     try {
@@ -1242,8 +1288,26 @@ export const AiApiHubView: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      {/* SECTION 1: Provider Connector Cards */}
-      <div className="space-y-4">
+      {/* UX-36: explicit top-level heading (this view previously had none). */}
+      {/* UX-39: sub-tabs (Providers / Agents / MCP / Chat) + in-page section nav. */}
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h1 className="text-xl font-semibold text-[var(--product-text)]">AI providers &amp; agents</h1>
+          <p className="text-xs text-[var(--product-text-tertiary)]">Connect an AI provider, wire up MCP services, run 24/7 agents, and chat with the Copilot — each area is a tab below.</p>
+        </div>
+        {isLive && <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} label="Updated" /> }
+      </header>
+      <JXTabs
+        value={activeTab}
+        onChange={(value) => setActiveTab(value as "providers" | "agents" | "mcp" | "chat")}
+        tabs={[
+          { id: "providers", label: "Providers", icon: <KeyRound className="w-3.5 h-3.5" /> },
+          { id: "agents", label: "Agents", icon: <Bot className="w-3.5 h-3.5" /> },
+          { id: "mcp", label: "MCP", icon: <Network className="w-3.5 h-3.5" /> },
+          { id: "chat", label: "Chat", icon: <MessageSquare className="w-3.5 h-3.5" /> },
+        ]}
+      />
+      {activeTab === "providers" && (<div className="space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Bot className="w-5 h-5 text-indigo-400" />
@@ -1258,6 +1322,7 @@ export const AiApiHubView: React.FC = () => {
             icon={<KeyRound className="w-4 h-4" />}
           />
           <JXCardContent>
+            <form onSubmit={(event) => void handleSaveAi(event)}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <JXSelect
                 label="Provider"
@@ -1283,22 +1348,41 @@ export const AiApiHubView: React.FC = () => {
                     label="Base URL"
                     value={aiBaseUrl}
                     onChange={setAiBaseUrl}
+                    onBlur={() => setAiBaseUrlTouched(true)}
+                    aria-invalid={aiBaseUrlTouched && !aiBaseUrl.trim()}
+                    aria-describedby={aiBaseUrlTouched && !aiBaseUrl.trim() ? "ai-base-url-error" : undefined}
+                    autoComplete="url"
                     placeholder="https://openrouter.ai/api/v1"
                   />
+                  {aiBaseUrlTouched && !aiBaseUrl.trim() && (
+                    <p id="ai-base-url-error" role="alert" className="mt-1 text-[11px] text-amber-300">A base URL is required for a custom AI provider.</p>
+                  )}
                 </div>
               )}
               <div className="md:col-span-2">
-                <JXTextField
-                  label="API key"
-                  type="password"
-                  value={aiApiKey}
-                  onChange={setAiApiKey}
-                  clearable={false}
-                  placeholder={
-                    aiSettings?.masked_keys?.[aiProvider]
-                    || (aiProvider === "ollama" ? "Not required for local Ollama" : "Paste the provider API key")
-                  }
-                />
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <JXTextField
+                      label="API key"
+                      type={showAiKey ? "text" : "password"}
+                      value={aiApiKey}
+                      onChange={setAiApiKey}
+                      clearable={false}
+                      autoComplete="off"
+                      placeholder={
+                        aiSettings?.masked_keys?.[aiProvider]
+                        || (aiProvider === "ollama" ? "Not required for local Ollama" : "Paste the provider API key")
+                      }
+                    />
+                  </div>
+                  <JXButton type="button" variant="outlined" color="neutral" size="sm" className="mt-6 min-h-11 shrink-0"
+                    aria-pressed={showAiKey} aria-label={showAiKey ? "Hide API key" : "Show API key"}
+                    title={showAiKey ? "Hide API key" : "Show API key"}
+                    onClick={() => setShowAiKey((prev) => !prev)}>
+                    {showAiKey ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                  </JXButton>
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-[var(--product-text-tertiary)]">The key is stored on the control plane and used to call this provider for the Copilot and your agents. It is never shown in full here — only the masked form the server reports.</p>
               </div>
             </div>
 
@@ -1319,17 +1403,18 @@ export const AiApiHubView: React.FC = () => {
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <JXButton
+                type="submit"
                 variant="contained"
                 color="primary"
                 size="md"
                 loading={aiSaving}
                 disabled={!isLive || aiSaving}
-                onClick={handleSaveAi}
                 startIcon={<CheckCircle2 className="w-4 h-4" />}
               >
                 Save &amp; test
               </JXButton>
               <JXButton
+                type="button"
                 variant="outlined"
                 color="neutral"
                 size="sm"
@@ -1340,6 +1425,7 @@ export const AiApiHubView: React.FC = () => {
                 Clear
               </JXButton>
               <JXButton
+                type="button"
                 variant="soft"
                 color="neutral"
                 size="sm"
@@ -1350,6 +1436,7 @@ export const AiApiHubView: React.FC = () => {
                 Reload
               </JXButton>
             </div>
+            </form>
 
             {!isLive && (
               <p className="mt-3 text-xs text-[var(--product-text-tertiary)]">
@@ -1358,38 +1445,23 @@ export const AiApiHubView: React.FC = () => {
               </p>
             )}
 
-            {aiNotice && (
-              <div className="mt-3">
-                <JXAlert
-                  severity={aiNotice.severity}
-                  title={aiNotice.severity === "success" ? "Provider saved" : aiNotice.severity === "error" ? "Could not save provider" : "Provider settings"}
-                  description={aiNotice.text}
-                />
-              </div>
-            )}
           </JXCardContent>
         </JXCard>
 
         <JXCard>
           <JXCardContent>
-            <ul className="divide-y divide-slate-800">
+            <ul className="divide-y divide-[var(--product-line)]">
               {providers.map((provider) => <li key={provider.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
                 <div className="min-w-0">
                   <h3 className="text-sm font-medium text-[var(--product-text-secondary)]">{provider.name}</h3>
                   <p className="mt-1 break-all text-xs text-[var(--product-text-tertiary)]">{provider.defaultModel}</p>
-                  <p className="mt-1 text-xs text-[var(--product-text-tertiary)]">
-                    {provider.status === "configured"
-                      ? "Configured"
-                      : provider.status === "healthy"
-                        ? "Reachable"
-                        : provider.status === "degraded"
-                          ? "Unreachable"
-                          : provider.status === "offline"
-                            ? "Offline"
-                            : "Not configured"}
-                    {" · "}
-                    {provider.latencyMs != null ? `${provider.latencyMs}ms` : "Not measured"}
-                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--product-text-tertiary)]">
+                    <StatusBadge
+                      status={provider.status === "configured" ? "success" : provider.status === "healthy" ? "online" : provider.status === "degraded" ? "warning" : provider.status === "offline" ? "offline" : "neutral"}
+                      label={provider.status === "configured" ? "Configured" : provider.status === "healthy" ? "Reachable" : provider.status === "degraded" ? "Unreachable" : provider.status === "offline" ? "Offline" : "Not configured"}
+                    />
+                    <span>{provider.latencyMs != null ? `${number(provider.latencyMs)}ms` : "Not measured"}</span>
+                  </div>
                   <p className="mt-1 break-all font-mono text-xs text-[var(--product-text-tertiary)]">
                     {provider.keyMasked ?? "No key configured"}
                   </p>
@@ -1406,6 +1478,87 @@ export const AiApiHubView: React.FC = () => {
           </JXCardContent>
         </JXCard>
 
+          <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)]">
+            <details>
+              <summary className="text-sm font-semibold text-[var(--product-text-secondary)]">Code examples</summary>
+              <JXCardContent>
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)]">
+                      <button
+                        type="button"
+                        aria-pressed={sdkLang === "python"}
+                        onClick={() => setSdkLang("python")}
+                        className={`px-3 py-1 rounded text-xs font-mono transition-colors ${sdkLang === "python"
+                          ? "bg-indigo-600 text-white font-semibold"
+                          : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
+                          }`}
+                      >
+                        Python
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={sdkLang === "typescript"}
+                        onClick={() => setSdkLang("typescript")}
+                        className={`px-3 py-1 rounded text-xs font-mono transition-colors ${sdkLang === "typescript"
+                          ? "bg-indigo-600 text-white font-semibold"
+                          : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
+                          }`}
+                      >
+                        TypeScript
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={sdkLang === "curl"}
+                        onClick={() => setSdkLang("curl")}
+                        className={`px-3 py-1 rounded text-xs font-mono transition-colors ${sdkLang === "curl"
+                          ? "bg-indigo-600 text-white font-semibold"
+                          : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
+                          }`}
+                      >
+                        cURL
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={sdkLang === "mcp"}
+                        onClick={() => setSdkLang("mcp")}
+                        className={`px-3 py-1 rounded text-xs font-mono transition-colors ${sdkLang === "mcp"
+                          ? "bg-indigo-600 text-white font-semibold"
+                          : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
+                          }`}
+                      >
+                        MCP JSON-RPC
+                      </button>
+                    </div>
+
+                    <JXButton
+                      variant="soft"
+                      color="primary"
+                      size="sm"
+                      onClick={handleCopyCode}
+                      startIcon={
+                        copiedCode ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )
+                      }
+                    >
+                      {copiedCode ? "Copied" : "Copy Snippet"}
+                    </JXButton>
+                  </div>
+
+                  <div tabIndex={0} role="region" aria-label="SDK code example" className="rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] p-4 font-mono text-xs overflow-x-auto text-[var(--product-text-secondary)] leading-relaxed max-h-[380px] overflow-y-auto">
+                    <pre>
+                      <code>{SDK_SNIPPETS[sdkLang]}</code>
+                    </pre>
+                  </div>
+                </div>
+              </JXCardContent>
+            </details>
+          </JXCard>
+      </div>)}
+      {activeTab === "mcp" && (<div className="space-y-4">
         {/* SECTION: Connected MCP Services & Tools */}
         <JXCard>
           <JXCardHeader
@@ -1417,7 +1570,7 @@ export const AiApiHubView: React.FC = () => {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs text-[var(--product-text-tertiary)]">
                 {isLive
-                  ? `${mcpServers.length} MCP service${mcpServers.length === 1 ? "" : "s"} connected (${mcpServers.reduce((sum, s) => sum + (s.tools_count || 0), 0)} tools discovered)`
+                  ? `${number(mcpServers.length)} MCP service${mcpServers.length === 1 ? "" : "s"} connected (${number(mcpServers.reduce((sum, s) => sum + (s.tools_count || 0), 0))} tools discovered)`
                   : "Sign in with an admin token to manage MCP services."}
               </p>
               <div className="flex flex-wrap items-center gap-2">
@@ -1428,7 +1581,6 @@ export const AiApiHubView: React.FC = () => {
                   disabled={!isLive || mcpLoading}
                   onClick={() => {
                     setMcpFormOpen((prev) => !prev);
-                    setMcpNotice(null);
                   }}
                   startIcon={<Plus className="w-4 h-4" />}
                 >
@@ -1448,16 +1600,18 @@ export const AiApiHubView: React.FC = () => {
             </div>
 
             {mcpFormOpen && (
-              <div className="mt-4 space-y-3 rounded-lg border border-[var(--product-line)] bg-[var(--product-canvas)] p-4">
+              <form onSubmit={(event) => void handleCreateMcpServer(event)} className="mt-4 space-y-3 rounded-lg border border-[var(--product-line)] bg-[var(--product-canvas)] p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-xs font-semibold text-[var(--product-text-secondary)]">Add MCP Connector</h3>
                   {mcpTemplates.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
                       <span className="text-[var(--product-text-tertiary)]">Presets:</span>
                       {mcpTemplates.filter((tpl) => tpl.id !== "custom-mcp").map((tpl) => (
-                        <button
+                        <JXButton
                           key={tpl.id}
-                          type="button"
+                          variant="soft"
+                          color="neutral"
+                          size="sm"
                           onClick={() => {
                             setMcpName(tpl.name);
                             setMcpUrl(tpl.url);
@@ -1471,10 +1625,9 @@ export const AiApiHubView: React.FC = () => {
                             if (tpl.oauth_scopes) setMcpOAuthScopes(tpl.oauth_scopes);
                             if (!tpl.requires_auth) setMcpAuthToken("");
                           }}
-                          className="rounded px-2 py-0.5 text-[11px] bg-[var(--product-surface)] border border-[var(--product-line)] text-[var(--product-text-secondary)] hover:text-indigo-400"
                         >
                           {tpl.name}
-                        </button>
+                        </JXButton>
                       ))}
                     </div>
                   )}
@@ -1485,12 +1638,20 @@ export const AiApiHubView: React.FC = () => {
                     label="Service Name"
                     value={mcpName}
                     onChange={setMcpName}
+                    onBlur={() => setMcpNameTouched(true)}
+                    aria-invalid={mcpNameTouched && !mcpName.trim()}
+                    aria-describedby={mcpNameTouched && !mcpName.trim() ? "mcp-name-error" : undefined}
+                    autoComplete="off"
                     placeholder="GitHub MCP, Slack MCP, Database MCP"
                   />
                   <JXTextField
                     label="MCP Endpoint URL (HTTP or SSE)"
                     value={mcpUrl}
                     onChange={setMcpUrl}
+                    onBlur={() => setMcpUrlTouched(true)}
+                    aria-invalid={mcpUrlTouched && !mcpUrl.trim()}
+                    aria-describedby={mcpUrlTouched && !mcpUrl.trim() ? "mcp-url-error" : undefined}
+                    autoComplete="url"
                     placeholder="http://mcp-http:8001 or https://api.service.com/mcp"
                   />
                   <JXSelect
@@ -1506,19 +1667,34 @@ export const AiApiHubView: React.FC = () => {
                   />
 
                   {mcpAuthType === "bearer" && (
-                    <JXTextField
-                      label="Authentication Token (Optional)"
-                      type="password"
-                      value={mcpAuthToken}
-                      onChange={setMcpAuthToken}
-                      clearable={false}
-                      placeholder="Bearer token or API key if required"
-                    />
+                    <div>
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <JXTextField
+                            label="Authentication Token (Optional)"
+                            type={showMcpToken ? "text" : "password"}
+                            value={mcpAuthToken}
+                            onChange={setMcpAuthToken}
+                            clearable={false}
+                            autoComplete="off"
+                            placeholder="Bearer token or API key if required"
+                          />
+                        </div>
+                        <JXButton type="button" variant="outlined" color="neutral" size="sm" className="mt-6 min-h-11 shrink-0"
+                          aria-pressed={showMcpToken} aria-label={showMcpToken ? "Hide bearer token" : "Show bearer token"}
+                          title={showMcpToken ? "Hide bearer token" : "Show bearer token"}
+                          onClick={() => setShowMcpToken((prev) => !prev)}>
+                          {showMcpToken ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                        </JXButton>
+                      </div>
+                      <p className="mt-1 text-[11px] leading-relaxed text-[var(--product-text-tertiary)]">Sent only to the MCP endpoint above, as a bearer token. It is stored on the control plane, never shown in full here.</p>
+                    </div>
                   )}
 
                   {mcpAuthType === "oauth2_pkce" && (
                     <div className="flex items-end">
                       <JXButton
+                        type="button"
                         variant="outlined"
                         color="neutral"
                         size="sm"
@@ -1537,6 +1713,7 @@ export const AiApiHubView: React.FC = () => {
                       {mcpAuthType === "oauth2_pkce" && (
                         <JXTextField
                           label="Authorization URL (optional if auto-discovered)"
+                          autoComplete="url"
                           value={mcpOAuthAuthUrl}
                           onChange={setMcpOAuthAuthUrl}
                           placeholder="https://provider.com/oauth/authorize"
@@ -1544,27 +1721,44 @@ export const AiApiHubView: React.FC = () => {
                       )}
                       <JXTextField
                         label="Token URL (optional if auto-discovered)"
+                        autoComplete="url"
                         value={mcpOAuthTokenUrl}
                         onChange={setMcpOAuthTokenUrl}
                         placeholder="https://provider.com/oauth/token"
                       />
                       <JXTextField
                         label={mcpAuthType === "oauth2_pkce" ? "Client ID (optional with Dynamic Registration)" : "Client ID"}
+                        autoComplete="off"
                         value={mcpOAuthClientId}
                         onChange={setMcpOAuthClientId}
                         placeholder="client_id"
                       />
-                      <JXTextField
-                        label={mcpAuthType === "oauth2_pkce" ? "Client Secret (optional for public PKCE)" : "Client Secret"}
-                        type="password"
-                        value={mcpOAuthClientSecret}
-                        onChange={setMcpOAuthClientSecret}
-                        clearable={false}
-                        placeholder="client_secret"
-                      />
+                      <div>
+                        <div className="flex items-start gap-2">
+                          <div className="min-w-0 flex-1">
+                            <JXTextField
+                              label={mcpAuthType === "oauth2_pkce" ? "Client Secret (optional for public PKCE)" : "Client Secret"}
+                              type={showMcpSecret ? "text" : "password"}
+                              value={mcpOAuthClientSecret}
+                              onChange={setMcpOAuthClientSecret}
+                              clearable={false}
+                              autoComplete="new-password"
+                              placeholder="client_secret"
+                            />
+                          </div>
+                          <JXButton type="button" variant="outlined" color="neutral" size="sm" className="mt-6 min-h-11 shrink-0"
+                            aria-pressed={showMcpSecret} aria-label={showMcpSecret ? "Hide client secret" : "Show client secret"}
+                            title={showMcpSecret ? "Hide client secret" : "Show client secret"}
+                            onClick={() => setShowMcpSecret((prev) => !prev)}>
+                            {showMcpSecret ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                          </JXButton>
+                        </div>
+                        <p className="mt-1 text-[11px] leading-relaxed text-[var(--product-text-tertiary)]">The OAuth client secret for this MCP service. It is exchanged only with the token URL above and stored on the control plane.</p>
+                      </div>
                       <div className="md:col-span-2">
                         <JXTextField
                           label="Scopes (optional, space-separated)"
+                          autoComplete="off"
                           value={mcpOAuthScopes}
                           onChange={setMcpOAuthScopes}
                           placeholder="read write mcp:tools"
@@ -1574,72 +1768,59 @@ export const AiApiHubView: React.FC = () => {
                   )}
                 </div>
 
+                {(mcpNameTouched && !mcpName.trim()) && (
+                  <p id="mcp-name-error" role="alert" className="text-[11px] text-amber-300">A service name is required.</p>
+                )}
+                {(mcpUrlTouched && !mcpUrl.trim()) && (
+                  <p id="mcp-url-error" role="alert" className="text-[11px] text-amber-300">An MCP endpoint URL is required.</p>
+                )}
                 <div className="flex flex-wrap items-center gap-2">
                   <JXButton
+                    type="submit"
                     variant="contained"
                     color="primary"
                     size="sm"
                     loading={mcpLoading}
                     disabled={!isLive || mcpLoading || !mcpName.trim() || !mcpUrl.trim()}
-                    onClick={() => void handleCreateMcpServer()}
                     startIcon={mcpAuthType === "oauth2_pkce" ? <KeyRound className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
                   >
                     {mcpAuthType === "oauth2_pkce" ? "Save & Authorize with OAuth2" : "Connect & probe tools"}
                   </JXButton>
-                  <JXButton variant="text" color="neutral" size="sm" onClick={() => setMcpFormOpen(false)}>
+                  <JXButton type="button" variant="text" color="neutral" size="sm" onClick={() => setMcpFormOpen(false)}>
                     Cancel
                   </JXButton>
                 </div>
-              </div>
+              </form>
             )}
 
-            {mcpNotice && (
-              <div className="mt-3">
-                <JXAlert
-                  severity={mcpNotice.severity}
-                  title={mcpNotice.severity === "success" ? "MCP Service" : "MCP Service Notice"}
-                  description={mcpNotice.text}
-                />
-              </div>
-            )}
 
             {mcpServers.length === 0 ? (
-              <div className="mt-4 rounded-lg border border-dashed border-[var(--product-line)] p-4 text-center">
-                <p className="text-xs text-[var(--product-text-tertiary)]">
-                  No external MCP services connected. Click <strong>Connect MCP service</strong> to add GitHub, Slack, local AI Bridge Fleet, or custom tool endpoints.
-                </p>
-                <div className="mt-2 flex flex-wrap justify-center gap-2">
-                  <JXButton
-                    variant="soft"
-                    color="primary"
-                    size="sm"
-                    disabled={!isLive}
-                    onClick={() => {
-                      setMcpName("Local AI Bridge Fleet MCP");
-                      setMcpUrl("http://mcp-http:8001");
-                      setMcpFormOpen(true);
-                    }}
-                    startIcon={<Plus className="w-3.5 h-3.5" />}
-                  >
-                    Add Built-in Fleet MCP
-                  </JXButton>
-                </div>
-              </div>
+              <EmptyState
+                variant="card"
+                title="No external MCP services connected"
+                description="Click Connect MCP service to add GitHub, Slack, local AI Bridge Fleet, or custom tool endpoints."
+                actionLabel="Add Built-in Fleet MCP"
+                onAction={() => {
+                  setMcpName("Local AI Bridge Fleet MCP");
+                  setMcpUrl("http://mcp-http:8001");
+                  setMcpFormOpen(true);
+                }}
+              />
             ) : (
-              <ul className="mt-4 divide-y divide-slate-800">
+              <ul className="mt-4 divide-y divide-[var(--product-line)]">
                 {mcpServers.map((srv) => (
                   <li key={srv.id} className="py-3 space-y-2">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex min-w-0 flex-wrap items-center gap-2">
                         <h3 className="text-sm font-medium text-[var(--product-text-secondary)]">{srv.name}</h3>
-                        <JXBadge
-                          color={srv.status === "healthy" ? "success" : srv.status === "pending_auth" ? "warning" : srv.status === "offline" ? "error" : "neutral"}
-                          statusText={srv.status === "healthy" ? "Connected" : srv.status === "pending_auth" ? "Auth Required" : srv.status === "offline" ? "Offline" : "Unknown"}
+                        <StatusBadge
+                          status={srv.status === "healthy" ? "online" : srv.status === "pending_auth" ? "warning" : srv.status === "offline" ? "offline" : "unknown"}
+                          label={srv.status === "healthy" ? "Connected" : srv.status === "pending_auth" ? "Auth Required" : srv.status === "offline" ? "Offline" : "Unknown"}
                         />
                         {srv.auth_type && srv.auth_type.startsWith("oauth2") && (
-                          <JXBadge
-                            color={srv.oauth_connected ? "success" : "warning"}
-                            statusText={srv.auth_type === "oauth2_client_credentials" ? "OAuth2 M2M" : srv.oauth_connected ? "OAuth2 Authorized" : "OAuth2 Pending"}
+                          <StatusBadge
+                            status={srv.oauth_connected ? "success" : "warning"}
+                            label={srv.auth_type === "oauth2_client_credentials" ? "OAuth2 M2M" : srv.oauth_connected ? "OAuth2 Authorized" : "OAuth2 Pending"}
                           />
                         )}
                         <JXBadge
@@ -1703,7 +1884,7 @@ export const AiApiHubView: React.FC = () => {
                           color="error"
                           size="sm"
                           disabled={mcpLoading}
-                          onClick={() => void handleDeleteMcpServer(srv)}
+                          onClick={() => setDeleteMcpConfirm(srv)}
                           startIcon={<Trash2 className="w-3.5 h-3.5" />}
                         >
                           Remove
@@ -1711,7 +1892,7 @@ export const AiApiHubView: React.FC = () => {
                       </div>
                     </div>
 
-                    {srv.last_error && <p className="text-xs text-red-400">{srv.last_error}</p>}
+                    {srv.last_error && <p className="text-xs text-[var(--product-danger)]">{srv.last_error}</p>}
 
                     {mcpToolsExpanded[srv.id] && (
                       <div className="mt-2 rounded-lg border border-[var(--product-line)] bg-[var(--product-canvas)] p-3 space-y-2">
@@ -1719,7 +1900,8 @@ export const AiApiHubView: React.FC = () => {
                           Discovered Tools ({srv.tools?.length || 0})
                         </h4>
                         {(!srv.tools || srv.tools.length === 0) ? (
-                          <p className="text-xs text-[var(--product-text-tertiary)]">No tools discovered yet. Click Sync tools to probe.</p>
+                          <EmptyState variant="bare" title="No tools discovered yet"
+                            description="Click Sync tools to probe this MCP service." />
                         ) : (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-56 overflow-y-auto">
                             {srv.tools.map((t) => {
@@ -1732,19 +1914,20 @@ export const AiApiHubView: React.FC = () => {
                                       mcp__{srv.name.toLowerCase().replace(/[^a-z0-9]/g, "_")}__{t.name}
                                     </p>
                                     <div className="flex items-center gap-1.5">
-                                      <button
-                                        type="button"
+                                      <JXButton
+                                        variant="outlined"
+                                        color="primary"
+                                        size="sm"
                                         disabled={mcpLoading}
                                         onClick={() => void handleTestMcpTool(srv.id, t.name)}
-                                        className="rounded border border-[var(--product-line)] px-1.5 py-0.5 text-[10px] font-mono text-indigo-300 hover:bg-indigo-500/10"
                                       >
                                         Run
-                                      </button>
+                                      </JXButton>
                                       <select
                                         aria-label={`Policy for ${t.name}`}
                                         value={curPolicy}
                                         onChange={(e) => void handleMcpPolicyChange(srv.id, t.name, e.target.value)}
-                                        className="rounded bg-black/50 border border-[var(--product-line)] px-1.5 py-0.5 text-[10px] font-mono text-neutral-200"
+                                        className="rounded bg-[var(--product-canvas)] border border-[var(--product-line)] px-1.5 py-0.5 text-[11px] font-mono text-[var(--product-text-secondary)]"
                                       >
                                         <option value="allow">Allow</option>
                                         <option value="require_approval">Require approval</option>
@@ -1766,7 +1949,8 @@ export const AiApiHubView: React.FC = () => {
             )}
           </JXCardContent>
         </JXCard>
-
+      </div>)}
+      {activeTab === "agents" && (<div className="space-y-4">
         <JXCard>
           <JXCardHeader
             title="Custom 24/7 agents"
@@ -1777,7 +1961,7 @@ export const AiApiHubView: React.FC = () => {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs text-[var(--product-text-tertiary)]">
                 {isLive
-                  ? `${agents.length} agent${agents.length === 1 ? "" : "s"} configured`
+                  ? `${number(agents.length)} agent${agents.length === 1 ? "" : "s"} configured`
                   : "Sign in with an admin token to create and run agents."}
               </p>
               <JXButton
@@ -1793,19 +1977,18 @@ export const AiApiHubView: React.FC = () => {
             </div>
 
             {agents.length === 0 ? (
-              <p className="mt-3 text-xs text-[var(--product-text-tertiary)]">
-                No custom agents yet. Create one and it will start working through its objective on your devices.
-              </p>
+              <EmptyState variant="bare" title="No custom agents yet"
+                description="Create one and it will start working through its objective on your devices." />
             ) : (
-              <ul className="mt-3 divide-y divide-slate-800">
+              <ul className="mt-3 divide-y divide-[var(--product-line)]">
                 {agents.map((agent) => (
                   <li key={agent.id} className="space-y-2 py-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex min-w-0 flex-wrap items-center gap-2">
                         <h3 className="truncate text-sm font-medium text-[var(--product-text-secondary)]">{agent.name}</h3>
-                        <JXBadge
-                          color={agent.status === "error" ? "warning" : agent.enabled ? "success" : "neutral"}
-                          statusText={agent.status === "running" ? "Running" : agent.status === "error" ? "Error" : agent.enabled ? "Active" : "Paused"}
+                        <StatusBadge
+                          status={agent.status === "running" ? "running" : agent.status === "error" ? "error" : agent.enabled ? "active" : "paused"}
+                          label={agent.status === "running" ? "Running" : agent.status === "error" ? "Error" : agent.enabled ? "Active" : "Paused"}
                         />
                         <span className="text-xs text-[var(--product-text-tertiary)]">
                           {agent.provider}{agent.model ? ` \u00b7 ${agent.model}` : ""}
@@ -1857,7 +2040,7 @@ export const AiApiHubView: React.FC = () => {
                           color="error"
                           size="sm"
                           disabled={agentBusy}
-                          onClick={() => void handleDeleteAgent(agent)}
+                          onClick={() => setDeleteAgentConfirm(agent)}
                           startIcon={<Trash2 className="w-3.5 h-3.5" />}
                         >
                           Delete
@@ -1867,8 +2050,8 @@ export const AiApiHubView: React.FC = () => {
                     <p className="text-xs text-[var(--product-text-tertiary)]">
                       {agent.devices.map((device) => device.name || device.hostname || device.id).join(", ")}
                       {" \u00b7 "}{formatInterval(agent.interval_seconds)}
-                      {" \u00b7 "}{agent.run_count} run{agent.run_count === 1 ? "" : "s"}
-                      {" \u00b7 "}last {relativeTime(agent.last_run_at)}
+                      {" \u00b7 "}{number(agent.run_count)} run{agent.run_count === 1 ? "" : "s"}
+                      {" \u00b7 "}last {relativeTime(agent.last_run_at, locale)}
                     </p>
                     {agent.mcp_servers && agent.mcp_servers.length > 0 && (
                       <div className="flex flex-wrap items-center gap-1.5 pt-1">
@@ -1885,7 +2068,7 @@ export const AiApiHubView: React.FC = () => {
                       </div>
                     )}
                     {agent.last_error ? (
-                      <p className="text-xs text-red-400">Last error: {agent.last_error}</p>
+                      <p className="text-xs text-[var(--product-danger)]">Last error: {agent.last_error}</p>
                     ) : agent.last_result ? (
                       <p className="line-clamp-2 text-xs text-[var(--product-text-tertiary)]">{agent.last_result}</p>
                     ) : null}
@@ -1946,25 +2129,23 @@ export const AiApiHubView: React.FC = () => {
                           {agentRunsLoading[agent.id] ? (
                             <p className="text-xs text-[var(--product-text-tertiary)]">Loading runs…</p>
                           ) : (agentRuns[agent.id] || []).length === 0 ? (
-                            <p className="text-xs text-[var(--product-text-tertiary)]">No runs yet.</p>
+                            <EmptyState variant="bare" title="No runs yet."
+                              description="Runs appear here after the agent's next cycle, or use Run now." />
                           ) : (
                             <ul className="space-y-2">
                               {(agentRuns[agent.id] || []).slice(0, 10).map((run: any) => (
                                 <li key={run.id} className="rounded border border-[var(--product-line)] p-2 text-xs">
                                   <div className="flex flex-wrap items-center gap-2">
-                                    <JXBadge
-                                      color={run.status === "completed" ? "success" : run.status === "failed" ? "warning" : "neutral"}
-                                      statusText={run.status}
-                                    />
+                                    <StatusBadge status={run.status} />
                                     <span className="text-[var(--product-text-tertiary)]">
-                                      {run.started_at ? new Date(run.started_at * 1000).toLocaleString() : ""}
+                                      {run.started_at ? date(new Date(run.started_at * 1000), { dateStyle: "medium", timeStyle: "short" }) : ""}
                                     </span>
                                     {run.duration_ms != null && (
-                                      <span className="text-[var(--product-text-tertiary)]">{run.duration_ms} ms</span>
+                                      <span className="text-[var(--product-text-tertiary)]">{number(run.duration_ms)} ms</span>
                                     )}
                                   </div>
                                   {run.error ? (
-                                    <p className="mt-1 text-red-400">{run.error}</p>
+                                    <p className="mt-1 text-[var(--product-danger)]">{run.error}</p>
                                   ) : run.response ? (
                                     <p className="mt-1 line-clamp-3 text-[var(--product-text-tertiary)]">{run.response}</p>
                                   ) : null}
@@ -1985,23 +2166,23 @@ export const AiApiHubView: React.FC = () => {
                                                 <span className="flex items-center gap-1.5">
                                                   <span>{idx + 1}. {st.tool}</span>
                                                   {st.tool === "agent_delegate" && st.result?.agent_name && (
-                                                    <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 text-[10px]">
+                                                    <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 text-[11px]">
                                                       Delegated → {st.result.agent_name}
                                                     </span>
                                                   )}
                                                   {st.tool === "agent_run_workflow" && st.result?.workflow_id && (
-                                                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10px]">
+                                                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[11px]">
                                                       Workflow {st.result.workflow_id} ({st.result.status || "ran"})
                                                     </span>
                                                   )}
                                                 </span>
-                                                <span className="text-[10px] text-[var(--product-text-dim)]">{st.device || "local"}</span>
+                                                <span className="text-[11px] text-[var(--product-text-dim)]">{st.device || "local"}</span>
                                               </div>
                                               {st.args && Object.keys(st.args).length > 0 && (
-                                                <pre className="mt-0.5 text-[10px] text-[var(--product-text-tertiary)] overflow-x-auto">{JSON.stringify(st.args)}</pre>
+                                                <pre className="mt-0.5 text-[11px] text-[var(--product-text-tertiary)] overflow-x-auto">{JSON.stringify(st.args)}</pre>
                                               )}
                                               {st.result !== undefined && (
-                                                <pre className="mt-0.5 text-[10px] text-emerald-300/90 overflow-x-auto max-h-24">{typeof st.result === "string" ? st.result : JSON.stringify(st.result)}</pre>
+                                                <pre className="mt-0.5 text-[11px] text-emerald-300/90 overflow-x-auto max-h-24">{typeof st.result === "string" ? st.result : JSON.stringify(st.result)}</pre>
                                               )}
                                             </div>
                                           ))}
@@ -2022,7 +2203,7 @@ export const AiApiHubView: React.FC = () => {
             )}
 
             {agentFormOpen && (
-              <div className="mt-4 space-y-3 rounded-lg border border-[var(--product-line)] bg-[var(--product-canvas)] p-4">
+              <form onSubmit={(event) => void handleSaveAgent(event)} className="mt-4 space-y-3 rounded-lg border border-[var(--product-line)] bg-[var(--product-canvas)] p-4">
                 <div className="flex items-center justify-between border-b border-[var(--product-line)] pb-2.5">
                   <div className="flex items-center gap-2">
                     {editingAgentId ? <Pencil className="w-4 h-4 text-primary-400" /> : <Bot className="w-4 h-4 text-primary-400" />}
@@ -2037,6 +2218,7 @@ export const AiApiHubView: React.FC = () => {
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <JXTextField
                     label="Agent name"
+                    autoComplete="off"
                     value={agentName}
                     onChange={setAgentName}
                     placeholder="Nightly fleet health check"
@@ -2057,6 +2239,7 @@ export const AiApiHubView: React.FC = () => {
                   />
                   <JXTextField
                     label="Model (optional)"
+                    autoComplete="off"
                     value={agentModel}
                     onChange={setAgentModel}
                     placeholder={agentProvider === "custom" ? "Provider default" : "gpt-4o"}
@@ -2072,6 +2255,7 @@ export const AiApiHubView: React.FC = () => {
                 {agentProvider === "custom" && (
                   <JXTextField
                     label="Custom AI base URL"
+                    autoComplete="url"
                     value={agentBaseUrl}
                     onChange={setAgentBaseUrl}
                     placeholder="https://openrouter.ai/api/v1"
@@ -2079,11 +2263,13 @@ export const AiApiHubView: React.FC = () => {
                 )}
 
                 <div>
-                  <label className="mb-1 block text-xs font-mono text-[var(--product-text-tertiary)]">
+                  <label htmlFor="agent-objective" className="mb-1 block text-xs font-mono text-[var(--product-text-tertiary)]">
                     Objective / instructions
                   </label>
                   <textarea
+                    id="agent-objective"
                     aria-label="Agent objective"
+                    autoComplete="off"
                     rows={4}
                     value={agentInstruction}
                     onChange={(event) => setAgentInstruction(event.target.value)}
@@ -2124,8 +2310,11 @@ export const AiApiHubView: React.FC = () => {
                         <Network className="w-3.5 h-3.5 text-emerald-400" />
                         Connected MCP Services ({agentMcpServerIds.length} enabled)
                       </p>
-                      <button
+                      <JXButton
                         type="button"
+                        variant="text"
+                        color="primary"
+                        size="sm"
                         onClick={() =>
                           setAgentMcpServerIds(
                             agentMcpServerIds.length === mcpServers.length
@@ -2133,10 +2322,9 @@ export const AiApiHubView: React.FC = () => {
                               : mcpServers.map((s) => s.id)
                           )
                         }
-                        className="text-[11px] text-indigo-400 hover:underline"
                       >
                         {agentMcpServerIds.length === mcpServers.length ? "Deselect all" : "Select all"}
-                      </button>
+                      </JXButton>
                     </div>
                     <div className="grid max-h-36 grid-cols-1 gap-1 overflow-y-auto md:grid-cols-2">
                       {mcpServers.map((srv) => (
@@ -2167,13 +2355,15 @@ export const AiApiHubView: React.FC = () => {
                       Device Tools Scope ({agentAllowedTools.length === 0 ? "All 49 device tools (default)" : `${agentAllowedTools.length} selected`})
                     </p>
                     {agentAllowedTools.length > 0 && (
-                      <button
+                      <JXButton
                         type="button"
+                        variant="text"
+                        color="primary"
+                        size="sm"
                         onClick={() => setAgentAllowedTools([])}
-                        className="text-[11px] text-indigo-400 hover:underline"
                       >
                         Reset to All Tools
-                      </button>
+                      </JXButton>
                     )}
                   </div>
                   <div className="grid max-h-36 grid-cols-1 gap-1 overflow-y-auto md:grid-cols-2">
@@ -2202,11 +2392,13 @@ export const AiApiHubView: React.FC = () => {
 
                 {editingAgentId && (
                   <div>
-                    <label className="mb-1 block text-xs font-mono text-[var(--product-text-tertiary)]">
+                    <label htmlFor="agent-memory-notes" className="mb-1 block text-xs font-mono text-[var(--product-text-tertiary)]">
                       Agent persistent memory / notes
                     </label>
                     <textarea
+                      id="agent-memory-notes"
                       aria-label="Agent memory"
+                      autoComplete="off"
                       rows={2}
                       value={agentMemory}
                       onChange={(e) => setAgentMemory(e.target.value)}
@@ -2218,122 +2410,30 @@ export const AiApiHubView: React.FC = () => {
 
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <JXButton
+                    type="submit"
                     variant="contained"
                     color="primary"
                     size="md"
                     loading={agentBusy}
                     disabled={!isLive || agentBusy || !agentName.trim() || !agentInstruction.trim() || agentDeviceIds.length === 0}
-                    onClick={() => void handleSaveAgent()}
                     startIcon={editingAgentId ? <Check className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
                   >
                     {editingAgentId ? "Update agent" : "Create 24/7 agent"}
                   </JXButton>
-                  <JXButton variant="text" color="neutral" size="sm" onClick={handleCloseAgentForm}>
+                  <JXButton type="button" variant="text" color="neutral" size="sm" onClick={handleCloseAgentForm}>
                     Cancel
                   </JXButton>
                   <span className="flex items-center gap-1 text-xs text-[var(--product-text-tertiary)]">
                     <Clock3 className="w-3.5 h-3.5" /> {editingAgentId ? "Updates apply on the agent's next cycle." : "Repeats until you pause or delete it."}
                   </span>
                 </div>
-              </div>
+              </form>
             )}
 
-            {agentNotice && (
-              <div className="mt-3">
-                <JXAlert
-                  severity={agentNotice.severity}
-                  title={agentNotice.severity === "success" ? "Custom agents" : agentNotice.severity === "error" ? "Could not update agent" : "Agent run"}
-                  description={agentNotice.text}
-                />
-              </div>
-            )}
           </JXCardContent>
         </JXCard>
-      </div>
-
-      {/* SECTION 2 & 3: Multi-Language SDK Generator & Interactive Tool Sandbox */}
-      <JXGrid columns={12} gap="lg">
-        {/* Multi-Language SDK Code Generator */}
-        <JXGridItem colSpan={12}>
-          <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)]">
-            <details>
-              <summary className="text-sm font-semibold text-[var(--product-text-secondary)]">Code examples</summary>
-              <JXCardContent>
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)]">
-                      <button
-                        type="button"
-                        onClick={() => setSdkLang("python")}
-                        className={`px-3 py-1 rounded text-xs font-mono transition-colors ${sdkLang === "python"
-                          ? "bg-indigo-600 text-white font-semibold"
-                          : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-                          }`}
-                      >
-                        Python
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSdkLang("typescript")}
-                        className={`px-3 py-1 rounded text-xs font-mono transition-colors ${sdkLang === "typescript"
-                          ? "bg-indigo-600 text-white font-semibold"
-                          : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-                          }`}
-                      >
-                        TypeScript
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSdkLang("curl")}
-                        className={`px-3 py-1 rounded text-xs font-mono transition-colors ${sdkLang === "curl"
-                          ? "bg-indigo-600 text-white font-semibold"
-                          : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-                          }`}
-                      >
-                        cURL
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSdkLang("mcp")}
-                        className={`px-3 py-1 rounded text-xs font-mono transition-colors ${sdkLang === "mcp"
-                          ? "bg-indigo-600 text-white font-semibold"
-                          : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-                          }`}
-                      >
-                        MCP JSON-RPC
-                      </button>
-                    </div>
-
-                    <JXButton
-                      variant="soft"
-                      color="primary"
-                      size="sm"
-                      onClick={handleCopyCode}
-                      startIcon={
-                        copiedCode ? (
-                          <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : (
-                          <Copy className="w-3.5 h-3.5" />
-                        )
-                      }
-                    >
-                      {copiedCode ? "Copied" : "Copy Snippet"}
-                    </JXButton>
-                  </div>
-
-                  <div tabIndex={0} role="region" aria-label="SDK code example" className="rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] p-4 font-mono text-xs overflow-x-auto text-[var(--product-text-secondary)] leading-relaxed max-h-[380px] overflow-y-auto">
-                    <pre>
-                      <code>{SDK_SNIPPETS[sdkLang]}</code>
-                    </pre>
-                  </div>
-                </div>
-              </JXCardContent>
-            </details>
-          </JXCard>
-        </JXGridItem>
-
-        {/* Interactive AI Copilot Chat (Devices + OAuth2 MCP Connectors) */}
-        <JXGridItem colSpan={12}>
+      </div>)}
+      {activeTab === "chat" && (<div className="space-y-4">
           <JXCard className="bg-[var(--product-surface)]/70 border-[var(--product-line)]">
             <JXCardHeader
               title="AI Copilot Chat"
@@ -2360,14 +2460,15 @@ export const AiApiHubView: React.FC = () => {
                 </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[11px] uppercase tracking-wider text-neutral-400 mb-1">
+                  <label htmlFor="copilot-device" className="block text-[11px] uppercase tracking-wider text-[var(--product-text-tertiary)] mb-1">
                     Target Device (Optional)
                   </label>
                   <select
+                    id="copilot-device"
                     aria-label="Copilot Target Device"
                     value={copilotDevice}
                     onChange={(e) => setCopilotDevice(e.target.value)}
-                    className="w-full rounded-xl bg-black/40 border border-[var(--product-line)] px-3 py-2 text-xs text-neutral-200 focus:outline-none focus:border-cyan-400/60"
+                    className="w-full rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] px-3 py-2 text-xs text-[var(--product-text-secondary)] focus:outline-none focus:border-cyan-400/60"
                   >
                     <option value="">Auto / All fleet & MCP tools</option>
                     {devices.map((dev) => (
@@ -2378,14 +2479,15 @@ export const AiApiHubView: React.FC = () => {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[11px] uppercase tracking-wider text-neutral-400 mb-1">
+                  <label htmlFor="copilot-provider" className="block text-[11px] uppercase tracking-wider text-[var(--product-text-tertiary)] mb-1">
                     Model Provider Override
                   </label>
                   <select
+                    id="copilot-provider"
                     aria-label="Copilot Provider"
                     value={copilotProvider}
                     onChange={(e) => setCopilotProvider(e.target.value)}
-                    className="w-full rounded-xl bg-black/40 border border-[var(--product-line)] px-3 py-2 text-xs text-neutral-200 focus:outline-none focus:border-cyan-400/60"
+                    className="w-full rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] px-3 py-2 text-xs text-[var(--product-text-secondary)] focus:outline-none focus:border-cyan-400/60"
                   >
                     <option value="">Default configured provider</option>
                     <option value="anthropic">Anthropic Claude</option>
@@ -2397,7 +2499,7 @@ export const AiApiHubView: React.FC = () => {
               </div>
 
               {mcpServers.filter((s) => s.enabled).length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-400">
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--product-text-tertiary)]">
                   <span>Active MCP connectors:</span>
                   {mcpServers
                     .filter((s) => s.enabled)
@@ -2409,19 +2511,11 @@ export const AiApiHubView: React.FC = () => {
                 </div>
               )}
 
-              {copilotError && (
-                <JXAlert severity="error" title="Copilot request failed" description={copilotError} />
-              )}
-
-              {copilotSaveNotice && (
-                <JXAlert severity="success" title="Workflow template saved" description={copilotSaveNotice} />
-              )}
-
               {copilotBusy && copilotLiveEvents.length > 0 && (
                 <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/20 px-3 py-2 space-y-1 text-[11px] font-mono">
                   <div className="text-cyan-300 font-semibold">Live tool execution:</div>
                   {copilotLiveEvents.map((ev, i) => (
-                    <div key={i} className="flex items-center justify-between text-neutral-300">
+                    <div key={i} className="flex items-center justify-between text-[var(--product-text-secondary)]">
                       <span>{ev.step ? `Step ${ev.step}: ` : ""}{ev.tool} ({ev.device || "local"})</span>
                       <span className={ev.status === "done" ? "text-emerald-400" : ev.status === "error" ? "text-rose-400" : "text-amber-300"}>
                         {ev.status}
@@ -2431,24 +2525,23 @@ export const AiApiHubView: React.FC = () => {
                 </div>
               )}
 
-              <div className="rounded-xl border border-[var(--product-line)] bg-black/35 p-3 max-h-96 overflow-y-auto space-y-3">
+              <div className="rounded-xl border border-[var(--product-line)] bg-[var(--product-canvas)] p-3 max-h-96 overflow-y-auto space-y-3">
                 {copilotMessages.length === 0 ? (
-                  <p className="text-xs text-neutral-500 text-center py-6">
-                    Ask the Copilot to inspect a device, search docs via Firecrawl MCP, or run diagnostics.
-                  </p>
+                  <EmptyState variant="bare" title="Ask the Copilot"
+                    description="Ask it to inspect a device, search docs via Firecrawl MCP, or run diagnostics." />
                 ) : (
                   copilotMessages.map((msg) => (
                     <div
                       key={msg.id}
                       className={`rounded-xl p-3 text-xs border ${msg.role === "user"
-                        ? "bg-indigo-500/10 border-indigo-500/30 text-neutral-100 ml-6"
-                        : "bg-neutral-900/80 border-[var(--product-line)] text-neutral-200 mr-6"
+                        ? "bg-indigo-500/10 border-indigo-500/30 text-[var(--product-text)] ml-6"
+                        : "bg-[var(--product-surface)] border-[var(--product-line)] text-[var(--product-text-secondary)] mr-6"
                         }`}
                     >
-                      <div className="flex items-center justify-between gap-2 mb-1 text-[10px] uppercase tracking-wider text-neutral-400">
+                      <div className="flex items-center justify-between gap-2 mb-1 text-[11px] uppercase tracking-wider text-[var(--product-text-tertiary)]">
                         <span>{msg.role === "user" ? "You" : "Copilot"}</span>
                         {msg.model && (
-                          <span className="font-mono text-neutral-500">
+                          <span className="font-mono text-[var(--product-text-dim)]">
                             {msg.provider ? `${msg.provider}: ` : ""}
                             {msg.model}
                           </span>
@@ -2460,15 +2553,17 @@ export const AiApiHubView: React.FC = () => {
                       {msg.steps && msg.steps.length > 0 && (
                         <div className="mt-2 pt-2 border-t border-[var(--product-line)]/60">
                           <div className="flex items-center justify-between gap-2 flex-wrap">
-                            <button
+                            <JXButton
                               type="button"
+                              variant="text"
+                              color="primary"
+                              size="sm"
                               onClick={() =>
                                 setCopilotExpandedSteps((prev) => ({
                                   ...prev,
                                   [msg.id]: !prev[msg.id],
                                 }))
                               }
-                              className="inline-flex items-center gap-1 text-[11px] text-cyan-300 hover:text-cyan-200"
                             >
                               {copilotExpandedSteps[msg.id] ? (
                                 <ChevronUp className="w-3.5 h-3.5" />
@@ -2476,17 +2571,19 @@ export const AiApiHubView: React.FC = () => {
                                 <ChevronDown className="w-3.5 h-3.5" />
                               )}
                               {msg.steps.length} tool call{msg.steps.length === 1 ? "" : "s"}
-                            </button>
-                            <button
+                            </JXButton>
+                            <JXButton
                               type="button"
+                              variant="text"
+                              color="primary"
+                              size="sm"
                               onClick={() => void handleSaveCopilotAsWorkflow(msg)}
-                              className="text-[11px] font-mono text-indigo-300 hover:text-indigo-200 hover:underline"
                             >
                               Save as Workflow
-                            </button>
+                            </JXButton>
                           </div>
                           {copilotExpandedSteps[msg.id] && (
-                            <pre className="mt-2 p-2 rounded-lg bg-black/60 text-[11px] text-neutral-300 overflow-x-auto max-h-48">
+                            <pre className="mt-2 p-2 rounded-lg bg-[var(--product-canvas)] text-[11px] text-[var(--product-text-secondary)] overflow-x-auto max-h-48">
                               {JSON.stringify(msg.steps, null, 2)}
                             </pre>
                           )}
@@ -2500,11 +2597,13 @@ export const AiApiHubView: React.FC = () => {
               <form onSubmit={handleCopilotSend} className="flex items-center gap-2">
                 <input
                   type="text"
+                  aria-label="Ask Copilot"
+                  autoComplete="off"
                   value={copilotInput}
                   onChange={(e) => setCopilotInput(e.target.value)}
                   placeholder="Ask Copilot anything (uses connected devices & enabled MCP servers)..."
                   disabled={copilotBusy}
-                  className="flex-1 rounded-xl bg-black/40 border border-[var(--product-line)] px-3 py-2 text-xs text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:border-cyan-400/60"
+                  className="flex-1 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] px-3 py-2 text-xs text-[var(--product-text)] placeholder:text-[var(--product-text-dim)] focus:outline-none focus:border-cyan-400/60"
                 />
                 <JXButton
                   type="submit"
@@ -2519,41 +2618,40 @@ export const AiApiHubView: React.FC = () => {
               </div>
             </JXCardContent>
           </JXCard>
-        </JXGridItem>
 
-        {/* Interactive Tool Execution Studio Sandbox */}
-        <JXGridItem colSpan={12}>
           <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)]">
             <JXCardHeader
               title="Try a tool"
               icon={<Terminal className="w-5 h-5 text-indigo-400" />}
             />
             <JXCardContent>
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-3">
+              <form onSubmit={(event) => void handleExecuteTool(event)} className="space-y-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
-                    <label className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">
+                    <label htmlFor="try-tool-device" className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">
                       Device
                     </label>
                     <select
-                      aria-label="Target fleet node"
+                      id="try-tool-device"
+                      aria-label="Target device"
                       value={selectedNode}
                       onChange={(e) => setSelectedNode(e.target.value)}
                       className="w-full p-2 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono text-[var(--product-text-secondary)] focus:outline-none"
                     >
                       {(aiFleetDevices.length > 0 ? aiFleetDevices : devices).map((d: any) => (
                         <option key={d.id} value={d.id}>
-                          {d.hostname || d.name || d.id} ({d.platform || d.status || "node"})
+                          {d.hostname || d.name || d.id} ({d.platform || d.status || "device"})
                         </option>
                       ))}
                     </select>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">
+                    <label htmlFor="try-tool-model" className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">
                       Model
                     </label>
                     <select
+                      id="try-tool-model"
                       aria-label="Reasoning model"
                       value={selectedModel}
                       onChange={(e) => setSelectedModel(e.target.value)}
@@ -2568,10 +2666,11 @@ export const AiApiHubView: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">
+                  <label htmlFor="try-tool-tool" className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">
                     Tool
                   </label>
                   <select
+                    id="try-tool-tool"
                     aria-label="Exposed tool primitive"
                     value={selectedTool}
                     onChange={(e) => setSelectedTool(e.target.value)}
@@ -2593,11 +2692,13 @@ export const AiApiHubView: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">
+                  <label htmlFor="try-tool-args" className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">
                     Arguments (JSON)
                   </label>
                   <textarea
+                    id="try-tool-args"
                     aria-label="Tool arguments JSON"
+                    autoComplete="off"
                     rows={4}
                     value={promptText}
                     onChange={(e) => setPromptText(e.target.value)}
@@ -2607,11 +2708,11 @@ export const AiApiHubView: React.FC = () => {
 
                 <div className="flex items-center justify-between">
                   <JXButton
+                    type="submit"
                     variant="contained"
                     color="primary"
                     size="md"
                     loading={isExecuting}
-                    onClick={handleExecuteTool}
                     startIcon={<Play className="w-4 h-4" />}
                   >
                     {isLive ? "Execute" : "Run sample (demo — runs nothing)"}
@@ -2622,12 +2723,12 @@ export const AiApiHubView: React.FC = () => {
                 {executionResult && (
                   <div className="p-3 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] space-y-2">
                     <div className="flex items-center justify-between text-[11px] font-mono border-b border-[var(--product-line)]/80 pb-2">
-                      <span className={`${executionResult.status === "fulfilled" ? "text-emerald-400" : "text-amber-300"} font-semibold flex items-center gap-1.5`}>
-                        {executionResult.status === "fulfilled" && <CheckCircle2 className="w-3.5 h-3.5" />}
-                        Status: {executionResult.status} ({executionResult.durationMs}ms)
+                      <span className="flex items-center gap-1.5 font-semibold">
+                        <StatusBadge status={executionResult.status} />
+                        <span className="text-[var(--product-text-tertiary)]">({number(executionResult.durationMs)}ms)</span>
                       </span>
                       <span className="text-[var(--product-text-tertiary)]">
-                        {executionResult.tokens.input} in / {executionResult.tokens.output} out ({executionResult.tokens.cost})
+                        {number(executionResult.tokens.input)} in / {number(executionResult.tokens.output)} out ({executionResult.tokens.cost})
                       </span>
                     </div>
                     <pre tabIndex={0} aria-label="Tool response" className="text-xs font-mono text-[var(--product-text-secondary)] overflow-x-auto max-h-40 overflow-y-auto">
@@ -2635,21 +2736,21 @@ export const AiApiHubView: React.FC = () => {
                     </pre>
                   </div>
                 )}
-              </div>
+              </form>
             </JXCardContent>
           </JXCard>
-        </JXGridItem>
-      </JXGrid>
-
+      </div>)}
       {askTargetAgent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-label="Ask agent">
-          <div className="w-full max-w-xl rounded-2xl bg-[var(--product-surface)] border border-[var(--product-line)] p-5 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--product-canvas)] p-4" role="dialog" aria-modal="true" aria-label="Ask agent">
+          <form onSubmit={(event) => void handleAskAgentSubmit(event)} className="w-full max-w-xl rounded-2xl bg-[var(--product-surface)] border border-[var(--product-line)] p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-[var(--product-text)]">Ask {askTargetAgent.name}</h3>
               <button type="button" onClick={() => setAskTargetAgent(null)} className="text-xs text-[var(--product-text-tertiary)]">Close</button>
             </div>
             <textarea
               rows={3}
+              aria-label="Ask agent prompt"
+              autoComplete="off"
               value={askPrompt}
               onChange={(e) => setAskPrompt(e.target.value)}
               placeholder="Give this agent a direct instruction or question using its tools, MCP servers, and memory..."
@@ -2669,24 +2770,26 @@ export const AiApiHubView: React.FC = () => {
               </div>
             )}
             <div className="flex justify-end gap-2">
-              <JXButton variant="outlined" color="neutral" size="sm" onClick={() => setAskTargetAgent(null)}>Close</JXButton>
-              <JXButton variant="contained" color="primary" size="sm" disabled={askBusy || !askPrompt.trim()} onClick={() => void handleAskAgentSubmit()}>
+              <JXButton type="button" variant="outlined" color="neutral" size="sm" onClick={() => setAskTargetAgent(null)}>Close</JXButton>
+              <JXButton type="submit" variant="contained" color="primary" size="sm" disabled={askBusy || !askPrompt.trim()}>
                 {askBusy ? "Running..." : "Send to Agent"}
               </JXButton>
             </div>
-          </div>
+          </form>
         </div>
       )}
 
       {memoryTargetAgent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-label="Edit agent memory">
-          <div className="w-full max-w-lg rounded-2xl bg-[var(--product-surface)] border border-[var(--product-line)] p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--product-canvas)] p-4" role="dialog" aria-modal="true" aria-label="Edit agent memory">
+          <form onSubmit={(event) => void handleSaveAgentMemory(event)} className="w-full max-w-lg rounded-2xl bg-[var(--product-surface)] border border-[var(--product-line)] p-5 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-[var(--product-text)]">Memory — {memoryTargetAgent.name}</h3>
               <button type="button" onClick={() => setMemoryTargetAgent(null)} className="text-xs text-[var(--product-text-tertiary)]">Close</button>
             </div>
             <textarea
               rows={6}
+              aria-label="Agent memory"
+              autoComplete="off"
               value={memoryDraft}
               onChange={(e) => setMemoryDraft(e.target.value)}
               placeholder="Pinned facts, context, or operational notes persisted across cycles..."
@@ -2697,17 +2800,22 @@ export const AiApiHubView: React.FC = () => {
               <div className="flex flex-wrap gap-2">
                 <input
                   className="rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] px-2 py-1 text-xs"
+                  aria-label="Filter memory chunks by project"
+                  autoComplete="off"
                   placeholder="project filter"
                   value={memoryProjectFilter}
                   onChange={(e) => setMemoryProjectFilter(e.target.value)}
                 />
                 <input
                   className="rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] px-2 py-1 text-xs"
+                  aria-label="Filter memory chunks by task"
+                  autoComplete="off"
                   placeholder="task filter"
                   value={memoryTaskFilter}
                   onChange={(e) => setMemoryTaskFilter(e.target.value)}
                 />
                 <JXButton
+                  type="button"
                   variant="outlined"
                   color="neutral"
                   size="sm"
@@ -2716,6 +2824,7 @@ export const AiApiHubView: React.FC = () => {
                   Filter
                 </JXButton>
                 <JXButton
+                  type="button"
                   variant="outlined"
                   color="neutral"
                   size="sm"
@@ -2729,7 +2838,7 @@ export const AiApiHubView: React.FC = () => {
                       });
                       await loadMemoryChunks(memoryTargetAgent.id, memoryProjectFilter, memoryTaskFilter);
                     } catch (error) {
-                      setAgentNotice({ severity: "error", text: describeError(error) });
+                      pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
                     } finally {
                       setAgentBusy(false);
                     }
@@ -2757,11 +2866,14 @@ export const AiApiHubView: React.FC = () => {
               <div className="flex flex-wrap gap-2">
                 <input
                   className="min-w-[12rem] flex-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] px-2 py-1 text-xs"
+                  aria-label="New memory chunk fact"
+                  autoComplete="off"
                   placeholder="New chunk fact"
                   value={memoryChunkDraft}
                   onChange={(e) => setMemoryChunkDraft(e.target.value)}
                 />
                 <JXButton
+                  type="button"
                   variant="contained"
                   color="primary"
                   size="sm"
@@ -2777,7 +2889,7 @@ export const AiApiHubView: React.FC = () => {
                       setMemoryChunkDraft("");
                       await loadMemoryChunks(memoryTargetAgent.id, memoryProjectFilter, memoryTaskFilter);
                     } catch (error) {
-                      setAgentNotice({ severity: "error", text: describeError(error) });
+                      pushNotice({ tone: "error", title: "Could not update agent", message: describeError(error) });
                     } finally {
                       setAgentBusy(false);
                     }
@@ -2788,13 +2900,35 @@ export const AiApiHubView: React.FC = () => {
               </div>
             </div>
             <div className="flex justify-end gap-2">
-              <JXButton variant="outlined" color="neutral" size="sm" onClick={() => setMemoryTargetAgent(null)}>Cancel</JXButton>
-              <JXButton variant="contained" color="primary" size="sm" disabled={agentBusy} onClick={() => void handleSaveAgentMemory()}>
+              <JXButton type="button" variant="outlined" color="neutral" size="sm" onClick={() => setMemoryTargetAgent(null)}>Cancel</JXButton>
+              <JXButton type="submit" variant="contained" color="primary" size="sm" disabled={agentBusy}>
                 Save Memory
               </JXButton>
             </div>
-          </div>
+          </form>
         </div>
+      )}
+      {deleteMcpConfirm && (
+        <ConfirmDestructive
+          open
+          title="Disconnect MCP service"
+          objectName={deleteMcpConfirm.name}
+          consequence="Agents using it will lose access to its tools. The service can be reconnected later."
+          confirmLabel="Disconnect service"
+          onConfirm={() => { const srv = deleteMcpConfirm; setDeleteMcpConfirm(null); void handleDeleteMcpServer(srv); }}
+          onCancel={() => setDeleteMcpConfirm(null)}
+        />
+      )}
+      {deleteAgentConfirm && (
+        <ConfirmDestructive
+          open
+          title="Delete custom agent"
+          objectName={deleteAgentConfirm.name}
+          consequence="Its run history is removed too. This cannot be undone."
+          confirmLabel="Delete agent"
+          onConfirm={() => { const agent = deleteAgentConfirm; setDeleteAgentConfirm(null); void handleDeleteAgent(agent); }}
+          onCancel={() => setDeleteAgentConfirm(null)}
+        />
       )}
     </div>
   );

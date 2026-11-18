@@ -16,6 +16,7 @@ import {
   JXCardContent,
   JXBadge,
   JXButton,
+  EmptyState,
   GlassModal,
 } from "../ui";
 import {
@@ -47,6 +48,7 @@ import {
   X,
 } from "lucide-react";
 import { useDashboardStore } from "../state/dashboardStore";
+import { pushNotice } from "../state/notices";
 import type { WorkflowPlan, WorkflowStep } from "../types/dashboard";
 
 interface PlanItem {
@@ -79,7 +81,7 @@ const PLANS_DATA: PlanItem[] = [
     title: "Fleet-wide Zero-Trust Enclave Attestation",
     code: "Multi-Node DAG",
     cadence: "Every 6 hours",
-    targetFleet: "#edge-enclaves (12 nodes)",
+    targetFleet: "#edge-enclaves (12 devices)",
     status: "running",
     currentStep: 3,
     totalSteps: 4,
@@ -118,7 +120,7 @@ const PLANS_DATA: PlanItem[] = [
         tool: "enclave.verify_token",
         status: "running",
         duration: "840ms...",
-        reasoning: "Performing ephemeral ECDSA signature exchange with hardware TPM enclave on 12 distributed edge nodes.",
+        reasoning: "Performing ephemeral ECDSA signature exchange with hardware TPM enclave on 12 distributed edge devices.",
         boundsDesc: "[X: 800, Y: 600, W: 400, H: 120]",
         payload: { algorithm: "ECDSA_P256", token_nonce: "7f83b1657ff1709bcfa4" },
       },
@@ -194,7 +196,7 @@ const PLANS_DATA: PlanItem[] = [
     title: "Automated UI Regression & Visual Checkpoint",
     code: "6 Steps",
     cadence: "Git-Push Trigger",
-    targetFleet: "#studio-mac (4 nodes)",
+    targetFleet: "#studio-mac (4 devices)",
     status: "succeeded",
     currentStep: 6,
     totalSteps: 6,
@@ -229,7 +231,7 @@ const PLANS_DATA: PlanItem[] = [
     title: "Incident Self-Healing: Service Auto-Recovery",
     code: "3 Steps",
     cadence: "Event: watchdog.sigkill",
-    targetFleet: "#all-nodes (40 nodes)",
+    targetFleet: "#all-devices (40 devices)",
     status: "idle",
     currentStep: 0,
     totalSteps: 3,
@@ -254,7 +256,7 @@ const PLANS_DATA: PlanItem[] = [
     title: "Secure Host Key Rotation & CA Verification",
     code: "5 Steps • Tier-3 Human Gate",
     cadence: "Bi-weekly",
-    targetFleet: "#core-gateways (2 nodes)",
+    targetFleet: "#core-gateways (2 devices)",
     status: "awaiting_gate",
     currentStep: 4,
     totalSteps: 5,
@@ -293,14 +295,13 @@ export const WorkflowsDemoView: React.FC = () => {
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [isPaused, setIsPaused] = useState<boolean>(false);
-  const [notice, setNotice] = useState<string | null>(null);
   const [copiedPayload, setCopiedPayload] = useState<boolean>(false);
 
   // Workflow builder modal state
   const [builderOpen, setBuilderOpen] = useState<boolean>(false);
   const [newTitle, setNewTitle] = useState<string>("");
   const [newDescription, setNewDescription] = useState<string>("");
-  const [newTargetNode, setNewTargetNode] = useState<string>("srv-us-east-412");
+  const [newTargetDevice, setNewTargetDevice] = useState<string>("srv-us-east-412");
   const [newFallback, setNewFallback] = useState<string>("stop");
   const [newRequireGate, setNewRequireGate] = useState<boolean>(false);
   const [builderSteps, setBuilderSteps] = useState<Array<{ name: string; tool: string }>>([
@@ -344,18 +345,15 @@ export const WorkflowsDemoView: React.FC = () => {
 
   const togglePauseWorkflow = () => {
     setIsPaused(!isPaused);
-    setNotice(!isPaused ? `Paused workflow execution for ${activePlan.id}` : `Resumed workflow execution for ${activePlan.id}`);
-    setTimeout(() => setNotice(null), 3000);
+    pushNotice({ tone: "info", title: !isPaused ? `Paused workflow execution for ${activePlan.id}` : `Resumed workflow execution for ${activePlan.id}` });
   };
 
   const forceReplan = () => {
-    setNotice(`Triggered forced re-planning for ${activePlan.id}. Regenerating multi-turn DAG...`);
-    setTimeout(() => setNotice(null), 3500);
+    pushNotice({ tone: "info", title: `Triggered forced re-planning for ${activePlan.id}. Regenerating multi-turn DAG...` });
   };
 
   const abortPlan = () => {
-    setNotice(`Aborted workflow ${activePlan.id}. Transaction rolled back and audited.`);
-    setTimeout(() => setNotice(null), 3500);
+    pushNotice({ tone: "warning", title: `Aborted workflow ${activePlan.id}. Transaction rolled back and audited.` });
   };
 
   const copyStepPayload = () => {
@@ -374,8 +372,7 @@ export const WorkflowsDemoView: React.FC = () => {
   const handleSaveNewWorkflow = () => {
     if (!newTitle.trim()) return;
     setBuilderOpen(false);
-    setNotice(`Created new workflow: ${newTitle} (${builderSteps.length} steps)`);
-    setTimeout(() => setNotice(null), 3500);
+    pushNotice({ tone: "success", title: `Created new workflow: ${newTitle} (${builderSteps.length} steps)` });
   };
 
   return (
@@ -396,15 +393,6 @@ export const WorkflowsDemoView: React.FC = () => {
         </div>
       </div>
 
-      {notice && (
-        <div role="status" className="p-3 rounded-xl bg-indigo-950/70 border border-indigo-500/40 text-xs font-mono text-indigo-300 flex items-center justify-between">
-          <span>{notice}</span>
-          <button type="button" aria-label="Dismiss notification" onClick={() => setNotice(null)} className="text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]">
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
-
       {/* Main 2-Column Split: Directory on Left (4 cols), Stepper & Details on Right (8 cols) */}
       <JXGrid columns={12} gap="lg">
         {/* LEFT COLUMN: Workflow Directory (4 cols) */}
@@ -424,7 +412,7 @@ export const WorkflowsDemoView: React.FC = () => {
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search plans, tools, tags..."
-                    className="w-full min-h-[38px] pl-8 pr-3 py-1.5 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] text-xs font-mono placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                    className="w-full min-h-[38px] pl-8 pr-3 py-1.5 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] text-xs font-mono placeholder-[var(--product-text-dim)] focus:outline-none focus:border-indigo-500 transition-colors"
                   />
                 </div>
 
@@ -456,16 +444,20 @@ export const WorkflowsDemoView: React.FC = () => {
 
                 {/* Workflow Cards Stack */}
                 <div tabIndex={0} aria-label="Workflow plans" className="space-y-2 max-h-[580px] overflow-y-auto pr-1">
+                  {filteredPlans.length === 0 && (
+                    <EmptyState variant="bare" title="No workflows match" description="Try a different search or filter." />
+                  )}
                   {filteredPlans.map((plan) => {
                     const isSelected = plan.id === selectedPlanId;
                     return (
-                      <div
+                      <button
                         key={plan.id}
+                        type="button"
                         onClick={() => {
                           setSelectedPlanId(plan.id);
                           setSelectedStepNumber(plan.steps[0]?.number || 1);
                         }}
-                        className={`p-3 rounded-xl border text-xs cursor-pointer transition-all ${
+                        className={`w-full text-left p-3 rounded-xl border text-xs transition-all ${
                           isSelected
                             ? "bg-indigo-950/50 border-indigo-500/60 shadow-lg shadow-indigo-600/10"
                             : "bg-[var(--product-canvas)]/70 border-[var(--product-line)] hover:border-[var(--product-line)]"
@@ -474,13 +466,13 @@ export const WorkflowsDemoView: React.FC = () => {
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex flex-col min-w-0">
                             <span className="font-bold text-[var(--product-text)] truncate">{plan.title}</span>
-                            <span className="font-mono text-[10px] text-indigo-400 mt-0.5">
+                            <span className="font-mono text-[11px] text-indigo-400 mt-0.5">
                               {plan.id} • {plan.code}
                             </span>
                           </div>
 
                           <span
-                            className={`font-mono text-[10px] px-2 py-0.5 rounded font-semibold uppercase shrink-0 ${
+                            className={`font-mono text-[11px] px-2 py-0.5 rounded font-semibold uppercase shrink-0 ${
                               plan.status === "running"
                                 ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
                                 : plan.status === "succeeded"
@@ -498,11 +490,11 @@ export const WorkflowsDemoView: React.FC = () => {
                           {plan.description}
                         </p>
 
-                        <div className="mt-2 pt-2 border-t border-[var(--product-line)] flex items-center justify-between text-[10px] font-mono text-[var(--product-text-tertiary)]">
+                        <div className="mt-2 pt-2 border-t border-[var(--product-line)] flex items-center justify-between text-[11px] font-mono text-[var(--product-text-tertiary)]">
                           <span className="text-emerald-400 font-semibold">{plan.successRate}</span>
                           <span>{plan.lastRan}</span>
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -558,10 +550,11 @@ export const WorkflowsDemoView: React.FC = () => {
                       {activePlan.steps.map((step) => {
                         const isInspected = step.number === selectedStepNumber;
                         return (
-                          <div
+                          <button
                             key={step.number}
+                            type="button"
                             onClick={() => setSelectedStepNumber(step.number)}
-                            className={`p-3 rounded-xl border text-xs cursor-pointer transition-all flex flex-col justify-between min-h-[110px] ${
+                            className={`p-3 rounded-xl border text-xs text-left transition-all flex flex-col justify-between min-h-[110px] ${
                               isInspected
                                 ? "bg-indigo-950/60 border-indigo-500 shadow-md shadow-indigo-600/10 ring-1 ring-indigo-500/50"
                                 : "bg-[var(--product-canvas)]/80 border-[var(--product-line)] hover:border-[var(--product-line)]"
@@ -583,15 +576,15 @@ export const WorkflowsDemoView: React.FC = () => {
                                   step.number
                                 )}
                               </span>
-                              <span className="font-mono text-[10px] text-[var(--product-text-tertiary)]">{step.duration}</span>
+                              <span className="font-mono text-[11px] text-[var(--product-text-tertiary)]">{step.duration}</span>
                             </div>
 
                             <div className="mt-2">
                               <span className="font-semibold text-[var(--product-text-secondary)] block truncate">{step.name}</span>
-                              <span className="font-mono text-[10px] text-[var(--product-text-tertiary)] block truncate">{step.tool}</span>
+                              <span className="font-mono text-[11px] text-[var(--product-text-tertiary)] block truncate">{step.tool}</span>
                             </div>
 
-                            <div className="flex items-center justify-between mt-2 pt-1 border-t border-[var(--product-line)]/40 text-[10px] font-mono">
+                            <div className="flex items-center justify-between mt-2 pt-1 border-t border-[var(--product-line)]/40 text-[11px] font-mono">
                               <span
                                 className={
                                   step.status === "completed"
@@ -605,7 +598,7 @@ export const WorkflowsDemoView: React.FC = () => {
                               </span>
                               {isInspected && <span className="text-indigo-400 font-bold">Inspecting</span>}
                             </div>
-                          </div>
+                          </button>
                         );
                       })}
                     </div>
@@ -655,7 +648,7 @@ export const WorkflowsDemoView: React.FC = () => {
 
                       {/* Screen preview container */}
                       <div className="relative w-full h-52 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] overflow-hidden flex flex-col justify-between p-3 select-none">
-                        <div className="flex items-center justify-between text-[10px] font-mono text-[var(--product-text-tertiary)]">
+                        <div className="flex items-center justify-between text-[11px] font-mono text-[var(--product-text-tertiary)]">
                           <span>Ubuntu 24.04 Enclave</span>
                           <span>3840×2160 native</span>
                         </div>
@@ -663,14 +656,14 @@ export const WorkflowsDemoView: React.FC = () => {
                         {/* Simulated Canvas Graphic & Reticle */}
                         <div className="flex items-center justify-center relative my-auto">
                           <div className="w-32 h-16 rounded-lg border-2 border-dashed border-emerald-400/80 bg-emerald-500/10 flex items-center justify-center p-2 text-center">
-                            <span className="font-mono text-[10px] text-emerald-300 font-bold">
+                            <span className="font-mono text-[11px] text-emerald-300 font-bold">
                               [04] PCR-7 ACTIVE
                             </span>
                           </div>
                         </div>
 
                         {/* Bottom Tag */}
-                        <div className="p-2 rounded-lg bg-[var(--product-surface)]/90 border border-[var(--product-line)] flex items-center justify-between font-mono text-[10px] text-[var(--product-text-secondary)]">
+                        <div className="p-2 rounded-lg bg-[var(--product-surface)]/90 border border-[var(--product-line)] flex items-center justify-between font-mono text-[11px] text-[var(--product-text-secondary)]">
                           <span className="text-emerald-400 font-bold">SOM Mark [04]: Enclave TPM Status</span>
                           <span className="text-[var(--product-text-tertiary)]">{activeStep.boundsDesc}</span>
                         </div>
@@ -753,7 +746,7 @@ export const WorkflowsDemoView: React.FC = () => {
       {/* Workflow Builder Modal */}
       {builderOpen && (
         <GlassModal onClose={() => setBuilderOpen(false)} title="Create demo workflow (not executed)">
-          <div className="space-y-4 font-mono text-xs text-[var(--product-text-secondary)]">
+          <form onSubmit={(e) => { e.preventDefault(); handleSaveNewWorkflow(); }} className="space-y-4 font-mono text-xs text-[var(--product-text-secondary)]">
             <div className="flex items-center justify-between pb-2 border-b border-[var(--product-line)]">
               <div className="flex items-center gap-2">
                 <Workflow className="w-5 h-5 text-indigo-400" />
@@ -771,9 +764,13 @@ export const WorkflowsDemoView: React.FC = () => {
 
             <div className="space-y-3">
               <div>
-                <label className="text-[var(--product-text-tertiary)] uppercase text-[10px] block mb-1">Workflow Title</label>
+                <label htmlFor="demo-workflow-title" className="text-[var(--product-text-tertiary)] uppercase text-[11px] block mb-1">
+                  Workflow Title <span aria-hidden="true" className="text-rose-400">*</span><span className="sr-only"> (required)</span>
+                </label>
                 <input
+                  id="demo-workflow-title"
                   type="text"
+                  required
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
                   placeholder="e.g. Automated Kubernetes Pod Self-Healing"
@@ -782,8 +779,9 @@ export const WorkflowsDemoView: React.FC = () => {
               </div>
 
               <div>
-                <label className="text-[var(--product-text-tertiary)] uppercase text-[10px] block mb-1">Description</label>
+                <label htmlFor="demo-workflow-description" className="text-[var(--product-text-tertiary)] uppercase text-[11px] block mb-1">Description</label>
                 <textarea
+                  id="demo-workflow-description"
                   rows={2}
                   value={newDescription}
                   onChange={(e) => setNewDescription(e.target.value)}
@@ -792,13 +790,14 @@ export const WorkflowsDemoView: React.FC = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-[var(--product-text-tertiary)] uppercase text-[10px] block mb-1">Target Host</label>
+                  <label htmlFor="demo-workflow-target" className="text-[var(--product-text-tertiary)] uppercase text-[11px] block mb-1">Target device</label>
                   <select
-                    aria-label="Workflow target host"
-                    value={newTargetNode}
-                    onChange={(e) => setNewTargetNode(e.target.value)}
+                    id="demo-workflow-target"
+                    aria-label="Workflow target device"
+                    value={newTargetDevice}
+                    onChange={(e) => setNewTargetDevice(e.target.value)}
                     className="w-full px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] outline-none focus:border-indigo-500"
                   >
                     {devices.map((d) => (
@@ -810,8 +809,9 @@ export const WorkflowsDemoView: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="text-[var(--product-text-tertiary)] uppercase text-[10px] block mb-1">Failure Fallback</label>
+                  <label htmlFor="demo-workflow-fallback" className="text-[var(--product-text-tertiary)] uppercase text-[11px] block mb-1">Failure Fallback</label>
                   <select
+                    id="demo-workflow-fallback"
                     aria-label="Workflow failure fallback"
                     value={newFallback}
                     onChange={(e) => setNewFallback(e.target.value)}
@@ -827,7 +827,7 @@ export const WorkflowsDemoView: React.FC = () => {
               {/* Step Sequence Manager */}
               <div className="space-y-1.5 pt-2 border-t border-[var(--product-line)]">
                 <div className="flex items-center justify-between">
-                  <span className="text-[var(--product-text-tertiary)] uppercase text-[10px]">Sequenced Steps ({builderSteps.length})</span>
+                  <span className="text-[var(--product-text-tertiary)] uppercase text-[11px]">Sequenced Steps ({builderSteps.length})</span>
                   <button
                     type="button"
                     onClick={handleAddBuilderStep}
@@ -844,7 +844,9 @@ export const WorkflowsDemoView: React.FC = () => {
                       className="flex items-center justify-between p-2 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)]"
                     >
                       <span className="font-bold text-indigo-400">{idx + 1}.</span>
+                      <label htmlFor={`demo-builder-step-${idx}`} className="sr-only">Step {idx + 1} name</label>
                       <input
+                        id={`demo-builder-step-${idx}`}
                         type="text"
                         value={st.name}
                         onChange={(e) => {
@@ -855,7 +857,7 @@ export const WorkflowsDemoView: React.FC = () => {
                         }}
                         className="bg-transparent border-none outline-none text-[var(--product-text-secondary)] flex-1 px-2"
                       />
-                      <span className="text-[10px] text-[var(--product-text-dim)] px-2">{st.tool}</span>
+                      <span className="text-[11px] text-[var(--product-text-dim)] px-2">{st.tool}</span>
                     </div>
                   ))}
                 </div>
@@ -882,14 +884,13 @@ export const WorkflowsDemoView: React.FC = () => {
                 Cancel
               </button>
               <button
-                type="button"
-                onClick={handleSaveNewWorkflow}
+                type="submit"
                 className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold shadow-md shadow-indigo-600/30"
               >
                 Save & Deploy Workflow
               </button>
             </div>
-          </div>
+          </form>
         </GlassModal>
       )}
     </div>

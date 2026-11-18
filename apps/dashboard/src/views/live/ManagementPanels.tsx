@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from "react";
 import { api } from "../../api";
-import { GlassModal, JXButton } from "../../ui";
-import { Empty, Field, fieldClass, message, Pagination, Payload, ReadState, time, useRead } from "./shared";
+import { EmptyState, GlassModal, JXButton } from "../../ui";
+import { Field, fieldClass, message, Pagination, Payload, ReadState, time, useRead } from "./shared";
 
 export function AuditPanel({ admin }: { admin: boolean }) {
   const load = useCallback(() => api.audit(), []);
@@ -26,8 +26,8 @@ export function AuditPanel({ admin }: { admin: boolean }) {
     </div>
     <ReadState {...state} />
     {error && <p role="alert" className="text-sm text-amber-300">{error}</p>}
-    {state.data && !rows.length && <Empty title="No matching events" />}
-    <ul className="divide-y divide-slate-800">{rows.slice((currentPage - 1) * 25, currentPage * 25).map(row => <li key={row.id} className="space-y-2 py-3">
+    {state.data && !rows.length && <EmptyState variant="bare" title="No matching events" />}
+    <ul className="divide-y divide-[var(--product-line)]">{rows.slice((currentPage - 1) * 25, currentPage * 25).map(row => <li key={row.id} className="space-y-2 py-3">
       <p className="break-words text-sm">{row.tool} · {row.decision}</p>
       <p className="break-words text-xs text-[var(--product-text-tertiary)]">{row.actor} · {time(row.ts)}{row.device_id ? ` · ${row.device_id}` : ""}</p>
       <Payload title="Event details" value={row} />

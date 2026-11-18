@@ -31,7 +31,10 @@ from ai_bridge.control.app import (
 ADMIN_TOKEN = "wave3b-router-snapshot-token"
 
 # Literal (method, path) route set of commit 19747b2 (220 entries, no
-# dashboard dist in the worktree it was captured from).
+# dashboard dist in the worktree it was captured from). Extended since:
+# POST /api/fleet/broadcast/{batch_id}/cancel added for UX-23 (fleet
+# broadcast cancel); POST /api/devices/{device_id}/rotate-token added for
+# P1-3 (admin device-token rotation); the set is now 229 entries.
 EXPECTED_ROUTES = set(
     [
         ("DELETE", "/api/agents/{agent_id}"),
@@ -196,6 +199,7 @@ EXPECTED_ROUTES = set(
         ("POST", "/api/devices/{device_id}/mtls-fingerprint"),
         ("POST", "/api/devices/{device_id}/refresh"),
         ("POST", "/api/devices/{device_id}/revoke"),
+        ("POST", "/api/devices/{device_id}/rotate-token"),
         ("POST", "/api/devices/{device_id}/terminal/sessions"),
         ("POST", "/api/devices/{device_id}/terminal/{session_id}/input"),
         ("POST", "/api/devices/{device_id}/terminal/{session_id}/resize"),
@@ -203,6 +207,7 @@ EXPECTED_ROUTES = set(
         ("POST", "/api/emergency-stop"),
         ("POST", "/api/emergency-stop/clear"),
         ("POST", "/api/fleet/broadcast"),
+        ("POST", "/api/fleet/broadcast/{batch_id}/cancel"),
         ("POST", "/api/fleet/update"),
         ("POST", "/api/mcp/oauth/discover"),
         ("POST", "/api/mcp/servers"),

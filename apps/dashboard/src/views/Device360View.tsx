@@ -1,7 +1,7 @@
 /**
  * AI Bridge Enterprise Dashboard — Device360View (Screen 3)
  * Device 360 System Dashboard & Hardware Gauges:
- * Node Selector Dropdown, 4 Hardware Telemetry Gauges (CPU Cores, RAM, Disk, Net),
+ * Device Selector Dropdown, 4 Hardware Telemetry Gauges (CPU Cores, RAM, Disk, Net),
  * 4 JXTabs Panels (Processes with kill guard, Installed Apps, Network Sockets, Daemons),
  * Security Fingerprint Drawer, Fast Action Command Ribbon with Hold-to-Confirm Reboot.
  * Pure @jacxishippingorg/jx-ui-react, motion/react, and lucide-react. ZERO inline styles.
@@ -30,7 +30,14 @@ import {
   HoldToConfirmButton,
   BreadcrumbTrail,
   ProductToolbar,
+  StatusBadge,
+  ConfirmDestructive,
+  EmptyState,
 } from "../ui";
+import { Freshness } from "../components/Freshness";
+import { pushNotice } from "../state/notices";
+import { tokenExpiryStatus } from "../state/tokenExpiry";
+import { useLanguage } from "../i18n";
 import {
   Server,
   Activity,
@@ -44,6 +51,7 @@ import {
   Monitor,
   Laptop,
   Search,
+  ArrowLeft,
   ArrowRight,
   Check,
   AlertTriangle,
@@ -111,13 +119,30 @@ export const Device360View: React.FC = () => {
   const setCurrentView = useDashboardStore((s) => s.setCurrentView);
   const dispatchTask = useDashboardStore((s) => s.dispatchTask);
   const refreshLive = useDashboardStore((s) => s.refreshLive);
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const { t, date: formatDate } = useLanguage();
   const isLive = typeof window !== "undefined" && Boolean(token() || sessionToken());
   const controlBase = (apiOrigin || (typeof window !== "undefined" ? window.location.origin : "")).replace(/\/$/, "");
 
+  // UX-27: an unknown ?device= id must NEVER fall back to devices[0].
+  // Only fall back to the first device when no device was selected at all.
+  const requestedDeviceId = selectedDeviceId;
   const selectedDevice = useMemo(
-    () => devices.find((d) => d.id === selectedDeviceId) || devices[0],
+    () =>
+      devices.find((d) => d.id === selectedDeviceId) ??
+      (selectedDeviceId ? undefined : devices[0]),
     [devices, selectedDeviceId]
   );
+
+  // Render unreported telemetry as an explicit greyed "— not reported"
+  // cell instead of 0 / "unknown" (UX-39); "Not reported" goes through t().
+  const notReported = (value: string | null | undefined) =>
+    !value || value === "Not reported" || value === "unknown" ? (
+      <span className="text-[var(--product-text-dim)]">— {t("Not reported")}</span>
+    ) : (
+      value
+    );
 
   const telemetry = selectedDevice?.telemetry || {
     cpuPercent: 0,
@@ -166,7 +191,41 @@ export const Device360View: React.FC = () => {
   const [listeningSockets, setListeningSockets] = useState<SocketPort[]>([]);
   const [daemons, setDaemons] = useState<SystemDaemon[]>([]);
   const [loadingOverview, setLoadingOverview] = useState<boolean>(false);
+  const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [overviewRetry, setOverviewRetry] = useState<number>(0);
   const [telemetryHistoryCount, setTelemetryHistoryCount] = useState<number>(0);
+
+  // P1-3: the overview response carries the full device row under
+  // `device` (SELECT *), so `device.mtls_fingerprint` is the REAL
+  // mTLS fingerprint — unlike the seeded telemetry.fingerprintSha256
+  // below, which is demo data and must never be shown as the fingerprint.
+  const [overviewDevice, setOverviewDevice] = useState<{
+    mtls_fingerprint?: string | null;
+    token_expires_at?: number | null;
+  } | null>(null);
+  // P1-3: admin-only controls (rotate token, set/clear fingerprint) are
+  // gated on api.me() reporting role "admin"; fail-closed (false) when
+  // me() fails. The server still enforces admin on every call.
+  const [isAdmin, setIsAdmin] = useState(false);
+  // P1-3: rotated token, shown once and held only in component state.
+  const [rotateConfirm, setRotateConfirm] = useState(false);
+  const [rotatedToken, setRotatedToken] = useState<{ token: string; expiresAt: number } | null>(null);
+  const [copiedRotatedToken, setCopiedRotatedToken] = useState(false);
+  const [rotatePending, setRotatePending] = useState(false);
+  // P1-3: mTLS fingerprint editing (admin only). The backend normalizes
+  // hex with optional colons/spaces; the raw input is sent as typed.
+  const [fingerprintDraft, setFingerprintDraft] = useState("");
+  const [fingerprintSaving, setFingerprintSaving] = useState(false);
+  const [clearFingerprintConfirm, setClearFingerprintConfirm] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    if (!isLive) { setIsAdmin(false); return; }
+    api.me()
+      .then((me: any) => { if (active) setIsAdmin(me?.role === "admin"); })
+      .catch(() => { if (active) setIsAdmin(false); });
+    return () => { active = false; };
+  }, [isLive]);
 
   useEffect(() => {
     let active = true;
@@ -177,9 +236,11 @@ export const Device360View: React.FC = () => {
       setListeningSockets([]);
       setDaemons([]);
       setTelemetryHistoryCount(0);
+      setOverviewDevice(null);
       return;
     }
     setLoadingOverview(true);
+    setOverviewError(null);
     if (isLive) {
       api.deviceTelemetry(selectedDevice.id, 20)
         .then((hist: any) => {
@@ -192,6 +253,15 @@ export const Device360View: React.FC = () => {
     api.deviceOverview(selectedDevice.id)
       .then((data: any) => {
         if (!active) return;
+        // P1-3: keep the device row (mtls_fingerprint, token_expires_at)
+        // for the Security Fingerprint card. Also prefill the fingerprint
+        // editor with the current value for editing.
+        const row = data?.device && typeof data.device === "object" ? data.device : null;
+        setOverviewDevice(row ? {
+          mtls_fingerprint: typeof row.mtls_fingerprint === "string" ? row.mtls_fingerprint : null,
+          token_expires_at: typeof row.token_expires_at === "number" ? row.token_expires_at : null,
+        } : null);
+        if (typeof row?.mtls_fingerprint === "string") setFingerprintDraft(row.mtls_fingerprint);
         if (Array.isArray(data?.processes)) {
           setProcesses(
             data.processes.map((p: any) => ({
@@ -264,6 +334,8 @@ export const Device360View: React.FC = () => {
       })
       .catch(() => {
         if (!active) return;
+        setOverviewError("Device diagnostics could not be loaded.");
+        setOverviewDevice(null);
         setProcesses([]);
         setInstalledApps([]);
         setListeningSockets([]);
@@ -275,9 +347,9 @@ export const Device360View: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [selectedDevice?.id, isOffline]);
+  }, [selectedDevice?.id, isOffline, overviewRetry]);
 
-  // Options for node selector dropdown
+  // Options for device selector dropdown
   const deviceOptions = useMemo(
     () =>
       devices.map((d) => ({
@@ -415,6 +487,77 @@ export const Device360View: React.FC = () => {
     }
   }, [isLive, refreshLive, selectedDevice]);
 
+  // P1-3: rotate the device token (admin). The old token dies
+  // immediately; the new one is shown once in the modal below and never
+  // persisted anywhere.
+  const handleRotateDeviceToken = useCallback(async () => {
+    if (!selectedDevice) return;
+    setRotatePending(true);
+    try {
+      const res = await api.rotateDeviceToken(selectedDevice.id);
+      setRotatedToken({ token: res.device_token, expiresAt: res.token_expires_at });
+      setCopiedRotatedToken(false);
+      await refreshLive?.();
+      pushNotice({ tone: "success", title: `Rotated token for ${selectedDevice.hostname}.`, message: "The new token is shown once below — copy it now." });
+    } catch (err: any) {
+      pushNotice({ tone: "error", title: `Token rotation failed for ${selectedDevice.hostname}.`, message: err?.message || "Unknown error" });
+    } finally {
+      setRotatePending(false);
+    }
+  }, [refreshLive, selectedDevice]);
+
+  const handleCopyRotatedToken = useCallback(async () => {
+    if (!rotatedToken) return;
+    try {
+      await navigator.clipboard.writeText(rotatedToken.token);
+      setCopiedRotatedToken(true);
+      setTimeout(() => setCopiedRotatedToken(false), 2000);
+    } catch {
+      pushNotice({ tone: "error", title: "Clipboard access was denied.", message: "Select and copy the token manually." });
+    }
+  }, [rotatedToken]);
+
+  // P1-3: set the mTLS fingerprint (admin). Hex with optional colons /
+  // spaces is accepted — the backend normalizes it. An empty input is
+  // NOT sent here; clearing goes through the confirm dialog below, which
+  // sends the contract's explicit empty fingerprint.
+  const handleSaveFingerprint = useCallback(async () => {
+    if (!selectedDevice) return;
+    const value = fingerprintDraft.trim();
+    if (!value) {
+      pushNotice({ tone: "warning", title: "Enter a fingerprint to save.", message: "To remove the fingerprint, use Clear fingerprint." });
+      return;
+    }
+    setFingerprintSaving(true);
+    try {
+      const res = await api.setDeviceMtlsFingerprint(selectedDevice.id, value);
+      setOverviewDevice((prev) => ({ ...(prev ?? {}), mtls_fingerprint: res.mtls_fingerprint }));
+      setFingerprintDraft(res.mtls_fingerprint ?? "");
+      pushNotice({ tone: "success", title: `mTLS fingerprint set for ${selectedDevice.hostname}.` });
+    } catch (err: any) {
+      pushNotice({ tone: "error", title: `Setting the fingerprint failed for ${selectedDevice.hostname}.`, message: err?.message || "Unknown error" });
+    } finally {
+      setFingerprintSaving(false);
+    }
+  }, [fingerprintDraft, selectedDevice]);
+
+  // P1-3: clear the mTLS fingerprint (admin). Per the API contract an
+  // explicitly empty fingerprint clears it and returns mtls_fingerprint null.
+  const handleClearFingerprint = useCallback(async () => {
+    if (!selectedDevice) return;
+    setFingerprintSaving(true);
+    try {
+      const res = await api.setDeviceMtlsFingerprint(selectedDevice.id, "");
+      setOverviewDevice((prev) => ({ ...(prev ?? {}), mtls_fingerprint: res.mtls_fingerprint ?? null }));
+      setFingerprintDraft("");
+      pushNotice({ tone: "success", title: `mTLS fingerprint cleared for ${selectedDevice.hostname}.` });
+    } catch (err: any) {
+      pushNotice({ tone: "error", title: `Clearing the fingerprint failed for ${selectedDevice.hostname}.`, message: err?.message || "Unknown error" });
+    } finally {
+      setFingerprintSaving(false);
+    }
+  }, [selectedDevice]);
+
   // Filtered and sorted processes
   const filteredProcesses = useMemo(() => {
     let list = processes.filter(
@@ -457,22 +600,27 @@ export const Device360View: React.FC = () => {
           args: { command: cmd },
           riskTier: "tier3_shell",
         });
-        setActionFeedback(`Termination dispatched for PID ${processToKill.pid} (${processToKill.name}) (#${task.id}).`);
+        setActionFeedback(`Kill requested for PID ${processToKill.pid} (${processToKill.name}) (#${task.id}) — confirm in Processes.`);
       } catch (err: any) {
         setKillGuardError(`Failed to dispatch kill task: ${err?.message || "Unknown error"}`);
         return;
       }
     } else {
-      setActionFeedback(`Signal SIGTERM queued for PID ${processToKill.pid} (${processToKill.name}).`);
+      setActionFeedback(`Kill requested for PID ${processToKill.pid} (${processToKill.name}) — confirm in Processes.`);
     }
 
-    setProcesses((prev) => prev.filter((p) => p.pid !== processToKill.pid));
+    // UX-39: keep the process row until telemetry refresh confirms the PID
+    // is gone; the feedback above is labelled "requested", not "done".
     setProcessToKill(null);
     setKillGuardError(null);
   }, [dispatchTask, isLive, processToKill, selectedDevice]);
 
-  // Daemon state toggle handler
+  // Daemon state toggle handler (stop goes through ConfirmDestructive, UX-03)
+  const [daemonConfirm, setDaemonConfirm] = useState<{ name: string; action: "stop" } | null>(null);
+  const [daemonPending, setDaemonPending] = useState<string | null>(null);
   const handleDaemonAction = useCallback(async (daemonName: string, action: "start" | "stop" | "restart") => {
+    setDaemonPending(daemonName);
+    try {
     if (isLive && selectedDevice) {
       const svc = daemonName.replace(/\.service$/, "");
       const cmd =
@@ -515,7 +663,38 @@ export const Device360View: React.FC = () => {
       })
     );
     setActionFeedback(`Daemon ${daemonName}: ${action.toUpperCase()} simulated in demo mode.`);
+    } finally {
+      setDaemonPending(null);
+    }
   }, [dispatchTask, isLive, selectedDevice]);
+
+  // UX-27: a requested device id that matches nothing renders an explicit
+  // "Device not available" state — never the first fleet device.
+  if (!selectedDevice && requestedDeviceId && devices.length > 0) {
+    return (
+      <div className="w-full space-y-4">
+        <div className="flex flex-wrap items-center gap-3 pb-2 border-b border-[var(--product-line)]">
+          <JXButton variant="text" color="neutral" size="sm" onClick={() => setCurrentView("devices")} startIcon={<ArrowLeft className="w-4 h-4" />}>
+            Back to Devices
+          </JXButton>
+          <BreadcrumbTrail crumbs={["Devices", "Unknown device"]} />
+        </div>
+        <div>
+          <h1 className="text-xl font-bold tracking-tight text-[var(--product-text)] mt-1">
+            Device details
+          </h1>
+        </div>
+        <EmptyState
+          variant="card"
+          demo={!isLive}
+          title="Device not available"
+          description={`No enrolled device matches the requested id "${requestedDeviceId}". It may have been deleted, or the link may be stale.`}
+          actionLabel="View fleet inventory"
+          onAction={() => setCurrentView("devices")}
+        />
+      </div>
+    );
+  }
 
   // Empty inventory: selectedDevice is undefined when devices is empty.
   // Guard here (after all hooks) so the render below never dereferences
@@ -530,43 +709,54 @@ export const Device360View: React.FC = () => {
             </h1>
           </div>
         </div>
-        <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)]">
-          <JXCardContent>
-            <div className="p-8 text-center space-y-2">
-              <Server className="w-6 h-6 mx-auto text-[var(--product-text-dim)]" />
-              <p className="text-sm font-semibold text-[var(--product-text-secondary)]">No device available</p>
-              <p className="text-xs text-[var(--product-text-tertiary)] max-w-sm mx-auto">
-                The fleet inventory is empty, so there is no device to inspect. Enroll a device to see its telemetry here.
-              </p>
-              <JXButton variant="outlined" color="neutral" size="sm" onClick={() => setCurrentView("devices")}>
-                View fleet inventory
-              </JXButton>
-            </div>
-          </JXCardContent>
-        </JXCard>
+        <EmptyState
+          variant="card"
+          demo={!isLive}
+          title="No device available"
+          description="The fleet inventory is empty, so there is no device to inspect. Enroll a device to see its telemetry here."
+          actionLabel="View fleet inventory"
+          onAction={() => setCurrentView("devices")}
+        />
       </div>
     );
   }
 
   return (
     <div className="w-full space-y-4">
-      {/* Breadcrumb Navigation & Node Selector Ribbon */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-[var(--product-line)]">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-[var(--product-text)] mt-1">
-            Device details
-          </h1>
+      {/* Breadcrumb Navigation & Device Selector Ribbon */}
+      <div className="flex flex-col gap-2 pb-2 border-b border-[var(--product-line)]">
+        <div className="flex flex-wrap items-center gap-3">
+          <JXButton
+            variant="text"
+            color="neutral"
+            size="sm"
+            onClick={() => setCurrentView("devices")}
+            startIcon={<ArrowLeft className="w-4 h-4" />}
+          >
+            Back to Devices
+          </JXButton>
+          <BreadcrumbTrail crumbs={["Devices", selectedDevice.hostname]} />
+          {isLive && (
+            <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} label="Updated" />
+          )}
         </div>
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-[var(--product-text)] mt-1">
+              Device details
+            </h1>
+          </div>
 
-        {/* Node Switcher Dropdown */}
-        <div className="w-full md:w-80">
-          <JXSelect
-            options={deviceOptions}
-            value={selectedDeviceId}
-            onChange={(val) => setSelectedDeviceId(val)}
-            searchable
-            label="Device"
-          />
+          {/* Device Switcher Dropdown */}
+          <div className="w-full md:w-80">
+            <JXSelect
+              options={deviceOptions}
+              value={selectedDeviceId}
+              onChange={(val) => setSelectedDeviceId(val)}
+              searchable
+              label="Device"
+            />
+          </div>
         </div>
       </div>
 
@@ -588,23 +778,24 @@ export const Device360View: React.FC = () => {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-lg font-bold text-[var(--product-text)]">{selectedDevice.hostname}</span>
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded uppercase bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
+                    <span className="text-[11px] font-mono px-2 py-1 rounded uppercase bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
                       {selectedDevice.arch}
                     </span>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-semibold ${
-                        isOffline
-                          ? "bg-rose-500/20 text-rose-300"
-                          : selectedDevice.status === "unresponsive"
-                          ? "bg-amber-500/20 text-amber-300"
-                          : "bg-emerald-500/20 text-emerald-300"
-                      }`}
-                    >
-                      {selectedDevice.status}
-                    </span>
+                    <StatusBadge
+                      status={selectedDevice.status === "unresponsive" ? "degraded" : selectedDevice.status}
+                      label={selectedDevice.status === "unresponsive" ? "Unresponsive" : selectedDevice.status === "online" ? "Online" : "Offline"}
+                    />
+                    {/* P1-3: token-expiry badge from list_devices' token_expires_at
+                        (store-mapped). Warning within 72 h, error once expired. */}
+                    {(() => {
+                      const expiryStatus = tokenExpiryStatus(selectedDevice.tokenExpiresAt);
+                      if (expiryStatus === "expired") return <StatusBadge status="error" label="Token expired" />;
+                      if (expiryStatus === "expiring") return <StatusBadge status="warning" label="Token expiring soon" />;
+                      return null;
+                    })()}
                   </div>
                   <p className="text-xs text-[var(--product-text-tertiary)] font-mono mt-0.5">
-                    {selectedDevice.osRelease} • IP: {isOffline ? "Not assigned" : telemetry.ipAddress} • Latency: {isOffline ? "—" : `${selectedDevice.latencyMs}ms`}
+                    {selectedDevice.osRelease} • IP: {isOffline ? "Not assigned" : notReported(telemetry.ipAddress)} • Latency: {isOffline ? "—" : `${selectedDevice.latencyMs}ms`}
                   </p>
                 </div>
               </div>
@@ -647,6 +838,23 @@ export const Device360View: React.FC = () => {
                   Create Backup
                 </JXButton>
 
+                {/* P1-3: rotate the device token (admin only; the old token
+                    dies immediately and the new one is shown once). */}
+                {isLive && isAdmin && (
+                  <JXButton
+                    variant="soft"
+                    color="neutral"
+                    size="sm"
+                    disabled={isOffline || rotatePending}
+                    loading={rotatePending}
+                    onClick={() => setRotateConfirm(true)}
+                    startIcon={<KeyRound className="w-3.5 h-3.5 text-emerald-400" />}
+                    className="bg-[var(--product-raised)] hover:bg-[var(--product-raised)] text-[var(--product-text-secondary)] border border-[var(--product-line)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Rotate token
+                  </JXButton>
+                )}
+
                 <ProductToolbar>
                   <JXButton
                     variant="outlined"
@@ -676,11 +884,11 @@ export const Device360View: React.FC = () => {
                     onClick={() => void handleSyncDeviceMetadata()}
                     startIcon={<CheckCircle2 className="w-3.5 h-3.5 text-cyan-400" />}
                   >
-                    Sync Node Record
+                    Sync device record
                   </JXButton>
                 </ProductToolbar>
 
-                {/* Reboot Node Hold-to-Confirm Button */}
+                {/* Reboot Device Hold-to-Confirm Button */}
                 {isOffline ? (
                   <JXButton
                     variant="soft"
@@ -689,11 +897,11 @@ export const Device360View: React.FC = () => {
                     disabled
                     className="opacity-40 cursor-not-allowed text-xs bg-[var(--product-raised)] text-rose-300 border border-[var(--product-line)]"
                   >
-                    Reboot Node
+                    Reboot device
                   </JXButton>
                 ) : (
                   <HoldToConfirmButton
-                    label="Reboot Node"
+                    label="Reboot device"
                     tone="danger"
                     holdDurationMs={1800}
                     onConfirm={handleRebootNode}
@@ -711,7 +919,7 @@ export const Device360View: React.FC = () => {
                     <div>
                       <h3 className="font-semibold text-sm text-amber-200">Device Offline • Agent Enrollment Required</h3>
                       <p className="text-xs text-amber-300/80 mt-0.5">
-                        This node has not connected or reported telemetry yet. Run the enrollment command on the remote machine to connect:
+                        This device has not connected or reported telemetry yet. Run the enrollment command on the device to connect:
                       </p>
                     </div>
                     <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 p-2.5 rounded-lg bg-[var(--product-canvas)]/80 border border-[var(--product-line)] text-xs font-mono">
@@ -745,8 +953,8 @@ export const Device360View: React.FC = () => {
             {/* Action Feedback Notification */}
             {actionFeedback && (
               <JXAlert
-                severity="success"
-                title="Command Executed"
+                severity={/fail/i.test(actionFeedback) ? "error" : "success"}
+                title={/fail/i.test(actionFeedback) ? "Command failed" : "Command Executed"}
                 description={actionFeedback}
               />
             )}
@@ -776,7 +984,7 @@ export const Device360View: React.FC = () => {
 
                 {/* Per-core mini bars */}
                 <div className="space-y-1.5 p-2 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)]">
-                  <div className="flex items-center justify-between text-[10px] font-mono text-[var(--product-text-tertiary)]">
+                  <div className="flex items-center justify-between text-[11px] font-mono text-[var(--product-text-tertiary)]">
                     <span>CORES ({isOffline ? 0 : telemetry.cpuCores.length} vCPU)</span>
                     <span className={isOffline ? "text-[var(--product-text-dim)]" : "text-indigo-400"}>
                       {isOffline ? "Offline" : "Active"}
@@ -786,7 +994,7 @@ export const Device360View: React.FC = () => {
                     {(isOffline ? [0, 0, 0, 0] : telemetry.cpuCores.slice(0, 8)).map((core, idx) => (
                       <div key={idx} className="space-y-0.5 text-center">
                         <JXLinearProgress value={isOffline ? 0 : core} className="h-1.5" />
-                        <span className="text-[9px] font-mono text-[var(--product-text-tertiary)] block tabular-nums">
+                        <span className="text-[11px] font-mono text-[var(--product-text-tertiary)] block tabular-nums">
                           C{idx}: {isOffline ? "0%" : `${core}%`}
                         </span>
                       </div>
@@ -809,7 +1017,7 @@ export const Device360View: React.FC = () => {
               <div className="space-y-3">
                 <div className="flex items-baseline justify-between">
                   <span className="font-mono text-2xl font-bold text-purple-300 tabular-nums">
-                    {isOffline ? "0.0 / 0.0 GB" : telemetry.memoryTotalGb > 0 ? `${telemetry.memoryUsedGb} / ${telemetry.memoryTotalGb} GB` : "Not reported"}
+                    {isOffline ? "0.0 / 0.0 GB" : telemetry.memoryTotalGb > 0 ? `${telemetry.memoryUsedGb} / ${telemetry.memoryTotalGb} GB` : notReported(null)}
                   </span>
                   <span className="text-[11px] font-mono text-[var(--product-text-tertiary)]">
                     {isOffline ? "0%" : telemetry.memoryTotalGb > 0 ? `${Math.round((telemetry.memoryUsedGb / telemetry.memoryTotalGb) * 100)}%` : "—"}
@@ -827,7 +1035,7 @@ export const Device360View: React.FC = () => {
                     )}
                     <div className="bg-[var(--product-raised)] h-full w-full" title="Free / Offline Space" />
                   </div>
-                  <div className="flex justify-between items-center text-[10px] font-mono text-[var(--product-text-tertiary)] pt-0.5">
+                  <div className="flex justify-between items-center text-[11px] font-mono text-[var(--product-text-tertiary)] pt-0.5">
                     <span>Active: {isOffline ? "0.0G" : `${(telemetry.memoryUsedGb * 0.7).toFixed(1)}G`}</span>
                     <span>Cache: {isOffline ? "0.0G" : `${(telemetry.memoryUsedGb * 0.3).toFixed(1)}G`}</span>
                     <span>Swap: {isOffline ? "0.0G" : `${telemetry.swapUsedGb}G`}</span>
@@ -859,7 +1067,7 @@ export const Device360View: React.FC = () => {
                 {/* Partition bars */}
                 <div className="space-y-2 p-2 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)]">
                   <div className="space-y-1">
-                    <div className="flex justify-between text-[10px] font-mono text-[var(--product-text-tertiary)]">
+                    <div className="flex justify-between text-[11px] font-mono text-[var(--product-text-tertiary)]">
                       <span>{selectedDevice.platform === "windows" ? "C:\\ (System Volume)" : "/ (Root Volume)"}</span>
                       <span className="text-[var(--product-text-secondary)] tabular-nums">
                         {isOffline ? "0% used" : `${telemetry.diskPercent}% used`}
@@ -898,17 +1106,17 @@ export const Device360View: React.FC = () => {
                 </div>
 
                 {/* Sockets Micro-Telemetry */}
-                <div className="space-y-1 p-2 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)] text-[10px] font-mono">
+                <div className="space-y-1 p-2 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)] text-[11px] font-mono">
                   <div className="flex justify-between items-center">
                     <span className="text-[var(--product-text-tertiary)]">PUBLIC IP:</span>
                     <span className="text-[var(--product-text-secondary)]">
-                      {isOffline ? "—" : (import.meta as any).env?.VITE_PUBLIC_IP || telemetry.ipAddress || "Not reported"}
+                      {isOffline ? "—" : notReported((import.meta as any).env?.VITE_PUBLIC_IP || telemetry.ipAddress)}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-[var(--product-text-tertiary)]">PRIVATE IP:</span>
                     <span className="text-[var(--product-text-secondary)]">
-                      {isOffline ? "Not assigned" : telemetry.ipAddress}
+                      {isOffline ? "Not assigned" : notReported(telemetry.ipAddress)}
                     </span>
                   </div>
                 </div>
@@ -925,6 +1133,12 @@ export const Device360View: React.FC = () => {
           <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)] overflow-hidden">
             <JXCardContent>
               <div className="space-y-4">
+                {overviewError && (
+                  <div role="alert" className="p-3 rounded-xl border border-rose-500/40 bg-rose-950/40 text-xs text-rose-300 flex items-center justify-between gap-3">
+                    <span>Could not load device diagnostics: {overviewError}</span>
+                    <button type="button" onClick={() => setOverviewRetry((c) => c + 1)} className="underline">Retry</button>
+                  </div>
+                )}
                 {/* 4 JXTabs Switcher */}
                 <JXTabs
                   value={activeTab}
@@ -972,8 +1186,10 @@ export const Device360View: React.FC = () => {
                         <span className="text-[var(--product-text-tertiary)]">Sort:</span>
                         <button
                           type="button"
+                          aria-label="Sort processes by CPU"
+                          aria-pressed={processSortBy === "cpu"}
                           onClick={() => setProcessSortBy("cpu")}
-                          className={`px-2 py-1 rounded-lg ${
+                          className={`px-2.5 py-1.5 rounded-lg ${
                             processSortBy === "cpu" ? "bg-indigo-600 text-white" : "bg-[var(--product-raised)] text-[var(--product-text-tertiary)]"
                           }`}
                         >
@@ -981,8 +1197,10 @@ export const Device360View: React.FC = () => {
                         </button>
                         <button
                           type="button"
+                          aria-label="Sort processes by memory"
+                          aria-pressed={processSortBy === "mem"}
                           onClick={() => setProcessSortBy("mem")}
-                          className={`px-2 py-1 rounded-lg ${
+                          className={`px-2.5 py-1.5 rounded-lg ${
                             processSortBy === "mem" ? "bg-indigo-600 text-white" : "bg-[var(--product-raised)] text-[var(--product-text-tertiary)]"
                           }`}
                         >
@@ -990,8 +1208,10 @@ export const Device360View: React.FC = () => {
                         </button>
                         <button
                           type="button"
+                          aria-label="Sort processes by PID"
+                          aria-pressed={processSortBy === "pid"}
                           onClick={() => setProcessSortBy("pid")}
-                          className={`px-2 py-1 rounded-lg ${
+                          className={`px-2.5 py-1.5 rounded-lg ${
                             processSortBy === "pid" ? "bg-indigo-600 text-white" : "bg-[var(--product-raised)] text-[var(--product-text-tertiary)]"
                           }`}
                         >
@@ -1003,7 +1223,7 @@ export const Device360View: React.FC = () => {
                     {loadingOverview ? (
                       <div className="p-8 text-center text-[var(--product-text-tertiary)] text-xs">
                         <RefreshCw className="w-5 h-5 mx-auto mb-2 animate-spin text-indigo-400" />
-                        Querying live node processes...
+                        Querying live device processes...
                       </div>
                     ) : isOffline ? (
                       <div className="p-8 rounded-xl bg-[var(--product-raised)]/40 border border-[var(--product-line)] text-center space-y-2">
@@ -1014,25 +1234,27 @@ export const Device360View: React.FC = () => {
                         </p>
                       </div>
                     ) : filteredProcesses.length === 0 ? (
-                      <div className="p-8 rounded-xl bg-[var(--product-raised)]/40 border border-[var(--product-line)] text-center space-y-1">
-                        <p className="text-sm font-semibold text-[var(--product-text-secondary)]">No processes matching filter</p>
-                        <p className="text-xs text-[var(--product-text-tertiary)]">Try adjusting your search criteria or clear the query.</p>
-                      </div>
+                      <EmptyState
+                        variant="bare"
+                        title="No processes matching filter"
+                        description="Try adjusting your search criteria or clear the query."
+                      />
                     ) : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-left border-collapse text-xs font-mono">
+                          <caption className="sr-only">Running processes</caption>
                           <thead>
                             <tr className="border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] uppercase tracking-wider">
-                              <th className="py-2.5 px-3">PID</th>
-                              <th className="py-2.5 px-3">Process Name</th>
-                              <th className="py-2.5 px-3">User</th>
-                              <th className="py-2.5 px-3">CPU %</th>
-                              <th className="py-2.5 px-3">Memory RSS</th>
-                              <th className="py-2.5 px-3">State</th>
-                              <th className="py-2.5 px-3 text-right">Directives</th>
+                              <th scope="col" aria-sort={processSortBy === "pid" ? "ascending" : "none"} className="py-2.5 px-3">PID</th>
+                              <th scope="col" aria-sort={processSortBy === "name" ? "ascending" : "none"} className="py-2.5 px-3">Process Name</th>
+                              <th scope="col" className="py-2.5 px-3">User</th>
+                              <th scope="col" aria-sort={processSortBy === "cpu" ? "descending" : "none"} className="py-2.5 px-3">CPU %</th>
+                              <th scope="col" aria-sort={processSortBy === "mem" ? "descending" : "none"} className="py-2.5 px-3">Memory RSS</th>
+                              <th scope="col" className="py-2.5 px-3">State</th>
+                              <th scope="col" className="py-2.5 px-3 text-right">Directives</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-800/60">
+                          <tbody className="divide-y divide-[var(--product-line)]">
                             {filteredProcesses.map((proc) => (
                               <tr key={proc.pid} className="hover:bg-[var(--product-raised)]/60 transition-colors">
                                 <td className="py-2.5 px-3 font-bold text-indigo-300 tabular-nums">
@@ -1041,7 +1263,7 @@ export const Device360View: React.FC = () => {
                                 <td className="py-2.5 px-3 font-semibold text-[var(--product-text-secondary)]">
                                   {proc.name}
                                   {proc.isProtected && (
-                                    <span className="ml-2 text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-normal">
+                                    <span className="ml-2 text-[11px] px-2 py-1 rounded bg-amber-500/20 text-amber-300 font-normal">
                                       Protected
                                     </span>
                                   )}
@@ -1056,7 +1278,7 @@ export const Device360View: React.FC = () => {
                                   {proc.memoryMb} MB
                                 </td>
                                 <td className="py-2.5 px-3">
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
+                                  <span className="text-[11px] px-2 py-1 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
                                     {proc.state}
                                   </span>
                                 </td>
@@ -1065,6 +1287,7 @@ export const Device360View: React.FC = () => {
                                     variant="soft"
                                     color="error"
                                     size="sm"
+                                    aria-label={`Kill process ${proc.name} (PID ${proc.pid})`}
                                     onClick={() => {
                                       setProcessToKill(proc);
                                       setKillGuardError(null);
@@ -1097,28 +1320,30 @@ export const Device360View: React.FC = () => {
                         <Radio className="w-6 h-6 mx-auto text-[var(--product-text-dim)]" />
                         <p className="text-sm font-semibold text-[var(--product-text-secondary)]">Device Offline</p>
                         <p className="text-xs text-[var(--product-text-tertiary)] max-w-sm mx-auto">
-                          Software inventory will be discovered and listed here when the node connects.
+                          Software inventory will be discovered and listed here when the device connects.
                         </p>
                       </div>
                     ) : installedApps.length === 0 ? (
-                      <div className="p-8 rounded-xl bg-[var(--product-raised)]/40 border border-[var(--product-line)] text-center space-y-1">
-                        <p className="text-sm font-semibold text-[var(--product-text-secondary)]">No installed packages reported</p>
-                        <p className="text-xs text-[var(--product-text-tertiary)]">The remote agent has not detected standard application binaries.</p>
-                      </div>
+                      <EmptyState
+                        variant="bare"
+                        title="No installed packages reported"
+                        description="The remote agent has not detected standard application binaries."
+                      />
                     ) : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-left border-collapse text-xs font-mono">
+                          <caption className="sr-only">Installed applications</caption>
                           <thead>
                             <tr className="border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] uppercase tracking-wider">
-                              <th className="py-2.5 px-3">Application Binary</th>
-                              <th className="py-2.5 px-3">Version</th>
-                              <th className="py-2.5 px-3">Publisher</th>
-                              <th className="py-2.5 px-3">Category</th>
-                              <th className="py-2.5 px-3">Binary Location</th>
-                              <th className="py-2.5 px-3 text-right">Action</th>
+                              <th scope="col" className="py-2.5 px-3">Application Binary</th>
+                              <th scope="col" className="py-2.5 px-3">Version</th>
+                              <th scope="col" className="py-2.5 px-3">Publisher</th>
+                              <th scope="col" className="py-2.5 px-3">Category</th>
+                              <th scope="col" className="py-2.5 px-3">Binary Location</th>
+                              <th scope="col" className="py-2.5 px-3 text-right">Action</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-800/60">
+                          <tbody className="divide-y divide-[var(--product-line)]">
                             {installedApps.map((app) => (
                               <tr key={app.id} className="hover:bg-[var(--product-raised)]/60 transition-colors">
                                 <td className="py-2.5 px-3 font-semibold text-[var(--product-text-secondary)]">
@@ -1127,12 +1352,12 @@ export const Device360View: React.FC = () => {
                                 <td className="py-2.5 px-3 text-indigo-300 font-bold">{app.version}</td>
                                 <td className="py-2.5 px-3 text-[var(--product-text-tertiary)]">{app.publisher}</td>
                                 <td className="py-2.5 px-3">
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
+                                  <span className="text-[11px] px-2 py-1 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
                                     {app.category}
                                   </span>
                                 </td>
                                 <td className="py-2.5 px-3">
-                                  <code className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
+                                  <code className="text-[11px] px-2 py-1 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
                                     {app.binaryPath}
                                   </code>
                                 </td>
@@ -1141,6 +1366,7 @@ export const Device360View: React.FC = () => {
                                     variant="soft"
                                     color="primary"
                                     size="sm"
+                                    aria-label={`Launch ${app.name}`}
                                     onClick={() =>
                                       setActionFeedback(`Application "${app.name}" launch signal dispatched.`)
                                     }
@@ -1176,24 +1402,26 @@ export const Device360View: React.FC = () => {
                         </p>
                       </div>
                     ) : listeningSockets.length === 0 ? (
-                      <div className="p-8 rounded-xl bg-[var(--product-raised)]/40 border border-[var(--product-line)] text-center space-y-1">
-                        <p className="text-sm font-semibold text-[var(--product-text-secondary)]">No active listening sockets reported</p>
-                        <p className="text-xs text-[var(--product-text-tertiary)]">All inbound ports are either filtered or inactive.</p>
-                      </div>
+                      <EmptyState
+                        variant="bare"
+                        title="No active listening sockets reported"
+                        description="All inbound ports are either filtered or inactive."
+                      />
                     ) : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-left border-collapse text-xs font-mono">
+                          <caption className="sr-only">Network sockets and ports</caption>
                           <thead>
                             <tr className="border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] uppercase tracking-wider">
-                              <th className="py-2.5 px-3">Port</th>
-                              <th className="py-2.5 px-3">Protocol</th>
-                              <th className="py-2.5 px-3">Local Address</th>
-                              <th className="py-2.5 px-3">Foreign Address</th>
-                              <th className="py-2.5 px-3">State</th>
-                              <th className="py-2.5 px-3">Bound Service Description</th>
+                              <th scope="col" className="py-2.5 px-3">Port</th>
+                              <th scope="col" className="py-2.5 px-3">Protocol</th>
+                              <th scope="col" className="py-2.5 px-3">Local Address</th>
+                              <th scope="col" className="py-2.5 px-3">Foreign Address</th>
+                              <th scope="col" className="py-2.5 px-3">State</th>
+                              <th scope="col" className="py-2.5 px-3">Bound Service Description</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-800/60">
+                          <tbody className="divide-y divide-[var(--product-line)]">
                             {listeningSockets.map((s) => (
                               <tr key={s.port} className="hover:bg-[var(--product-raised)]/60 transition-colors">
                                 <td className="py-2.5 px-3 font-bold text-cyan-300 tabular-nums">
@@ -1203,15 +1431,7 @@ export const Device360View: React.FC = () => {
                                 <td className="py-2.5 px-3 text-[var(--product-text-secondary)]">{s.localAddress}</td>
                                 <td className="py-2.5 px-3 text-[var(--product-text-tertiary)]">{s.foreignAddress}</td>
                                 <td className="py-2.5 px-3">
-                                  <span
-                                    className={`text-[10px] px-2 py-0.5 rounded font-bold ${
-                                      s.state === "LISTEN"
-                                        ? "bg-emerald-500/20 text-emerald-300"
-                                        : "bg-indigo-500/20 text-indigo-300"
-                                    }`}
-                                  >
-                                    {s.state}
-                                  </span>
+                                  <StatusBadge status={s.state === "LISTEN" ? "success" : "info"} label={s.state} />
                                 </td>
                                 <td className="py-2.5 px-3 text-[var(--product-text-secondary)]">{s.service}</td>
                               </tr>
@@ -1240,39 +1460,33 @@ export const Device360View: React.FC = () => {
                         </p>
                       </div>
                     ) : daemons.length === 0 ? (
-                      <div className="p-8 rounded-xl bg-[var(--product-raised)]/40 border border-[var(--product-line)] text-center space-y-1">
-                        <p className="text-sm font-semibold text-[var(--product-text-secondary)]">No managed daemons reported</p>
-                        <p className="text-xs text-[var(--product-text-tertiary)]">System services are managed by the host OS init system.</p>
-                      </div>
+                      <EmptyState
+                        variant="bare"
+                        title="No managed daemons reported"
+                        description="System services are managed by the device OS init system."
+                      />
                     ) : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-left border-collapse text-xs font-mono">
+                          <caption className="sr-only">System daemons</caption>
                           <thead>
                             <tr className="border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] uppercase tracking-wider">
-                              <th className="py-2.5 px-3">Service Daemon</th>
-                              <th className="py-2.5 px-3">Description</th>
-                              <th className="py-2.5 px-3">Status</th>
-                              <th className="py-2.5 px-3">PID</th>
-                              <th className="py-2.5 px-3">RAM</th>
-                              <th className="py-2.5 px-3">Restarts</th>
-                              <th className="py-2.5 px-3 text-right">Actions</th>
+                              <th scope="col" className="py-2.5 px-3">Service Daemon</th>
+                              <th scope="col" className="py-2.5 px-3">Description</th>
+                              <th scope="col" className="py-2.5 px-3">Status</th>
+                              <th scope="col" className="py-2.5 px-3">PID</th>
+                              <th scope="col" className="py-2.5 px-3">RAM</th>
+                              <th scope="col" className="py-2.5 px-3">Restarts</th>
+                              <th scope="col" className="py-2.5 px-3 text-right">Actions</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-800/60">
+                          <tbody className="divide-y divide-[var(--product-line)]">
                             {daemons.map((daemon) => (
                               <tr key={daemon.name} className="hover:bg-[var(--product-raised)]/60 transition-colors">
                                 <td className="py-2.5 px-3 font-bold text-[var(--product-text)]">{daemon.name}</td>
                                 <td className="py-2.5 px-3 text-[var(--product-text-tertiary)]">{daemon.description}</td>
                                 <td className="py-2.5 px-3">
-                                  <span
-                                    className={`text-[10px] px-2 py-0.5 rounded font-semibold ${
-                                      daemon.status === "active"
-                                        ? "bg-emerald-500/20 text-emerald-300"
-                                        : "bg-rose-500/20 text-rose-300"
-                                    }`}
-                                  >
-                                    {daemon.status}
-                                  </span>
+                                  <StatusBadge status={daemon.status === "active" ? "active" : "error"} label={daemon.status} />
                                 </td>
                                 <td className="py-2.5 px-3 text-[var(--product-text-secondary)]">{daemon.pid || "—"}</td>
                                 <td className="py-2.5 px-3 text-[var(--product-text-secondary)]">{daemon.memoryMb} MB</td>
@@ -1284,7 +1498,10 @@ export const Device360View: React.FC = () => {
                                         variant="soft"
                                         color="error"
                                         size="sm"
-                                        onClick={() => handleDaemonAction(daemon.name, "stop")}
+                                        disabled={daemonPending === daemon.name}
+                                        loading={daemonPending === daemon.name}
+                                        aria-label={`Stop ${daemon.name}`}
+                                        onClick={() => setDaemonConfirm({ name: daemon.name, action: "stop" })}
                                         className="text-[11px]"
                                       >
                                         Stop
@@ -1294,6 +1511,9 @@ export const Device360View: React.FC = () => {
                                         variant="soft"
                                         color="primary"
                                         size="sm"
+                                        disabled={daemonPending === daemon.name}
+                                        loading={daemonPending === daemon.name}
+                                        aria-label={`Start ${daemon.name}`}
                                         onClick={() => handleDaemonAction(daemon.name, "start")}
                                         className="text-[11px]"
                                       >
@@ -1304,6 +1524,9 @@ export const Device360View: React.FC = () => {
                                       variant="soft"
                                       color="neutral"
                                       size="sm"
+                                      disabled={daemonPending === daemon.name}
+                                      loading={daemonPending === daemon.name}
+                                      aria-label={`Restart ${daemon.name}`}
                                       onClick={() => handleDaemonAction(daemon.name, "restart")}
                                       className="text-[11px]"
                                     >
@@ -1334,24 +1557,99 @@ export const Device360View: React.FC = () => {
             />
             <JXCardContent>
               <div className="space-y-3 font-mono text-xs">
-                {/* SHA-256 Fingerprint */}
+                {/* SHA-256 Fingerprint — P1-3: the REAL mTLS fingerprint
+                    from the overview response (device.mtls_fingerprint).
+                    The seeded telemetry.fingerprintSha256 shown here
+                    before was demo data, not the device's fingerprint. */}
                 <div className="space-y-1 p-2.5 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)]">
-                  <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
-                    Host SHA-256 Fingerprint
+                  <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
+                    Device SHA-256 Fingerprint
                   </span>
-                  <code className="text-[10px] text-indigo-300 break-all select-all block">
-                    {telemetry.fingerprintSha256 && telemetry.fingerprintSha256 !== "unknown" ? telemetry.fingerprintSha256 : "Not reported"}
+                  <code className="text-[11px] text-indigo-300 break-all select-all block">
+                    {overviewDevice?.mtls_fingerprint ? overviewDevice.mtls_fingerprint : notReported(null)}
                   </code>
+                  {isLive && isAdmin && (
+                    <form
+                      className="space-y-2 pt-2"
+                      onSubmit={(e) => { e.preventDefault(); void handleSaveFingerprint(); }}
+                    >
+                      <label htmlFor="mtls-fingerprint-input" className="text-[11px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
+                        Set mTLS fingerprint
+                      </label>
+                      <input
+                        id="mtls-fingerprint-input"
+                        value={fingerprintDraft}
+                        onChange={(e) => setFingerprintDraft(e.target.value)}
+                        placeholder="Hex, with optional colons or spaces"
+                        autoComplete="off"
+                        spellCheck={false}
+                        disabled={fingerprintSaving}
+                        className="w-full bg-[var(--product-surface)] border border-[var(--product-line)] text-[var(--product-text-secondary)] rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-indigo-500"
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <JXButton
+                          variant="soft"
+                          color="neutral"
+                          size="sm"
+                          type="submit"
+                          disabled={fingerprintSaving || !fingerprintDraft.trim()}
+                          loading={fingerprintSaving}
+                        >
+                          Save fingerprint
+                        </JXButton>
+                        <JXButton
+                          variant="soft"
+                          color="error"
+                          size="sm"
+                          type="button"
+                          disabled={fingerprintSaving || !overviewDevice?.mtls_fingerprint}
+                          title={overviewDevice?.mtls_fingerprint ? "Remove the registered mTLS fingerprint." : "No fingerprint is registered."}
+                          onClick={() => setClearFingerprintConfirm(true)}
+                        >
+                          Clear fingerprint
+                        </JXButton>
+                      </div>
+                      <p className="text-[11px] text-[var(--product-text-tertiary)] normal-case tracking-normal">
+                        Hex with optional colons or spaces; the control plane normalizes it.
+                      </p>
+                    </form>
+                  )}
+                  {isLive && !isAdmin && (
+                    <p className="text-[11px] text-[var(--product-text-tertiary)] pt-1">
+                      An administrator can set or clear the mTLS fingerprint.
+                    </p>
+                  )}
+                </div>
+
+                {/* Device token expiry — P1-3: from list_devices' token_expires_at
+                    (store-mapped) so an expiring token is visible here too. */}
+                <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)]">
+                  <div>
+                    <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
+                      Device token
+                    </span>
+                    <span className="text-[var(--product-text-secondary)] font-semibold">
+                      {selectedDevice.tokenExpiresAt
+                        ? `Expires ${formatDate(new Date(selectedDevice.tokenExpiresAt * 1000), { dateStyle: "medium", timeStyle: "short" })}`
+                        : notReported(null)}
+                    </span>
+                  </div>
+                  {(() => {
+                    const expiryStatus = tokenExpiryStatus(selectedDevice.tokenExpiresAt);
+                    if (expiryStatus === "expired") return <StatusBadge status="error" label="Token expired" />;
+                    if (expiryStatus === "expiring") return <StatusBadge status="warning" label="Token expiring soon" />;
+                    return null;
+                  })()}
                 </div>
 
                 {/* mTLS Cert Expiry */}
                 <div className="flex items-center justify-between p-2.5 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)]">
                   <div>
-                    <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
+                    <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
                       mTLS Cert Expiry
                     </span>
                     <span className={`font-bold ${isOffline ? "text-[var(--product-text-tertiary)]" : "text-emerald-400"}`}>
-                      {isOffline ? "Offline (Agent not enrolled)" : telemetry.certExpiryDays > 0 ? `Expires in ${telemetry.certExpiryDays} days` : "Not reported"}
+                      {isOffline ? "Offline (Agent not enrolled)" : telemetry.certExpiryDays > 0 ? `Expires in ${telemetry.certExpiryDays} days` : notReported(null)}
                     </span>
                   </div>
                   {isOffline ? <AlertTriangle className="w-4 h-4 text-amber-400" /> : <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
@@ -1360,11 +1658,11 @@ export const Device360View: React.FC = () => {
                 {/* TPM 2.0 PCR Status */}
                 <div className="flex items-center justify-between p-2.5 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)]">
                   <div>
-                    <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
+                    <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
                       TPM 2.0 Status
                     </span>
                     <span className="text-[var(--product-text-secondary)] font-semibold uppercase">
-                      {isOffline ? "Offline (No attestation)" : telemetry.tpmStatus === "active" ? "active PCR-7 Key-Bound" : "Not reported"}
+                      {isOffline ? "Offline (No attestation)" : telemetry.tpmStatus === "active" ? "active PCR-7 Key-Bound" : notReported(null)}
                     </span>
                   </div>
                   <Lock className="w-4 h-4 text-indigo-400" />
@@ -1373,7 +1671,7 @@ export const Device360View: React.FC = () => {
                 {/* Cipher Suite */}
                 <div className="flex items-center justify-between p-2.5 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)]">
                   <div>
-                    <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
+                    <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
                       Cipher Suite
                     </span>
                     <span className="text-indigo-300 font-semibold">
@@ -1386,7 +1684,7 @@ export const Device360View: React.FC = () => {
                 {/* Security Enforcement */}
                 <div className="flex items-center justify-between p-2.5 rounded-xl bg-[var(--product-raised)]/80 border border-[var(--product-line)]">
                   <div>
-                    <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
+                    <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
                       SELinux / AppArmor
                     </span>
                     <span className={`font-semibold ${isOffline ? "text-[var(--product-text-tertiary)]" : "text-emerald-400"}`}>
@@ -1416,7 +1714,7 @@ export const Device360View: React.FC = () => {
               <JXAlert severity="error" title="Action Prohibited" description={killGuardError} />
             ) : (
               <p className="text-[var(--product-text-secondary)]">
-                Are you sure you want to terminate process <strong className="text-indigo-300">{processToKill.name}</strong> (PID {processToKill.pid}) running under user {processToKill.user}? A SIGTERM signal will be sent to the remote node.
+                Are you sure you want to terminate process <strong className="text-indigo-300">{processToKill.name}</strong> (PID {processToKill.pid}) running under user {processToKill.user}? A SIGTERM signal will be sent to the device.
               </p>
             )}
 
@@ -1447,6 +1745,102 @@ export const Device360View: React.FC = () => {
           </div>
         </GlassModal>
       )}
+
+      {/* Daemon stop confirmation (UX-03) */}
+      <ConfirmDestructive
+        open={daemonConfirm !== null}
+        title="Stop system daemon"
+        objectName={daemonConfirm ? `${daemonConfirm.name} on ${selectedDevice.hostname}` : undefined}
+        consequence="Stop: halts the service on the device. The device may restart it, or you can start it again from this view."
+        confirmLabel="Stop daemon"
+        onConfirm={() => {
+          const pending = daemonConfirm;
+          setDaemonConfirm(null);
+          if (pending) void handleDaemonAction(pending.name, "stop");
+        }}
+        onCancel={() => setDaemonConfirm(null)}
+      />
+
+      {/* P1-3: rotate-token confirmation (hold-to-confirm: the old token dies immediately). */}
+      <ConfirmDestructive
+        open={rotateConfirm}
+        title="Rotate device token"
+        objectName={`${selectedDevice.hostname} (${selectedDevice.id})`}
+        consequence="Rotate: invalidates the device's current token immediately. The device must be given the new token to reconnect, and the new token is shown only once."
+        confirmLabel="Rotate token"
+        requireHold
+        tone="warning"
+        onConfirm={() => {
+          setRotateConfirm(false);
+          void handleRotateDeviceToken();
+        }}
+        onCancel={() => setRotateConfirm(false)}
+      />
+      {/* P1-3: new token, shown exactly once. Dismissing clears it from
+          component state; it is never persisted (no store, no storage, no URL). */}
+      {rotatedToken && (
+        <GlassModal
+          open={Boolean(rotatedToken)}
+          onClose={() => { setRotatedToken(null); setCopiedRotatedToken(false); }}
+          title={`New token for ${selectedDevice.hostname}`}
+        >
+          <div className="space-y-4 max-w-md w-full text-xs">
+            <p className="text-amber-300">
+              Shown once — copy it now. It will not be shown again, and the old token no longer works.
+            </p>
+            <div className="space-y-1">
+              <label htmlFor="rotated-device-token-360" className="text-[var(--product-text-secondary)] font-semibold block">
+                Device token
+              </label>
+              <input
+                id="rotated-device-token-360"
+                readOnly
+                value={rotatedToken.token}
+                autoComplete="off"
+                className="w-full bg-[var(--product-raised)] border border-[var(--product-line)] text-[var(--product-text-secondary)] rounded-xl px-3 py-2 font-mono break-all"
+              />
+            </div>
+            <p className="text-[var(--product-text-secondary)]">
+              Expires {formatDate(new Date(rotatedToken.expiresAt * 1000), { dateStyle: "medium", timeStyle: "short" })}.
+            </p>
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[var(--product-line)]">
+              <JXButton
+                variant="soft"
+                color="neutral"
+                size="sm"
+                type="button"
+                onClick={handleCopyRotatedToken}
+                startIcon={copiedRotatedToken ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
+              >
+                {copiedRotatedToken ? "Copied!" : "Copy token"}
+              </JXButton>
+              <JXButton
+                variant="contained"
+                color="primary"
+                size="sm"
+                type="button"
+                onClick={() => { setRotatedToken(null); setCopiedRotatedToken(false); }}
+                className="bg-indigo-600 hover:bg-indigo-500"
+              >
+                Done — I copied it
+              </JXButton>
+            </div>
+          </div>
+        </GlassModal>
+      )}
+      {/* P1-3: clear-fingerprint confirmation. */}
+      <ConfirmDestructive
+        open={clearFingerprintConfirm}
+        title="Clear mTLS fingerprint"
+        objectName={`${selectedDevice.hostname} (${selectedDevice.id})`}
+        consequence="Clear: removes the registered mTLS fingerprint. If device mTLS is enforced, the device cannot authenticate until a new fingerprint is set."
+        confirmLabel="Clear fingerprint"
+        onConfirm={() => {
+          setClearFingerprintConfirm(false);
+          void handleClearFingerprint();
+        }}
+        onCancel={() => setClearFingerprintConfirm(false)}
+      />
     </div>
   );
 };

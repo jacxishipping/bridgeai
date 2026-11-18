@@ -19,8 +19,10 @@ import {
 } from "lucide-react";
 import { useDashboardStore } from "../state/dashboardStore";
 import { api, apiOrigin, token, sessionToken } from "../api";
-import { PageEmpty } from "../components/PageEmpty";
-import { ProductModePill } from "../ui";
+import { EmptyState, ProductModePill, StatusBadge } from "../ui";
+import { Freshness } from "../components/Freshness";
+import { pushNotice } from "../state/notices";
+import { useLanguage } from "../i18n";
 
 interface TerminalLine {
   id: string;
@@ -138,32 +140,56 @@ function describeLiveError(e: unknown): string {
   const status = (e as { status?: number })?.status;
   const msg = e instanceof Error ? e.message : "Unknown error.";
   if (status === 401) return "Your session expired. Please sign in again.";
-  if (status === 403) return `Terminal access denied or approval required. ${msg}`;
+  if (status === 403) return `Terminal access denied or approval required. ${msg} Ask an admin to check your role, then try again.`;
   if (status === 404) return `Terminal session or device not found. ${msg}`;
-  if (status === 409 || status === 423) return `Terminal blocked by policy or device state. ${msg}`;
+  if (status === 409 || status === 423) return `Terminal blocked by policy or device state. ${msg} Reload the device list and try again.`;
+  if (status === 429) return "Too many requests (429). Wait a minute, then use Reconnect.";
+  if (status && status >= 500) return `Control plane error (${status}). ${msg} Try again — and check the audit trail to see whether the session was created.`;
   return `Terminal session failed. ${msg}`;
+}
+
+/** Live-status → shared StatusBadge key (UX-05). */
+function liveStatusBadge(status: LiveStatus): { key: string; label: string } {
+  switch (status) {
+    case "connecting": return { key: "running", label: "Connecting…" };
+    case "connected": return { key: "online", label: "Connected" };
+    case "closed": return { key: "cancelled", label: "Session ended" };
+    case "error": return { key: "error", label: "Error" };
+    default: return { key: "unknown", label: "No session" };
+  }
 }
 
 export const TerminalView: React.FC = () => {
   const live = typeof window !== "undefined" && !!(token() || sessionToken());
+  // UX-06: sync freshness in the header when live.
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
+  const refreshLive = useDashboardStore((s) => s.refreshLive);
+  const { number } = useLanguage();
 
   const demoDevices = useDashboardStore((s) => s.devices);
   const selectedDeviceId = useDashboardStore((s) => s.selectedDeviceId);
-  const [targetNodeId, setTargetNodeId] = useState<string>(selectedDeviceId || "srv-us-east-412");
+  // UX-15: the enrolled computer is a "device", never a "node".
+  const [targetDeviceId, setTargetDeviceId] = useState<string>(selectedDeviceId || "srv-us-east-412");
 
   // Live device list (the store only holds demo fixtures)
   const [liveDevices, setLiveDevices] = useState<LiveDevice[]>([]);
   const [liveDeviceId, setLiveDeviceId] = useState<string>("");
   const [devicesError, setDevicesError] = useState<string | null>(null);
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  // UX-18: a 401 clears the credential; show an expired state instead of
+  // silently falling back to the demo terminal lines.
+  const [expired, setExpired] = useState(false);
 
-  const demoTarget = demoDevices.find((d) => d.id === targetNodeId) || demoDevices[0];
+  const demoTarget = demoDevices.find((d) => d.id === targetDeviceId) || demoDevices[0];
   const liveTarget = liveDevices.find((d) => d.id === liveDeviceId);
   const isWindows = live
     ? (liveTarget?.os || "").toLowerCase().startsWith("win")
     : demoTarget?.platform === "windows";
   const targetHostname = live
     ? liveTarget?.hostname || liveTarget?.name || liveDeviceId || "device"
-    : demoTarget?.hostname || "demo-node";
+    : demoTarget?.hostname || "demo-device";
 
   const [lines, setLines] = useState<TerminalLine[]>(DEMO_TERMINAL_LINES);
   const [liveText, setLiveText] = useState<string>("");
@@ -172,7 +198,6 @@ export const TerminalView: React.FC = () => {
   const [inputValue, setInputValue] = useState<string>("");
   const [snippetMode, setSnippetMode] = useState<"insert" | "exec">("insert");
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
-  const [reconnectNotice, setReconnectNotice] = useState<string | null>(null);
 
   const terminalEndRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -324,30 +349,46 @@ export const TerminalView: React.FC = () => {
     [teardown, liveDevices, measureSize, runStream],
   );
 
-  // Load real devices in live mode
+  // Load real devices in live mode (UX-23: retryable — a failed load used
+  // to strand the view with only the error text and no way to retry).
+  const loadLiveDevices = useCallback(async () => {
+    if (!live) return;
+    const wasLive = Boolean(token() || sessionToken());
+    setDevicesLoading(true);
+    try {
+      const list: LiveDevice[] = await api.devices();
+      const arr = Array.isArray(list) ? list : [];
+      setLiveDevices(arr);
+      setDevicesError(null);
+      setExpired(false);
+      setLiveDeviceId((cur) => {
+        if (cur && arr.some((d) => d.id === cur)) return cur;
+        const pref = arr.find((d) => d.id === selectedDeviceId && d.status === "online");
+        return (pref || arr.find((d) => d.status === "online") || arr[0])?.id || "";
+      });
+    } catch (e) {
+      if (wasLive && (e as { status?: number })?.status === 401) {
+        setExpired(true);
+        setDevicesError(null);
+        pushNotice({
+          tone: "error",
+          title: "Your session expired",
+          message: "Sign in again to open a live terminal session.",
+          actionLabel: "Sign in",
+          actionHref: "#/login",
+        });
+        return;
+      }
+      setDevicesError(describeLiveError(e));
+    } finally {
+      setDevicesLoading(false);
+    }
+  }, [live, selectedDeviceId]);
+
   useEffect(() => {
     if (!live) return;
-    let cancelled = false;
-    api
-      .devices()
-      .then((list: LiveDevice[]) => {
-        if (cancelled) return;
-        const arr = Array.isArray(list) ? list : [];
-        setLiveDevices(arr);
-        setDevicesError(null);
-        setLiveDeviceId((cur) => {
-          if (cur && arr.some((d) => d.id === cur)) return cur;
-          const pref = arr.find((d) => d.id === selectedDeviceId && d.status === "online");
-          return (pref || arr.find((d) => d.status === "online") || arr[0])?.id || "";
-        });
-      })
-      .catch((e) => {
-        if (!cancelled) setDevicesError(describeLiveError(e));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [live, selectedDeviceId]);
+    void loadLiveDevices();
+  }, [live, loadLiveDevices]);
 
   // Open (and on device switch, re-open) a session; clean up on unmount
   useEffect(() => {
@@ -470,8 +511,9 @@ export const TerminalView: React.FC = () => {
       if (liveDeviceId) void connect(liveDeviceId);
       return;
     }
-    setReconnectNotice("Demo: reconnect simulated.");
-    setTimeout(() => setReconnectNotice(null), 600);
+    // UX-06: route the demo reconnect note through the shared notice
+    // system instead of a 600 ms inline flash nobody can finish reading.
+    pushNotice({ tone: "info", title: "Demo: reconnect simulated." });
   };
 
   const downloadLog = () => {
@@ -509,14 +551,8 @@ export const TerminalView: React.FC = () => {
       }))
     : demoDevices.map((d) => ({ id: d.id, label: `${d.hostname} (${d.osRelease})` }));
 
-  const statusLabel: Record<LiveStatus, string> = {
-    idle: "No session",
-    connecting: "Connectingâ€¦",
-    connected: "Connected",
-    closed: "Session ended",
-    error: "Error",
-  };
   const inputDisabled = live && liveStatus !== "connected";
+  const liveBadge = liveStatusBadge(liveStatus);
 
   const navigate = useDashboardStore((s) => s.setCurrentView);
 
@@ -527,8 +563,26 @@ export const TerminalView: React.FC = () => {
           <h1 className="text-xl font-semibold text-[var(--product-text)]">Terminal</h1>
           <ProductModePill live={live} detail={live ? apiOrigin.replace(/^https?:\/\//, "") : "Local simulation"} />
         </div>
+        {live && (
+          <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} label="Updated" />
+        )}
       </header>
-      {!live && (
+      {live && syncState === "error" && !expired && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-700/50 bg-rose-950/30 px-4 py-2 text-xs text-rose-300">
+          <span>Sync with the control plane failed{syncError ? `: ${syncError}` : "."} Showing the last known data.</span>
+          <button type="button" onClick={() => void refreshLive?.()} className="font-medium underline underline-offset-2">Retry</button>
+        </div>
+      )}
+      {expired && (
+        <EmptyState
+          variant="card"
+          title="Your session expired"
+          description="Sign in again to open a live terminal session. Until then this page shows only the local demo terminal — nothing here runs on a real device."
+          actionLabel="Sign in"
+          onAction={() => navigate("login")}
+        />
+      )}
+      {!live && !expired && (
         <div role="note" className="rounded-xl border border-amber-700/50 bg-amber-950/30 px-4 py-2 text-xs text-amber-300">
           <strong className="font-semibold">Demo mode:</strong> this terminal is a local simulation. Sign in to open a real session.
         </div>
@@ -540,13 +594,23 @@ export const TerminalView: React.FC = () => {
         </div>
       )}
       {live && devicesError && (
-        <div role="alert" className="rounded-xl border border-rose-700/50 bg-rose-950/30 px-4 py-2 text-xs text-rose-300">{devicesError}</div>
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-700/50 bg-rose-950/30 px-4 py-2 text-xs text-rose-300">
+          <span className="min-w-0 flex-1">{devicesError}</span>
+          <button type="button" onClick={() => void loadLiveDevices()} disabled={devicesLoading}
+            className="font-medium underline underline-offset-2 disabled:opacity-50">
+            {devicesLoading ? "Retrying…" : "Retry"}
+          </button>
+        </div>
       )}
       {live && liveError && (
-        <div role="alert" className="rounded-xl border border-rose-700/50 bg-rose-950/30 px-4 py-2 text-xs text-rose-300">{liveError}</div>
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-700/50 bg-rose-950/30 px-4 py-2 text-xs text-rose-300">
+          <span className="min-w-0 flex-1">{liveError}</span>
+          <button type="button" onClick={reconnectSession} className="font-medium underline underline-offset-2">Reconnect</button>
+        </div>
       )}
-      {live && devicesForSelect.length === 0 && (
-        <PageEmpty
+      {live && devicesForSelect.length === 0 && !expired && (
+        <EmptyState
+          variant="card"
           title="No devices to open a shell on"
           description="Enroll an agent and wait for the first heartbeat before starting a live terminal session."
           actionLabel="Enroll a device"
@@ -560,9 +624,9 @@ export const TerminalView: React.FC = () => {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-[var(--product-line)]">
         <div className="flex flex-wrap items-center gap-3">
           <select
-            aria-label="Terminal target node"
-            value={live ? liveDeviceId : targetNodeId}
-            onChange={(e) => (live ? setLiveDeviceId(e.target.value) : setTargetNodeId(e.target.value))}
+            aria-label="Terminal target device"
+            value={live ? liveDeviceId : targetDeviceId}
+            onChange={(e) => (live ? setLiveDeviceId(e.target.value) : setTargetDeviceId(e.target.value))}
             className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[var(--product-surface)] border border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs focus:outline-none focus:border-indigo-500 transition-colors cursor-pointer"
           >
             {live && devicesForSelect.length === 0 && <option value="">No devices enrolled</option>}
@@ -573,9 +637,7 @@ export const TerminalView: React.FC = () => {
             ))}
           </select>
           {live && (
-            <span role="status" className="font-mono text-xs px-2 py-1 rounded bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)]">
-              {statusLabel[liveStatus]}
-            </span>
+            <StatusBadge status={liveBadge.key} label={liveBadge.label} />
           )}
         </div>
       </div>
@@ -587,40 +649,44 @@ export const TerminalView: React.FC = () => {
             type="button"
             onClick={sendSigint}
             disabled={inputDisabled}
+            aria-label="Interrupt (send SIGINT, Ctrl+C)"
             title="Send SIGINT (Ctrl+C)"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] hover:border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs transition-all active:scale-95 disabled:opacity-50"
           >
             <StopCircle className="w-3.5 h-3.5 text-rose-400" />
             <span>Interrupt</span>
-            <kbd className="text-[10px] px-1 py-0.2 rounded bg-[var(--product-raised)] text-[var(--product-text-tertiary)]">^C</kbd>
+            <kbd className="text-[11px] px-1 py-0.2 rounded bg-[var(--product-raised)] text-[var(--product-text-tertiary)]">^C</kbd>
           </button>
 
           <button
             type="button"
             onClick={sendEof}
             disabled={inputDisabled}
+            aria-label="Send EOF (Ctrl+D)"
             title="Send EOF (Ctrl+D)"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] hover:border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs transition-all active:scale-95 disabled:opacity-50"
           >
             <ArrowRight className="w-3.5 h-3.5 text-cyan-400" />
             <span>Send EOF</span>
-            <kbd className="text-[10px] px-1 py-0.2 rounded bg-[var(--product-raised)] text-[var(--product-text-tertiary)]">^D</kbd>
+            <kbd className="text-[11px] px-1 py-0.2 rounded bg-[var(--product-raised)] text-[var(--product-text-tertiary)]">^D</kbd>
           </button>
 
           <button
             type="button"
             onClick={clearBuffer}
+            aria-label="Clear screen (clear buffer)"
             title="Clear Screen"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] hover:border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs transition-all active:scale-95"
           >
             <Trash2 className="w-3.5 h-3.5 text-indigo-400" />
             <span>Clear Buffer</span>
-            <kbd className="text-[10px] px-1 py-0.2 rounded bg-[var(--product-raised)] text-[var(--product-text-tertiary)]">^L</kbd>
+            <kbd className="text-[11px] px-1 py-0.2 rounded bg-[var(--product-raised)] text-[var(--product-text-tertiary)]">^L</kbd>
           </button>
 
           <button
             type="button"
             onClick={reconnectSession}
+            aria-label={live ? "Reconnect (close and open a new terminal session)" : "Reconnect (demo: simulated)"}
             title={live ? "Close and open a new terminal session" : "Demo: simulated reconnect"}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] hover:border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs transition-all active:scale-95"
           >
@@ -643,6 +709,7 @@ export const TerminalView: React.FC = () => {
           <button
             type="button"
             onClick={downloadLog}
+            aria-label="Export terminal log (.log)"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] hover:border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs transition-all active:scale-95"
           >
             <Download className="w-3.5 h-3.5" />
@@ -650,12 +717,6 @@ export const TerminalView: React.FC = () => {
           </button>
         </div>
       </div>
-
-      {reconnectNotice && (
-        <div role="status" className="p-3 rounded-xl bg-indigo-950/70 border border-indigo-500/40 text-xs font-mono text-indigo-300 text-center">
-          {reconnectNotice}
-        </div>
-      )}
 
       {/* Main Terminal Viewport */}
       <div ref={viewportRef} className="rounded-2xl bg-[#090d16] border border-[var(--product-line)] shadow-2xl overflow-hidden flex flex-col font-mono text-xs">
@@ -672,7 +733,7 @@ export const TerminalView: React.FC = () => {
 
           <div className="flex items-center gap-3 text-[11px] text-[var(--product-text-tertiary)]">
             <span className="px-2 py-0.5 rounded bg-[var(--product-canvas)] border border-[var(--product-line)] text-indigo-300">
-              {live ? `BUFFER: ${liveText.length} chars` : `BUFFER: ${lines.length} items`}
+              {live ? `BUFFER: ${number(liveText.length)} chars` : `BUFFER: ${number(lines.length)} items`}
             </span>
             <span>{live ? "plain text (ANSI stripped)" : "DEMO"}</span>
           </div>
@@ -743,7 +804,7 @@ export const TerminalView: React.FC = () => {
                 }
                 autoComplete="off"
                 spellCheck={false}
-                className="w-full bg-transparent text-[var(--product-text)] outline-none border-none p-0 m-0 font-mono text-xs placeholder-slate-600 focus:ring-0"
+                className="w-full bg-transparent text-[var(--product-text)] outline-none border-none p-0 m-0 font-mono text-xs placeholder:text-[var(--product-text-dim)] focus:ring-0"
               />
               <span className="inline-block w-2.5 h-4 bg-emerald-400 ml-1 animate-pulse"></span>
             </div>
@@ -760,9 +821,10 @@ export const TerminalView: React.FC = () => {
             <h3 className="text-sm font-bold text-[var(--product-text)]">Operational Snippets</h3>
           </div>
 
-          <div className="flex p-1 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] font-mono text-xs">
+          <div className="flex p-1 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] font-mono text-xs" role="group" aria-label="Snippet action">
             <button
               type="button"
+              aria-pressed={snippetMode === "insert"}
               onClick={() => setSnippetMode("insert")}
               className={`px-3 py-1.5 rounded-lg transition-all ${
                 snippetMode === "insert" ? "bg-indigo-600 text-white font-semibold shadow" : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
@@ -772,6 +834,7 @@ export const TerminalView: React.FC = () => {
             </button>
             <button
               type="button"
+              aria-pressed={snippetMode === "exec"}
               onClick={() => setSnippetMode("exec")}
               className={`px-3 py-1.5 rounded-lg transition-all ${
                 snippetMode === "exec" ? "bg-rose-600 text-white font-semibold shadow" : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"

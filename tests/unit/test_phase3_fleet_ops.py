@@ -92,6 +92,102 @@ def test_fleet_broadcast_command_execution(tmp_path):
     assert bcast_linux.json()["tasks"][0]["device_id"] == dev1["device_id"]
 
 
+def test_fleet_broadcast_cancel(tmp_path):
+    """UX-23: POST /api/fleet/broadcast/{batch_id}/cancel stops a batch.
+
+    Cancels queued tasks (which the agent claim path then never picks up),
+    leaves already-running tasks alone, is idempotent, 404s on an unknown
+    batch, and makes GET .../broadcast/{batch_id} report "cancelled".
+    """
+    import sqlite3
+
+    admin_token = "adm-tok-p3-cancel"
+    app = create_app(admin_token=admin_token, db_path=tmp_path / "control.db")
+    client = TestClient(app)
+    headers = {"X-Admin-Token": admin_token}
+
+    def broadcast():
+        res = client.post(
+            "/api/fleet/broadcast",
+            json={"tool": "get_system_info", "args": {}},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        return res.json()
+
+    def set_task_status(task_id, status):
+        con = sqlite3.connect(tmp_path / "control.db")
+        try:
+            con.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
+            con.commit()
+        finally:
+            con.close()
+
+    # Register 2 devices (1 Linux, 1 Windows)
+    client.post("/api/devices/enroll", json={"name": "web-01", "os": "Linux Debian 12"}, headers=headers)
+    client.post("/api/devices/enroll", json={"name": "win-01", "os": "Windows Server 2022"}, headers=headers)
+
+    # Unknown batch -> 404; no auth -> 401
+    assert client.post("/api/fleet/broadcast/doesnotexist/cancel", headers=headers).status_code == 404
+    assert client.post("/api/fleet/broadcast/doesnotexist/cancel").status_code == 401
+
+    # Cancel a fresh batch: both tasks queued -> both cancelled
+    bcast = broadcast()
+    batch_id = bcast["batch_id"]
+    assert [t["status"] for t in bcast["tasks"]] == ["queued", "queued"]
+    cancel_res = client.post(f"/api/fleet/broadcast/{batch_id}/cancel", headers=headers)
+    assert cancel_res.status_code == 200
+    cancel_info = cancel_res.json()
+    assert cancel_info["batch_id"] == batch_id
+    assert cancel_info["status"] == "cancelled"
+    assert cancel_info["cancelled"] == 2
+    assert cancel_info["still_running"] == 0
+    assert cancel_info["total_tasks"] == 2
+
+    # Poll now reports the batch cancelled (not "running" forever)
+    status_res = client.get(f"/api/fleet/broadcast/{batch_id}", headers=headers)
+    assert status_res.status_code == 200
+    status_info = status_res.json()
+    assert status_info["status"] == "cancelled"
+    assert status_info["cancelled"] == 2
+    assert status_info["total_tasks"] == 2
+
+    # Re-cancel is an idempotent 200 no-op
+    again_res = client.post(f"/api/fleet/broadcast/{batch_id}/cancel", headers=headers)
+    assert again_res.status_code == 200
+    assert again_res.json()["cancelled"] == 0
+    assert again_res.json()["status"] == "cancelled"
+
+    # A task already running is left alone; the batch stays "running"
+    # until it finishes, then reports "cancelled".
+    bcast2 = broadcast()
+    batch2 = bcast2["batch_id"]
+    running_task = bcast2["tasks"][0]["task_id"]
+    set_task_status(running_task, "running")
+    cancel2 = client.post(f"/api/fleet/broadcast/{batch2}/cancel", headers=headers)
+    assert cancel2.status_code == 200
+    assert cancel2.json()["cancelled"] == 1
+    assert cancel2.json()["still_running"] == 1
+    assert cancel2.json()["status"] == "cancelled"
+    status2 = client.get(f"/api/fleet/broadcast/{batch2}", headers=headers).json()
+    assert status2["status"] == "running"
+    assert status2["cancelled"] == 1
+    set_task_status(running_task, "completed")
+    status2_done = client.get(f"/api/fleet/broadcast/{batch2}", headers=headers).json()
+    assert status2_done["status"] == "cancelled"
+
+    # Cancelling a finished batch is a safe no-op reporting "completed"
+    bcast3 = broadcast()
+    batch3 = bcast3["batch_id"]
+    for t in bcast3["tasks"]:
+        set_task_status(t["task_id"], "completed")
+    cancel3 = client.post(f"/api/fleet/broadcast/{batch3}/cancel", headers=headers)
+    assert cancel3.status_code == 200
+    assert cancel3.json()["cancelled"] == 0
+    assert cancel3.json()["still_running"] == 0
+    assert cancel3.json()["status"] == "completed"
+
+
 def test_event_driven_trigger_and_self_healing(tmp_path):
     admin_token = "adm-tok-p3"
     app = create_app(admin_token=admin_token, db_path=tmp_path / "control.db")

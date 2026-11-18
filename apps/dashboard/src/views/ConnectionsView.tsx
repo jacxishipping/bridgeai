@@ -9,6 +9,8 @@ import { motion, AnimatePresence } from "motion/react";
 import { useScrollShadow } from "../hooks/useScrollShadow";
 import {
   GlassModal,
+  ConfirmDestructive,
+  EmptyState,
   JXCard,
   JXCardHeader,
   JXCardContent,
@@ -24,6 +26,7 @@ import {
   ProductStepProgress,
   ProductStatusDot,
 } from "../ui";
+import { Freshness } from "../components/Freshness";
 import {
   Network,
   Zap,
@@ -33,7 +36,6 @@ import {
   Activity,
   Layers,
   Terminal,
-  RotateCcw,
   CheckCircle2,
   XCircle,
   AlertTriangle,
@@ -49,7 +51,6 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api, apiOrigin, token, sessionToken, toIsoTimestamp } from "../api";
-import { PageEmpty } from "../components/PageEmpty";
 import { useDashboardStore } from "../state/dashboardStore";
 import type { MCPConnection, OAuthClient } from "../types/dashboard";
 
@@ -102,6 +103,10 @@ export const ConnectionsView: React.FC = () => {
   const oauthClients = useDashboardStore((s) => s.oauthClients);
   const refreshLive = useDashboardStore((s) => s.refreshLive);
   const navigate = useDashboardStore((s) => s.setCurrentView);
+  // UX-06: live sync state surfaced via Freshness in the header.
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
 
   const isLive = typeof window !== "undefined" && Boolean(token() || sessionToken());
   /** Control-plane origin for MCP/OAuth — not the static dashboard host. */
@@ -199,7 +204,9 @@ export const ConnectionsView: React.FC = () => {
   const [liveConn, setLiveConn] = useState<LiveConnectionsResponse | null>(null);
   const [isLoadingConn, setIsLoadingConn] = useState(false);
   const [connError, setConnError] = useState<string | null>(null);
-  const [confirmDeleteClientId, setConfirmDeleteClientId] = useState<string | null>(null);
+  const [pendingRevoke, setPendingRevoke] = useState<{ id: string; name: string; kind: "client" | "session" } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<OAuthClient | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const fetchLiveConnections = useCallback(async () => {
     if (!isLive) return;
@@ -232,9 +239,8 @@ export const ConnectionsView: React.FC = () => {
     }
   };
 
-  // Gateway secret rotation state
-  const [isRotatingSecret, setIsRotatingSecret] = useState(false);
-  const [rotateNotice, setRotateNotice] = useState<string | null>(null);
+  // Post-action notice slot (revocation results, connection errors).
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   // Demo-only AI Client Sessions (never displayed in live mode)
   const [demoSessions, setDemoSessions] = useState<ClientSession[]>(() => [
@@ -373,9 +379,6 @@ export const ConnectionsView: React.FC = () => {
 
   const sessions = isLive ? liveSessions : demoSessions;
 
-  // 2-step click confirmation to terminate session
-  const [confirmTerminateId, setConfirmTerminateId] = useState<string | null>(null);
-
   // Handshake interactive token generation state
   const [targetClientId, setTargetClientId] = useState<string>(
     effectiveOAuthClients[0]?.id || "ai-agent-orchestrator-01"
@@ -455,34 +458,12 @@ export const ConnectionsView: React.FC = () => {
   // Inspect Spec Modal
   const [inspectSpecStream, setInspectSpecStream] = useState<MCPConnection | null>(null);
 
-  const handleRotateSecret = async () => {
-    setIsRotatingSecret(true);
-    if (isLive) {
-      try {
-        await fetchLiveConnections();
-        setRotateNotice(
-          "Gateway secrets are managed by the control plane (AI_BRIDGE_ADMIN_TOKEN / JWT secret). Refreshed active token state."
-        );
-      } catch (err) {
-        setConnError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setIsRotatingSecret(false);
-      }
-      return;
-    }
-    setTimeout(() => {
-      setIsRotatingSecret(false);
-      setRotateNotice("Master Gateway Secret successfully rotated. New ephemeral keys deployed to all active SSE streams.");
-      setTimeout(() => setRotateNotice(null), 4000);
-    }, 800);
-  };
-
   const handleRevokeOAuthClient = async (clientId: string) => {
     if (isLive) {
       try {
         await api.deleteOAuthClient(clientId);
-        setRotateNotice(`OAuth client ${clientId} revoked.`);
-        setTimeout(() => setRotateNotice(null), 4000);
+        setActionNotice(`OAuth client ${clientId} revoked.`);
+        setTimeout(() => setActionNotice(null), 4000);
         await Promise.all([
           fetchLiveConnections(),
           refreshLive ? refreshLive() : Promise.resolve(),
@@ -495,23 +476,15 @@ export const ConnectionsView: React.FC = () => {
     }
   };
 
-  const handleTerminateSession = (sessionId: string) => {
-    if (confirmTerminateId === sessionId) {
-      // 2nd click: terminate / revoke
-      setConfirmTerminateId(null);
-      void handleRevokeOAuthClient(sessionId);
-    } else {
-      // 1st click: request confirmation
-      setConfirmTerminateId(sessionId);
-    }
-  };
-
-  const handleDeleteClientCard = (clientId: string) => {
-    if (confirmDeleteClientId === clientId) {
-      setConfirmDeleteClientId(null);
-      void handleRevokeOAuthClient(clientId);
-    } else {
-      setConfirmDeleteClientId(clientId);
+  const handleRenameClient = async () => {
+    if (!renameTarget || !renameValue.trim()) return;
+    const target = renameTarget;
+    setRenameTarget(null);
+    try {
+      await api.updateOAuthClient(target.id, { client_name: renameValue.trim() });
+      await fetchLiveConnections();
+    } catch (err) {
+      setConnError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -556,7 +529,13 @@ export const ConnectionsView: React.FC = () => {
                   Point MCP clients at this control plane. Use an admin bearer token for a quick test, or register OAuth clients for ChatGPT and other remote connectors.
                 </p>
               </div>
-              <ProductModePill live={isLive} detail={isLive ? "MCP ready" : "Connect for live MCP"} />
+              <div className="flex flex-col items-end gap-2">
+                <ProductModePill live={isLive} detail={isLive ? "MCP ready" : "Connect for live MCP"} />
+                {isLive && <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} />}
+                {isLive && syncState === "error" && syncError && (
+                  <span role="alert" className="text-xs text-rose-300">Sync failed: {syncError}</span>
+                )}
+              </div>
             </div>
             <ProductStepProgress
               steps={["Copy URL", "OAuth discovery", "Test tools"]}
@@ -640,8 +619,9 @@ export const ConnectionsView: React.FC = () => {
       </ProductGlass>
 
       {!isLive && (
-        <PageEmpty
+        <EmptyState
           demo
+          variant="card"
           title="Live MCP status needs a connected control plane"
           description="Demo cards below are sample sessions. Connect to probe /mcp and manage real OAuth clients."
           actionLabel="Connect server"
@@ -698,25 +678,6 @@ export const ConnectionsView: React.FC = () => {
                 Refresh
               </JXButton>
             )}
-            <JXButton
-              variant="outlined"
-              color="warning"
-              size="md"
-              loading={isRotatingSecret}
-              onClick={handleRotateSecret}
-              startIcon={<RotateCcw className="w-4 h-4" />}
-            >
-              Rotate secret
-            </JXButton>
-            <JXButton
-              variant="contained"
-              color="primary"
-              size="md"
-              onClick={handleSignToken}
-              startIcon={<KeyRound className="w-4 h-4" />}
-            >
-              Add client
-            </JXButton>
           </div>
         </div>
 
@@ -728,10 +689,10 @@ export const ConnectionsView: React.FC = () => {
           </div>
         )}
 
-        {rotateNotice && (
+        {actionNotice && (
           <div className="px-5 pb-4">
             <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-mono">
-              {rotateNotice}
+              {actionNotice}
             </div>
           </div>
         )}
@@ -770,15 +731,15 @@ export const ConnectionsView: React.FC = () => {
                   <div className="space-y-3 pt-1 text-xs font-mono">
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                       <div className="p-2 rounded bg-[var(--product-canvas)] border border-[var(--product-line)]/80">
-                        <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase block">Transport</span>
+                        <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase block">Transport</span>
                         <span className="text-[var(--product-text-secondary)] font-semibold">{conn.transport.toUpperCase()}</span>
                       </div>
                       <div className="p-2 rounded bg-[var(--product-canvas)] border border-[var(--product-line)]/80">
-                        <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase block">Subscribers</span>
+                        <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase block">Subscribers</span>
                         <span className="text-cyan-400 font-semibold">{conn.connectedClients} active</span>
                       </div>
                       <div className="p-2 rounded bg-[var(--product-canvas)] border border-[var(--product-line)]/80">
-                        <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase block">Throughput</span>
+                        <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase block">Throughput</span>
                         <span className="text-emerald-400 font-semibold">{conn.throughputReqMin} req/m</span>
                       </div>
                     </div>
@@ -809,18 +770,19 @@ export const ConnectionsView: React.FC = () => {
         />
         <JXCardContent>
           <div ref={tableScrollRef} tabIndex={0} role="region" aria-label="Client sessions" className="overflow-x-auto scroll-shadow rounded-xl border border-[var(--product-line)]" data-scroll-left={scrollShadow.left} data-scroll-right={scrollShadow.right}>
-            <table className="w-full text-left text-xs border-collapse font-mono">
+            <table className="w-full min-w-[720px] text-left text-xs border-collapse font-mono">
+              <caption className="sr-only">Active AI client sessions</caption>
               <thead>
                 <tr className="bg-[var(--product-canvas)] border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] uppercase">
-                  <th className="p-3 font-sans">Connected Application</th>
-                  <th className="p-3">PID & Route</th>
-                  <th className="p-3">Duration</th>
-                  <th className="p-3">Invocations</th>
-                  <th className="p-3">Negotiated Features</th>
-                  <th className="p-3 text-right">Actions</th>
+                  <th scope="col" className="p-3 font-sans">Connected Application</th>
+                  <th scope="col" className="p-3">PID & Route</th>
+                  <th scope="col" className="p-3">Duration</th>
+                  <th scope="col" className="p-3">Invocations</th>
+                  <th scope="col" className="p-3">Negotiated Features</th>
+                  <th scope="col" className="p-3 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800/60">
+              <tbody className="divide-y divide-[var(--product-line)]">
                 {sessions.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="p-6 text-center text-[var(--product-text-tertiary)] font-sans">
@@ -847,7 +809,7 @@ export const ConnectionsView: React.FC = () => {
                           {sess.features.map((feat) => (
                             <span
                               key={feat}
-                              className="px-1.5 py-0.5 rounded bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] text-[10px]"
+                              className="px-1.5 py-0.5 rounded bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] text-[11px]"
                             >
                               {feat}
                             </span>
@@ -856,13 +818,13 @@ export const ConnectionsView: React.FC = () => {
                       </td>
                       <td className="p-3 text-right">
                         <JXButton
-                          variant={confirmTerminateId === sess.id ? "contained" : "soft"}
+                          variant="soft"
                           color="error"
                           size="sm"
-                          onClick={() => handleTerminateSession(sess.id)}
+                          onClick={() => setPendingRevoke({ id: sess.id, name: `${sess.name} session (${sess.id})`, kind: "session" })}
                           startIcon={<Trash2 className="w-3.5 h-3.5" />}
                         >
-                          {confirmTerminateId === sess.id ? "Click to Confirm" : "Terminate"}
+                          Terminate
                         </JXButton>
                       </td>
                     </tr>
@@ -886,10 +848,11 @@ export const ConnectionsView: React.FC = () => {
             <JXCardContent>
               <div className="space-y-3 font-mono text-xs">
                 {effectiveOAuthClients.length === 0 ? (
-                  <div className="p-4 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-tertiary)] font-sans">
-                    No OAuth 2.1 clients registered yet. Clients register dynamically via{" "}
-                    <code className="font-mono text-indigo-400">{browserOrigin}/oauth/register</code>.
-                  </div>
+                  <EmptyState
+                    variant="bare"
+                    title="No OAuth 2.1 clients registered yet"
+                    description="Clients register dynamically via the /oauth/register endpoint."
+                  />
                 ) : (
                   effectiveOAuthClients.map((client) => (
                     <div
@@ -905,7 +868,7 @@ export const ConnectionsView: React.FC = () => {
                         </div>
                         <div className="flex items-center gap-2">
                           <span
-                            className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
+                            className={`px-2 py-0.5 rounded text-[11px] uppercase font-bold ${
                               client.status === "active"
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                                 : "bg-rose-500/20 text-rose-300 border border-rose-500/40"
@@ -918,29 +881,20 @@ export const ConnectionsView: React.FC = () => {
                               variant="soft"
                               color="neutral"
                               size="sm"
-                              onClick={async () => {
-                                const nextName = typeof window !== "undefined" ? window.prompt("New OAuth client name:", client.clientName) : null;
-                                if (!nextName || !nextName.trim()) return;
-                                try {
-                                  await api.updateOAuthClient(client.id, { client_name: nextName.trim() });
-                                  await fetchLiveConnections();
-                                } catch (err) {
-                                  setConnError(err instanceof Error ? err.message : String(err));
-                                }
-                              }}
+                              onClick={() => { setRenameTarget(client); setRenameValue(client.clientName); }}
                             >
                               Rename
                             </JXButton>
                           )}
                           {isLive && (
                             <JXButton
-                              variant={confirmDeleteClientId === client.id ? "contained" : "soft"}
+                              variant="soft"
                               color="error"
                               size="sm"
-                              onClick={() => handleDeleteClientCard(client.id)}
+                              onClick={() => setPendingRevoke({ id: client.id, name: `${client.clientName} (${client.id})`, kind: "client" })}
                               startIcon={<Trash2 className="w-3.5 h-3.5" />}
                             >
-                              {confirmDeleteClientId === client.id ? "Confirm Revoke" : "Revoke"}
+                              Revoke
                             </JXButton>
                           )}
                         </div>
@@ -950,7 +904,7 @@ export const ConnectionsView: React.FC = () => {
                         {client.scopes.map((s) => (
                           <span
                             key={s}
-                            className="px-2 py-0.5 rounded bg-[var(--product-surface)] border border-[var(--product-line)] text-indigo-300 text-[10px]"
+                            className="px-2 py-0.5 rounded bg-[var(--product-surface)] border border-[var(--product-line)] text-indigo-300 text-[11px]"
                           >
                             {s}
                           </span>
@@ -977,10 +931,16 @@ export const ConnectionsView: React.FC = () => {
               icon={<Sparkles className="w-5 h-5 text-cyan-400" />}
             />
             <JXCardContent>
-              {isLive && effectiveOAuthClients.length === 0 ? (
+              {/* UX-08: the dashboard never signs or issues real tokens. In live
+                  mode there is no sign form at all — clients register via
+                  /oauth/register and tokens are issued by the control plane.
+                  The demo form below is a labelled simulation only. */}
+              {isLive ? (
                 <div className="space-y-3 text-xs">
                   <p className="text-[var(--product-text-tertiary)]">
-                    No OAuth clients registered on this control plane yet. Verify discovery above, then register chatbot clients with the setup script.
+                    Tokens are issued by the control plane — the dashboard never signs or issues tokens in the browser. Clients register dynamically via{" "}
+                    <code className="font-mono text-indigo-400">{browserOrigin}/oauth/register</code>
+                    {effectiveOAuthClients.length === 0 ? " (none registered yet)" : ""}.
                   </p>
                   <pre className="overflow-x-auto rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] p-3 text-[11px] text-emerald-300 font-mono">
 {`python scripts/setup_mcp_chatbots.py \\
@@ -993,9 +953,13 @@ export const ConnectionsView: React.FC = () => {
                 </div>
               ) : (
               <div className="space-y-4 text-xs font-mono">
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300">
+                  Simulated — no real token is issued
+                </div>
                 <div>
-                  <label className="block text-[var(--product-text-tertiary)] mb-1">Target Client ID</label>
+                  <label htmlFor="demo-target-client" className="block text-[var(--product-text-tertiary)] mb-1">Target Client ID</label>
                   <select
+                    id="demo-target-client"
                     aria-label="Target OAuth client"
                     value={targetClientId}
                     onChange={(e) => setTargetClientId(e.target.value)}
@@ -1015,7 +979,7 @@ export const ConnectionsView: React.FC = () => {
 
                 <div>
                   <label className="block text-[var(--product-text-tertiary)] mb-1.5">Scope Entitlements</label>
-                  <div className="grid grid-cols-2 gap-2 p-3 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)]">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-3 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)]">
                     {["fleet:read", "mcp:stream", "fleet:execute:tier2", "system:telemetry"].map(
                       (scope) => (
                         <label key={scope} className="flex items-center gap-2 cursor-pointer">
@@ -1040,7 +1004,7 @@ export const ConnectionsView: React.FC = () => {
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-[var(--product-text-tertiary)]">Live Signed JWT Bearer Token</span>
+                    <span className="text-[var(--product-text-tertiary)]">Simulated token preview — no real token is issued</span>
                     <JXButton
                       variant="soft"
                       color="primary"
@@ -1070,7 +1034,7 @@ export const ConnectionsView: React.FC = () => {
                     onClick={handleSignToken}
                     startIcon={<KeyRound className="w-4 h-4" />}
                   >
-                    Test Handshake & Sign Token
+                    Simulate handshake (demo)
                   </JXButton>
                 </div>
               </div>
@@ -1123,7 +1087,7 @@ export const ConnectionsView: React.FC = () => {
                 <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span
-                      className={`px-1.5 py-0.2 rounded text-[10px] uppercase font-bold ${
+                      className={`px-1.5 py-0.2 rounded text-[11px] uppercase font-bold ${
                         frame.direction === "inbound"
                           ? "bg-cyan-500/20 text-cyan-300"
                           : "bg-emerald-500/20 text-emerald-300"
@@ -1205,6 +1169,50 @@ export const ConnectionsView: React.FC = () => {
           </GlassModal>
         )}
       </AnimatePresence>
+
+      {pendingRevoke && (
+        <ConfirmDestructive
+          open
+          title={pendingRevoke.kind === "client" ? "Revoke OAuth client" : "Terminate session"}
+          objectName={pendingRevoke.name}
+          consequence={
+            pendingRevoke.kind === "client"
+              ? "Revoking this client invalidates its refresh tokens. Any chatbot using this client will be disconnected and must re-register."
+              : "Terminating this session ends the client's MCP stream immediately."
+          }
+          confirmLabel={pendingRevoke.kind === "client" ? "Revoke client" : "Terminate session"}
+          onConfirm={() => { const id = pendingRevoke.id; setPendingRevoke(null); void handleRevokeOAuthClient(id); }}
+          onCancel={() => setPendingRevoke(null)}
+        />
+      )}
+
+      {renameTarget && (
+        <GlassModal onClose={() => setRenameTarget(null)} title={`Rename ${renameTarget.clientName}`}>
+          <form onSubmit={(e) => { e.preventDefault(); void handleRenameClient(); }} className="space-y-4">
+            <div>
+              <label htmlFor="rename-client-name" className="text-[var(--product-text-tertiary)] uppercase text-[11px] block mb-1">
+                New OAuth client name <span aria-hidden="true" className="text-rose-400">*</span><span className="sr-only"> (required)</span>
+              </label>
+              <input
+                id="rename-client-name"
+                type="text"
+                required
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <JXButton variant="outlined" color="neutral" size="md" onClick={() => setRenameTarget(null)}>
+                Cancel
+              </JXButton>
+              <JXButton variant="contained" color="primary" size="md" type="submit">
+                Rename client
+              </JXButton>
+            </div>
+          </form>
+        </GlassModal>
+      )}
     </div>
   );
 };

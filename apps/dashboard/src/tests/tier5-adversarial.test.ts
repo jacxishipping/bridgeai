@@ -495,11 +495,12 @@ export async function runTier5AdversarialTests(): Promise<{ total: number; passe
   await test('4.5: App.tsx defensive device fallback eliminates empty inventory null dereference', () => {
     const appSource = fs.readFileSync(path.join(SRC_DIR, 'App.tsx'), 'utf8');
 
-    // App.tsx line 51-52:
+    // App.tsx (UX-27): the fallback must never invent a hostname — an
+    // unknown device is labelled "Unknown device", not a seed hostname.
     // const selectedDevice = devices.find((d) => d.id === selectedDeviceId) || devices[0];
-    // const selectedHostname = selectedDevice?.hostname || "srv-us-east-412";
+    // const selectedHostname = selectedDevice?.hostname || "Unknown device";
     assert.ok(
-      appSource.includes('selectedDevice?.hostname || "srv-us-east-412"'),
+      appSource.includes('selectedDevice?.hostname || "Unknown device"'),
       'App.tsx must use defensive fallback for selectedHostname'
     );
 
@@ -507,9 +508,9 @@ export async function runTier5AdversarialTests(): Promise<{ total: number; passe
     const devicesEmpty: EnrolledDevice[] = [];
     const selectedDeviceId = 'srv-us-east-412';
     const selectedDevice = devicesEmpty.find((d) => d.id === selectedDeviceId) || devicesEmpty[0];
-    const selectedHostname = selectedDevice?.hostname || 'srv-us-east-412';
+    const selectedHostname = selectedDevice?.hostname || 'Unknown device';
 
-    assert.strictEqual(selectedHostname, 'srv-us-east-412', 'Must fallback cleanly to default hostname');
+    assert.strictEqual(selectedHostname, 'Unknown device', 'Must fallback cleanly to an explicit unknown-device label');
   });
 
   await test('4.6: Device360View guards the empty devices array (no unguarded selectedDevice dereference)', () => {

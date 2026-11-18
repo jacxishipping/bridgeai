@@ -18,6 +18,8 @@ import {
   JXGrid,
   JXGridItem,
   JXLinearProgress,
+  StatusBadge,
+  EmptyState,
 } from "../ui";
 import {
   Terminal,
@@ -44,6 +46,9 @@ import {
 } from "lucide-react";
 import { api, token, sessionToken } from "../api";
 import { useDashboardStore } from "../state/dashboardStore";
+import { pushNotice } from "../state/notices";
+import { Freshness } from "../components/Freshness";
+import { useLanguage } from "../i18n";
 import type { LogRecord } from "../types/dashboard";
 
 interface StructuredLogEntry {
@@ -133,6 +138,12 @@ export const DiagnosticsLogsView: React.FC = () => {
   const storeLogs = useDashboardStore((s) => s.logs);
   const setCurrentView = useDashboardStore((s) => s.setCurrentView);
   const refreshLive = useDashboardStore((s) => s.refreshLive);
+  // UX-06: sync freshness in the header when live; UX-29: timestamps and
+  // relative times go through useLanguage().date with an explicit timeZone.
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
+  const { date } = useLanguage();
 
   const isLive = typeof window !== "undefined" && Boolean(token() || sessionToken());
 
@@ -150,11 +161,28 @@ export const DiagnosticsLogsView: React.FC = () => {
   const [liveServiceLogs, setLiveServiceLogs] = useState<StructuredLogEntry[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState<boolean>(false);
   const [logFetchError, setLogFetchError] = useState<string | null>(null);
+  // UX-18: a 401 clears the credential, which would otherwise make this
+  // view silently fall back to the seed demo logs. Show an expired state
+  // instead of seed data.
+  const [expired, setExpired] = useState(false);
+
+  // UX-20: the regex filter is validated as typed; an invalid pattern is
+  // a field error (aria-invalid + aria-describedby), not a silent fallback.
+  const regexError = useMemo(() => {
+    if (!regexQuery) return null;
+    try {
+      new RegExp(regexQuery, "i");
+      return null;
+    } catch {
+      return "That regular expression is invalid — showing plain-text matches instead. Fix the pattern to filter by regex.";
+    }
+  }, [regexQuery]);
 
   const backendService = useMemo(() => mapToBackendService(targetService), [targetService]);
 
   const fetchServiceLogs = useCallback(async () => {
     if (!isLive) return;
+    const wasLive = Boolean(token() || sessionToken());
     setIsLoadingLogs(true);
     setLogFetchError(null);
     try {
@@ -170,8 +198,31 @@ export const DiagnosticsLogsView: React.FC = () => {
         .filter((l) => l !== null && l !== undefined && String(l).trim() !== "")
         .map((l, idx) => parseRawLogLine(l, idx, backendService, targetService));
       setLiveServiceLogs(parsed);
+      setExpired(false);
     } catch (err) {
-      setLogFetchError(err instanceof Error ? err.message : "Failed to load service logs.");
+      // UX-18: map common statuses to plain language with a next step.
+      const status = (err as { status?: number })?.status;
+      if (wasLive && status === 401) {
+        setExpired(true);
+        setLogFetchError(null);
+        pushNotice({
+          tone: "error",
+          title: "Your session expired",
+          message: "Sign in again to keep streaming live logs.",
+          actionLabel: "Sign in",
+          actionHref: "#/login",
+        });
+        return;
+      }
+      setLogFetchError(
+        status === 403
+          ? "Access denied (403). Your account may lack permission to read service logs — ask an admin to check your role."
+          : status === 429
+            ? "Too many requests (429). Wait a minute, then use Retry."
+            : status && status >= 500
+              ? `Control plane error (${status}). The log service failed — use Retry, and check the audit trail if the problem persists.`
+              : err instanceof Error ? err.message : "Failed to load service logs."
+      );
     } finally {
       setIsLoadingLogs(false);
     }
@@ -328,10 +379,11 @@ export const DiagnosticsLogsView: React.FC = () => {
   );
 
   const activeLogs: StructuredLogEntry[] = useMemo(() => {
+    if (expired) return [];
     if (!isLive) return defaultLogs;
     const realStoreLogs = mappedStoreLogs.filter((l) => !SEED_STORE_LOG_IDS.has(l.id));
     return [...liveServiceLogs, ...realStoreLogs];
-  }, [isLive, defaultLogs, liveServiceLogs, mappedStoreLogs]);
+  }, [expired, isLive, defaultLogs, liveServiceLogs, mappedStoreLogs]);
 
   // Initialize selected entry
   useEffect(() => {
@@ -416,6 +468,34 @@ export const DiagnosticsLogsView: React.FC = () => {
 
   return (
     <div className="space-y-4">
+      {/* UX-36: explicit top-level heading (this view previously had none). */}
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="space-y-1">
+          <h1 className="text-xl font-semibold text-[var(--product-text)]">Diagnostics &amp; logs</h1>
+          <p className="text-xs text-[var(--product-text-tertiary)]">
+            Live service logs from the control plane{isLive ? "" : " — sign in to stream live logs; the entries below are samples"}.
+            Press Space to pause or resume the stream.
+          </p>
+        </div>
+        {isLive && (
+          <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} label="Updated" />
+        )}
+      </header>
+      {isLive && syncState === "error" && !expired && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-700/50 bg-rose-950/30 px-4 py-2 text-xs text-rose-300">
+          <span>Sync with the control plane failed{syncError ? `: ${syncError}` : "."} Showing the last known data.</span>
+          <JXButton variant="outlined" color="neutral" size="sm" onClick={() => void refreshLive?.()}>Retry</JXButton>
+        </div>
+      )}
+      {expired && (
+        <EmptyState
+          variant="card"
+          title="Your session expired"
+          description="Sign in again to resume the live log stream. Sample entries are hidden until you do, so nothing here can be mistaken for live data."
+          actionLabel="Sign in"
+          onAction={() => setCurrentView("login")}
+        />
+      )}
       {/* Status Ribbon with Ingest EPS and Ring Buffer Meter */}
       <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)]">
         <div className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 text-xs font-mono">
@@ -474,10 +554,11 @@ export const DiagnosticsLogsView: React.FC = () => {
         </div>
 
         {logFetchError && (
-          <div className="px-4 pb-3">
-            <div role="alert" className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-4 pb-3">
+            <div role="alert" className="min-w-0 flex-1 rounded-lg bg-rose-500/10 border border-rose-500/30 p-2.5 text-rose-300 text-xs font-mono">
               {logFetchError}
             </div>
+            <JXButton variant="outlined" color="neutral" size="sm" onClick={() => void fetchServiceLogs()}>Retry</JXButton>
           </div>
         )}
       </JXCard>
@@ -526,25 +607,30 @@ export const DiagnosticsLogsView: React.FC = () => {
             <div className="relative">
               <input
                 type="text"
-                placeholder="Regex search pattern..."
+                id="logs-regex-filter"
+                aria-label="Search logs by regex pattern"
+                aria-invalid={Boolean(regexError)}
+                aria-describedby={regexError ? "logs-regex-error" : undefined}
+                placeholder="Regex search pattern, e.g. ERROR|WARN"
                 value={regexQuery}
                 onChange={(e) => setRegexQuery(e.target.value)}
-                className="p-2 pr-16 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] placeholder-slate-500 focus:outline-none w-64"
+                className="p-2 pr-16 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] placeholder:text-[var(--product-text-dim)] focus:outline-none w-64"
               />
-              <span className="absolute right-2 top-2 px-1 rounded bg-[var(--product-raised)] text-[10px] text-indigo-400 font-bold">
+              <span className="absolute right-2 top-2 px-1 rounded bg-[var(--product-raised)] text-[11px] text-indigo-400 font-bold">
                 .* REGEX
               </span>
             </div>
           </div>
 
           {/* Log Level Pills */}
-          <div className="flex items-center gap-1.5 p-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)]">
+          <div className="flex items-center gap-1.5 p-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)]" role="group" aria-label="Filter by log level">
             {["ALL", "DEBUG", "INFO", "WARN", "ERROR"].map((lvl) => (
               <button
                 key={lvl}
                 type="button"
+                aria-pressed={logLevelFilter === lvl}
                 onClick={() => setLogLevelFilter(lvl)}
-                className={`px-2.5 py-1 rounded text-[11px] font-bold transition-colors ${
+                className={`min-h-11 px-2.5 py-1 rounded text-[11px] font-bold transition-colors ${
                   logLevelFilter === lvl
                     ? "bg-indigo-600 text-white"
                     : "text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
@@ -556,16 +642,16 @@ export const DiagnosticsLogsView: React.FC = () => {
           </div>
         </div>
 
+        {regexError && (
+          <p id="logs-regex-error" role="alert" className="px-4 pb-3 text-xs text-amber-300">{regexError}</p>
+        )}
+
         {activeTraceFilter && (
           <div className="px-4 pb-3 flex items-center justify-between text-xs font-mono text-cyan-300">
             <span>Filtered by Distributed Trace ID: {activeTraceFilter}</span>
-            <button
-              type="button"
-              onClick={() => setActiveTraceFilter(null)}
-              className="text-rose-400 hover:underline"
-            >
+            <JXButton variant="text" color="neutral" size="sm" onClick={() => setActiveTraceFilter(null)}>
               Clear Trace Filter
-            </button>
+            </JXButton>
           </div>
         )}
       </JXCard>
@@ -593,14 +679,23 @@ export const DiagnosticsLogsView: React.FC = () => {
             <JXCardContent>
               <div className="p-3 space-y-1 font-mono text-xs max-h-[520px] overflow-y-auto leading-relaxed">
                 {filteredLogs.length === 0 ? (
-                  <div className="p-6 text-center text-[var(--product-text-tertiary)]">
-                    {isLoadingLogs
-                      ? `Loading ${backendService} service logs...`
-                      : `No log records match the current filter (${backendService}).`}
-                  </div>
+                  <EmptyState
+                    variant="bare"
+                    title={isLoadingLogs ? `Loading ${backendService} service logs…` : `No log records match the current filter (${backendService}).`}
+                    description={isLoadingLogs ? undefined : "Try a different level, service, or regex — or clear the filters to see everything again."}
+                    actionLabel={isLoadingLogs ? undefined : "Clear filters"}
+                    onAction={isLoadingLogs ? undefined : handleFlushBuffer}
+                  />
                 ) : (
                   filteredLogs.map((log) => {
                     const isSelected = selectedEntry?.id === log.id;
+                    // UX-29: timestamps go through useLanguage().date with
+                    // an explicit timeZone (default: the user's local zone).
+                    const logDate = new Date(log.timestamp);
+                    const timeLabel = Number.isNaN(logDate.getTime())
+                      ? log.timestamp.slice(11, 23)
+                      : `${date(logDate, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}.${String(logDate.getMilliseconds()).padStart(3, "0")}`;
+                    const levelStatus = log.level === "ERROR" || log.level === "FATAL" ? "error" : log.level === "WARN" ? "warning" : log.level === "INFO" ? "info" : "neutral";
                     return (
                       <div
                         key={log.id}
@@ -616,22 +711,10 @@ export const DiagnosticsLogsView: React.FC = () => {
                             : "hover:bg-[var(--product-canvas)]/60 text-[var(--product-text-secondary)]"
                         }`}
                       >
-                        <span className="text-[var(--product-text-tertiary)] text-[11px] shrink-0">{log.timestamp.slice(11, 23)}</span>
+                        <span className="text-[var(--product-text-tertiary)] text-[11px] shrink-0" title={Number.isNaN(logDate.getTime()) ? log.timestamp : date(logDate, { dateStyle: "medium", timeStyle: "medium" })}>{timeLabel}</span>
                         <span className="text-indigo-400 font-semibold shrink-0">[{log.workerThread}]</span>
                         <span className="text-cyan-400 font-semibold shrink-0">[{log.moduleTag}]</span>
-                        <span
-                          className={`px-1.5 py-0.2 rounded text-[10px] font-bold uppercase shrink-0 ${
-                            log.level === "INFO"
-                              ? "bg-emerald-500/20 text-emerald-300"
-                              : log.level === "DEBUG"
-                              ? "bg-[var(--product-raised)] text-[var(--product-text-tertiary)]"
-                              : log.level === "WARN"
-                              ? "bg-amber-500/20 text-amber-300"
-                              : "bg-rose-500/20 text-rose-300"
-                          }`}
-                        >
-                          {log.level}
-                        </span>
+                        <StatusBadge status={levelStatus} label={log.level} />
                         <span className="break-all">{log.message}</span>
                       </div>
                     );
@@ -691,7 +774,7 @@ export const DiagnosticsLogsView: React.FC = () => {
 
                   {/* Formatted JSON Payload Attributes */}
                   <div className="space-y-1.5">
-                    <span className="text-[10px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
+                    <span className="text-[11px] text-[var(--product-text-tertiary)] uppercase tracking-wider block">
                       Parsed Structured Attributes
                     </span>
                     <pre className="p-3 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[11px] text-[var(--product-text-secondary)] overflow-x-auto max-h-56 overflow-y-auto">
@@ -701,9 +784,8 @@ export const DiagnosticsLogsView: React.FC = () => {
 
                 </div>
               ) : (
-                <div className="p-8 text-center text-[var(--product-text-tertiary)] text-sm">
-                  Select a log to see its details.
-                </div>
+                <EmptyState variant="bare" title="No log selected"
+                  description="Select a log entry to see its service, worker, trace ID, and parsed attributes here." />
               )}
             </JXCardContent>
           </JXCard>

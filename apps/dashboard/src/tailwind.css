@@ -2,6 +2,35 @@
 @source "../node_modules/@jacxishippingorg/jx-ui-react";
 @custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
 
+/* UX-39: the monospace face is a system stack, defined once here as the
+   --font-mono token (Tailwind v4 @theme) — every `font-mono` use resolves
+   through it, so monospace rendering never depends on a font asset that
+   is not in the repo (JetBrains Mono is only a webfont link in index.html,
+   pinned by test R2.2; if it fails to load, this stack still renders).
+   The JXUI library's own --jx-font-mono token is overridden to the same
+   stack below for the same reason. */
+@theme {
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* UX-24 — TYPE SCALE (3 steps; 11px is the minimum for UI chrome).
+   No text may be smaller than 11px: use text-[11px] for dense chrome
+   (labels, badges, mono metadata), text-xs (12px) for body copy, and
+   text-sm (14px) for larger body text. The 10px arbitrary size is
+   banned — the 11px minimum was adopted in the UX-24 residual (Nov
+   2026); there is no named 11px token because text-[11px] is already
+   the established convention (used ~260 times), so do not introduce a
+   second spelling. */
+
+/* UX-24 — RADIUS STANDARD. Cards = rounded-xl (JXCard forces
+   rounded-xl!, ProductGlass and GlassModal use rounded-xl); buttons =
+   rounded-md (JXButton forces rounded-md!). rounded-full is reserved
+   for deliberate shapes only — pills, avatars, status dots, toggle
+   knobs — never for cards or buttons. rounded-lg/rounded stay on
+   small chips and inputs where they are deliberate. Do not add a new
+   card/button radius; if a surface looks wrong at rounded-xl/rounded-md,
+   fix the surface, not the standard. */
+
 /* Sticky primary actions on small viewports (dense Execute screens). */
 @layer components {
   .product-mobile-actions {
@@ -22,6 +51,10 @@
 
 /* Dark theme (default) */
 :root, [data-theme="dark"] {
+  /* UX-39: JXUI's --jx-font-mono names JetBrains Mono; point it at the
+     same system stack so library components do not depend on the webfont.
+     (--font-mono itself is set in @theme above, which emits it on :root.) */
+  --jx-font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --product-canvas: #0b111b;
   --product-surface: #111b29;
   --product-raised: #192639;
@@ -31,6 +64,8 @@
   --product-text-secondary: #cbd5e1;
   --product-text-tertiary: #94a3b8;
   --product-text-dim: #7c8ba1;
+  --product-text-primary: #edf2fa;
+  --product-danger: #f87171;
   --product-accent: #2563eb;
   --product-accent-hover: #1d4ed8;
   --product-accent-soft: #142642;
@@ -77,7 +112,10 @@
   --product-text: #0f172a;
   --product-text-secondary: #334155;
   --product-text-tertiary: #475569;
-  --product-text-dim: #94a3b8;
+  /* UX-12: was #94a3b8 (2.56:1 on white, fails AA); #64748b is ~4.76:1. */
+  --product-text-dim: #64748b;
+  --product-text-primary: #0f172a;
+  --product-danger: #dc2626;
   --product-accent: #2563eb;
   --product-accent-hover: #1d4ed8;
   --product-accent-soft: #dbeafe;
@@ -141,6 +179,15 @@
 }
 
 @layer utilities {
+  /* Hide scrollbars while keeping the element scrollable (UX-30: the
+     scrollbar-hide class was previously used but never defined). */
+  .scrollbar-hide {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
   /* Scroll-shadow indicator for horizontally scrollable tables */
   .scroll-shadow {
     position: relative;

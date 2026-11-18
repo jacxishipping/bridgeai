@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { ArrowRight, KeyRound, UserRound } from "lucide-react";
-import { FrostedGlass, JXAlert, JXButton, JXCardContent, JXTextField, JXLinearProgress, ShimmerButton } from "../ui";
+import { ArrowRight, Eye, EyeOff, KeyRound, UserRound } from "lucide-react";
+import { FrostedGlass, JXAlert, JXButton, JXCardContent, JXTextField } from "../ui";
 import { Brand, BrandArt } from "../Brand";
 import { api, apiOrigin, authenticate, probeControlHealth } from "../api";
 import { dashboardStore, useDashboardStore } from "../state/dashboardStore";
@@ -8,18 +8,21 @@ import { LanguageControl } from "../LanguageControl";
 import { ThemeControl } from "../ThemeControl";
 import { useLanguage } from "../i18n";
 
-function passwordStrength(password: string): { score: number; label: string; color: string } {
-  let score = 0;
-  if (password.length >= 8) score++;
-  if (password.length >= 12) score++;
-  if (/[A-Z]/.test(password)) score++;
-  if (/[a-z]/.test(password)) score++;
-  if (/[0-9]/.test(password)) score++;
-  if (/[^A-Za-z0-9]/.test(password)) score++;
-  const clamped = Math.min(4, Math.floor(score / 1.5));
-  const labels = ["Very weak", "Weak", "Fair", "Strong", "Very strong"];
-  const colors = ["rose", "rose", "amber", "emerald", "emerald"];
-  return { score: clamped, label: labels[clamped], color: colors[clamped] };
+/**
+ * Map a sign-in failure to actionable copy (UX-26 / UX-18). A 401 means
+ * the credential itself was rejected; a network failure means the control
+ * plane could not be reached at all — the next step differs, so the copy
+ * must say which one happened instead of echoing the raw server string.
+ */
+function describeSignInError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : "Sign-in failed. Please try again.";
+  if (/401|unauthorized|session expired/i.test(raw)) {
+    return "Your token or account was rejected (401). Ask an admin to check the token or re-enable your account, then try again.";
+  }
+  if (/cannot reach|timed out|timeout|network|failed to fetch|econnrefused/i.test(raw)) {
+    return `${raw} Check that the control plane is running and reachable from this browser, then try again.`;
+  }
+  return raw;
 }
 
 export const LoginView: React.FC = () => {
@@ -29,11 +32,19 @@ export const LoginView: React.FC = () => {
   const [token, setToken] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  // Show/hide toggles for the secret fields (UX-21): a mistyped token or
+  // password is invisible otherwise, and there is no other way to verify it.
+  const [showToken, setShowToken] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [ssoConfigured, setSsoConfigured] = useState(false);
   const [health, setHealth] = useState<{ ok: boolean; detail: string; version?: string } | null>(null);
   const [probing, setProbing] = useState(true);
+  // UX-26: a failed health probe is a warning, not a block. The probe is
+  // best-effort (cold-start hosts are slow); the sign-in attempt itself is
+  // the real test, and its error is what the user needs to see.
+  const [probeWarning, setProbeWarning] = useState("");
   useEffect(() => {
     let active = true;
     api.oidcConfigured().then((data) => { if (active) setSsoConfigured(Boolean(data.enabled)); }).catch(() => {});
@@ -52,18 +63,21 @@ export const LoginView: React.FC = () => {
     event.preventDefault();
     setBusy(true);
     setError("");
+    setProbeWarning("");
     try {
+      // Best-effort preflight: record a probe failure as a warning and
+      // attempt sign-in anyway instead of throwing preflight.detail.
       const preflight = await probeControlHealth();
       setHealth(preflight);
       if (!preflight.ok) {
-        throw new Error(preflight.detail);
+        setProbeWarning(`${preflight.detail} Trying sign-in anyway — the probe can fail on slow or waking hosts while sign-in still works.`);
       }
       await authenticate(method === "token" ? { token: token.trim() } : { username: username.trim(), password });
       // A successful sign-in lands on the live control plane, not the demo overview.
       await dashboardStore.refreshLive();
       navigate("live");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sign-in failed. Please try again.");
+      setError(describeSignInError(err));
     } finally { setBusy(false); }
   };
 
@@ -92,53 +106,61 @@ export const LoginView: React.FC = () => {
               </p>
             </div>
             {error && <div lang="en" dir="ltr"><JXAlert severity="error" title="Unable to sign in" description={error} /></div>}
-            {!probing && health && !health.ok && !error && (
+            {!probing && health && !health.ok && !error && !probeWarning && (
               <div lang="en" dir="ltr"><JXAlert severity="warning" title="Control plane unreachable" description={health.detail} /></div>
             )}
+            {probeWarning && (
+              <div lang="en" dir="ltr"><JXAlert severity="warning" title="Control plane probe failed" description={probeWarning} /></div>
+            )}
             <form className="space-y-4" onSubmit={submit}>
-              {method === "token" ? <><JXTextField label={t("Admin token")} type="password" value={token} onChange={setToken}
-                required autoComplete="off" clearable={false} />
+              {method === "token" ? <>
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <JXTextField label={t("Admin token")} type={showToken ? "text" : "password"} value={token} onChange={setToken}
+                      required autoComplete="off" clearable={false} />
+                  </div>
+                  <JXButton type="button" variant="outlined" color="neutral" size="sm" className="mt-6 min-h-11 shrink-0"
+                    aria-pressed={showToken} aria-label={showToken ? "Hide admin token" : "Show admin token"}
+                    title={showToken ? "Hide admin token" : "Show admin token"}
+                    onClick={() => setShowToken((prev) => !prev)}>
+                    {showToken ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                  </JXButton>
+                </div>
                 <p lang="en" dir="ltr" className="text-xs text-[color:var(--product-text-tertiary)]">Use the AI_BRIDGE_ADMIN_TOKEN configured on your server.</p></> :
                 <>
                   <JXTextField label={t("Username")} value={username} onChange={setUsername} required autoComplete="username" clearable={false} />
-                  <div className="space-y-1">
-                    <JXTextField label={t("Password")} type="password" value={password} onChange={setPassword} required autoComplete="current-password" clearable={false} />
-                    {method === "password" && password.length > 0 && (
-                      <div className="space-y-1" aria-live="polite">
-                        <JXLinearProgress
-                          value={(passwordStrength(password).score + 1) * 20}
-                        />
-                        <p className="text-[11px] text-[color:var(--product-text-tertiary)]">{passwordStrength(password).label}</p>
-                      </div>
-                    )}
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <JXTextField label={t("Password")} type={showPassword ? "text" : "password"} value={password} onChange={setPassword} required autoComplete="current-password" clearable={false} />
+                    </div>
+                    <JXButton type="button" variant="outlined" color="neutral" size="sm" className="mt-6 min-h-11 shrink-0"
+                      aria-pressed={showPassword} aria-label={showPassword ? "Hide password" : "Show password"}
+                      title={showPassword ? "Hide password" : "Show password"}
+                      onClick={() => setShowPassword((prev) => !prev)}>
+                      {showPassword ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                    </JXButton>
                   </div>
                 </>}
-              {health?.ok ? (
-                <ShimmerButton
-                  type="submit"
-                  tone="primary"
-                  variant="solid"
-                  disabled={busy || probing}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-medium"
-                >
-                  {busy ? t("Signing in…") : t("Sign in")}
-                  {!busy && <ArrowRight className="h-4 w-4 rtl:rotate-180" aria-hidden="true" />}
-                </ShimmerButton>
-              ) : (
-                <JXButton type="submit" fullWidth loading={busy} loadingLabel={t("Signing in…")}
-                  disabled={busy || probing || Boolean(health && !health.ok)}
-                  endIcon={<ArrowRight className="h-4 w-4 rtl:rotate-180" />}>{t("Sign in")}</JXButton>
-              )}
+              <JXButton type="submit" fullWidth loading={busy} loadingLabel={t("Signing in…")}
+                disabled={busy || probing}
+                endIcon={<ArrowRight className="h-4 w-4 rtl:rotate-180" />}>{t("Sign in")}</JXButton>
             </form>
             {health && !health.ok && (
               <JXButton fullWidth variant="outlined" color="neutral" onClick={() => {
                 setProbing(true);
+                setProbeWarning("");
                 probeControlHealth().then((result) => { setHealth(result); setProbing(false); });
               }}>Retry connection check</JXButton>
             )}
             {ssoConfigured && <JXButton fullWidth color="neutral" variant="outlined" onClick={() => api.oidcLogin()}>{t("Sign in with your identity provider")}</JXButton>}
             <div className="space-y-3 border-t border-[color:var(--product-line)] pt-5">
-              <JXButton fullWidth variant="outlined" color="neutral" onClick={() => navigate("overview")}>{t("Explore demo workspace")}</JXButton>
+              <p className="text-xs leading-relaxed text-[color:var(--product-text-tertiary)]">
+                Just looking around?{" "}
+                <button type="button" onClick={() => navigate("overview")}
+                  className="font-medium text-indigo-300 underline decoration-indigo-300/50 underline-offset-2 hover:text-indigo-200">
+                  {t("Explore demo workspace")}
+                </button>
+              </p>
               <p lang="en" dir="ltr" className="text-xs leading-relaxed text-[color:var(--product-text-tertiary)]">Demo workspace — simulated data, not a real fleet.</p>
             </div>
           </div>

@@ -9,7 +9,7 @@ export function NotificationsPanel({ open }: { open: (section: "devices" | "task
   return <section aria-label="Fleet attention" className="space-y-4">
     <ReadState {...state} />
     <JXButton color="neutral" variant="outlined" disabled={state.loading} onClick={state.refresh}>Refresh notifications</JXButton>
-    {state.data && <ul className="divide-y divide-slate-800">
+    {state.data && <ul className="divide-y divide-[var(--product-line)]">
       {[
         { label: "Offline or stale devices", count: state.data.offline_devices, section: "devices" as const, filter: "attention" },
         { label: "Failed tasks in the last 24 hours", count: state.data.failed_tasks_24h, section: "tasks" as const, filter: "failed" },

@@ -15,6 +15,9 @@ import {
   JXCardContent,
   JXBadge,
   JXButton,
+  StatusBadge,
+  ConfirmDestructive,
+  EmptyState,
 } from "../ui";
 import {
   Zap,
@@ -22,7 +25,6 @@ import {
   Check,
   CheckCircle2,
   XCircle,
-  AlertTriangle,
   RefreshCw,
   Sliders,
   ZoomIn,
@@ -35,7 +37,6 @@ import {
   Shield,
   Search,
   Code,
-  Clock,
   Layers,
   Bot,
   User,
@@ -51,6 +52,10 @@ import {
 } from "lucide-react";
 import { api, token, sessionToken } from "../api";
 import { useDashboardStore } from "../state/dashboardStore";
+import { pushNotice } from "../state/notices";
+import { Freshness } from "../components/Freshness";
+import { GlossaryModal } from "../components/Glossary";
+import { readRoute, updateRouteParams, taskStatuses } from "../state/navigation";
 import type { TaskInvocation, TaskRiskTier, TaskStatus } from "../types/dashboard";
 
 interface SoMMark {
@@ -145,6 +150,43 @@ const PRESETS = [
   },
 ];
 
+/** UX-34: a recent dispatch, persisted so the operator can re-dispatch
+ * without re-selecting device + tool + args. */
+interface RecentDispatch {
+  deviceId: string;
+  tool: string;
+  args: Record<string, unknown>;
+  riskTier: TaskRiskTier;
+  dispatchedAt: number;
+  taskId?: string;
+}
+
+const RECENT_DISPATCHES_KEY = "ai-bridge:recent-dispatches:v1";
+const MAX_RECENT_DISPATCHES = 8;
+
+function loadRecentDispatches(): RecentDispatch[] {
+  try {
+    const raw = localStorage.getItem(RECENT_DISPATCHES_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (e): e is RecentDispatch =>
+          !!e &&
+          typeof e === "object" &&
+          typeof (e as RecentDispatch).deviceId === "string" &&
+          typeof (e as RecentDispatch).tool === "string" &&
+          !!(e as RecentDispatch).args &&
+          typeof (e as RecentDispatch).args === "object" &&
+          !Array.isArray((e as RecentDispatch).args)
+      )
+      .slice(0, MAX_RECENT_DISPATCHES);
+  } catch {
+    return [];
+  }
+}
+
 export const TaskQueueVisionView: React.FC = () => {
   const devices = useDashboardStore((s) => s.devices);
   const selectedDeviceId = useDashboardStore((s) => s.selectedDeviceId);
@@ -153,10 +195,14 @@ export const TaskQueueVisionView: React.FC = () => {
   const resolveApproval = useDashboardStore((s) => s.resolveApproval);
   const dispatchTask = useDashboardStore((s) => s.dispatchTask);
   const refreshLive = useDashboardStore((s) => s.refreshLive);
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
+  const getSyncState = useDashboardStore((s) => s.getSyncState);
   const isLive = typeof window !== "undefined" && Boolean(token() || sessionToken());
 
   // Studio form states
-  const [targetHost, setTargetHost] = useState<string>(selectedDeviceId || "srv-us-east-412");
+  const [targetDeviceId, setTargetDeviceId] = useState<string>(selectedDeviceId || "srv-us-east-412");
   const [selectedTool, setSelectedTool] = useState<string>("desktop_get_screenshot");
   const [activeRiskTier, setActiveRiskTier] = useState<TaskRiskTier>("tier1_safe");
   const [argsJson, setArgsJson] = useState<string>(
@@ -167,22 +213,84 @@ export const TaskQueueVisionView: React.FC = () => {
   const [activePreset, setActivePreset] = useState<string>("Full 4K Screenshot");
 
   // Queue and inspector states
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [searchQuery, setSearchQuery] = useState<string>("");
+  // UX-13: list filters initialise from the hash (?q= / ?status=) so a
+  // filtered list survives refresh and can be shared; they are written
+  // back (replaceState) when they change.
+  const [statusFilter, setStatusFilter] = useState<string>(() => {
+    const s = typeof window === "undefined" ? undefined : readRoute().status;
+    return s && (taskStatuses as readonly string[]).includes(s) ? s : "all";
+  });
+  const [searchQuery, setSearchQuery] = useState<string>(() =>
+    typeof window === "undefined" ? "" : readRoute().q ?? ""
+  );
   const [deviceFilter, setDeviceFilter] = useState<string>("all");
   const [page, setPage] = useState<number>(1);
-  const [useServerHistory, setUseServerHistory] = useState<boolean>(false);
+  // UX-09: default to server history when live — the store's synced list
+  // may not contain the authoritative record for a just-dispatched task.
+  const [useServerHistory, setUseServerHistory] = useState<boolean>(() => isLive);
   const [historyTasks, setHistoryTasks] = useState<TaskInvocation[]>([]);
   const [historyTotal, setHistoryTotal] = useState<number>(0);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyReload, setHistoryReload] = useState<number>(0);
+  // UX-13: true once the first server-history load has settled, so a
+  // deep-linked task is only declared missing after the list exists.
+  const [historyLoaded, setHistoryLoaded] = useState<boolean>(false);
   const PAGE_SIZE = 12;
   const tasks = useServerHistory && isLive ? historyTasks : storeTasks;
-  const [selectedTaskId, setSelectedTaskId] = useState<string>(storeTasks[0]?.id || "TSK-89213");
+  // UX-13: task deep link (?task=<id>). The id from the hash is the
+  // initial selection; unknown ids render an explicit "Task not
+  // available" state and never fall back to the first task (UX-27).
+  const [routeTaskId, setRouteTaskId] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : readRoute().task ?? null
+  );
+  const [taskNotFound, setTaskNotFound] = useState<boolean>(false);
+  // A deep-linked task that exists on the server but is not on the loaded
+  // page (live server history is paginated) is fetched once and held here
+  // so the inspector can show it without a silent fallback.
+  const [linkedTask, setLinkedTask] = useState<TaskInvocation | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string>(routeTaskId ?? storeTasks[0]?.id ?? "TSK-89213");
+  // UX-13: a deep-linked id is resolved once; afterwards the user's own
+  // selection wins and list refreshes must not re-select or re-scroll.
+  const resolvedRouteTaskRef = React.useRef<string | null>(null);
+  // UX-13: selecting a task writes ?task=<id> back to the hash.
+  const selectTask = useCallback((id: string) => {
+    resolvedRouteTaskRef.current = id;
+    setRouteTaskId(id);
+    setSelectedTaskId(id);
+    setTaskNotFound(false);
+    updateRouteParams({ task: id });
+  }, []);
+  // UX-25: glossary modal opened from the tier legend.
+  const [glossaryOpen, setGlossaryOpen] = useState<boolean>(false);
   const [zoomLevel, setZoomLevel] = useState<number>(1.0); // 1.0 = Fit, 1.5, 2.0
   const [somEnabled, setSomEnabled] = useState<boolean>(true);
   const [selectedMarkId, setSelectedMarkId] = useState<number | null>(null);
   const [copiedPayload, setCopiedPayload] = useState<boolean>(false);
   const [liveCapturedBase64, setLiveCapturedBase64] = useState<string>("");
-  const [taskActionNotice, setTaskActionNotice] = useState<string | null>(null);
+  // UX-03/UX-04: pending confirmations. The destructive/ elevated action
+  // only runs from the ConfirmDestructive onConfirm — never from the row
+  // button or the dispatch button directly.
+  const [dispatchDraft, setDispatchDraft] = useState<{
+    deviceId: string;
+    tool: string;
+    args: Record<string, unknown>;
+    riskTier: TaskRiskTier;
+  } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState<boolean>(false);
+  // UX-23: one busy key at a time ("delete:<id>", "clear", "cancel:<id>",
+  // "retry:<id>", "decide:<id>"); buttons disable while their key is set.
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  // UX-09: the most recently dispatched task, tracked persistently in-view.
+  const [trackedTaskId, setTrackedTaskId] = useState<string | null>(null);
+  // UX-39: run_shell shows a typed command form; raw JSON is the toggle.
+  const [showRawJson, setShowRawJson] = useState<boolean>(false);
+  // UX-23: idempotency key for the current dispatch intent. Created once
+  // when the confirm opens and reused on retry, so a second click cannot
+  // create a second task. Cleared only after a successful dispatch.
+  const dispatchKeyRef = React.useRef<string | null>(null);
+  // UX-34: recent dispatches, persisted in localStorage (max 8).
+  const [recentDispatches, setRecentDispatches] = useState<RecentDispatch[]>(loadRecentDispatches);
   const [editingTask, setEditingTask] = useState<TaskInvocation | null>(null);
   const [editTool, setEditTool] = useState<string>("");
   const [editArgsJson, setEditArgsJson] = useState<string>("{}");
@@ -252,93 +360,255 @@ export const TaskQueueVisionView: React.FC = () => {
     setJsonError(null);
   };
 
-  // Dispatch invocation handler
-  const handleDispatch = useCallback(async () => {
-    if (isSubmitting) return;
-
-    let parsedArgs: Record<string, unknown> = {};
+  // UX-39: the args object parsed from the JSON editor (null while the
+  // JSON is invalid). The run_shell command form reads/writes through it.
+  const parsedArgs = useMemo<Record<string, unknown> | null>(() => {
     try {
-      parsedArgs = JSON.parse(argsJson);
+      const parsed: unknown = JSON.parse(argsJson);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }, [argsJson]);
+
+  const updateShellArg = useCallback(
+    (patch: Record<string, unknown>) => {
+      const base = parsedArgs ?? {};
+      setArgsJson(JSON.stringify({ ...base, ...patch }, null, 2));
+      setJsonError(null);
+    },
+    [parsedArgs]
+  );
+
+  const recordRecentDispatch = useCallback((entry: RecentDispatch) => {
+    setRecentDispatches((prev) => {
+      const keyOf = (e: RecentDispatch) =>
+        `${e.deviceId}|${e.tool}|${JSON.stringify(e.args)}`;
+      const next = [entry, ...prev.filter((e) => keyOf(e) !== keyOf(entry))].slice(
+        0,
+        MAX_RECENT_DISPATCHES
+      );
+      try {
+        localStorage.setItem(RECENT_DISPATCHES_KEY, JSON.stringify(next));
+      } catch {
+        // Storage unavailable (private mode, quota): the list just won't persist.
+      }
+      return next;
+    });
+  }, []);
+
+  // UX-04/UX-10: form submit (and Ctrl+Enter) only validates the JSON and
+  // opens the confirm dialog. Nothing dispatches from here.
+  const openDispatchConfirm = useCallback(() => {
+    if (isSubmitting) return;
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(argsJson);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setJsonError("Args must be a JSON object.");
+        return;
+      }
     } catch {
       setJsonError("Cannot dispatch: JSON payload is invalid");
       return;
     }
+    if (!dispatchKeyRef.current) {
+      dispatchKeyRef.current =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `dispatch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    setDispatchDraft({
+      deviceId: targetDeviceId,
+      tool: selectedTool,
+      args: parsed,
+      riskTier: activeRiskTier,
+    });
+  }, [isSubmitting, argsJson, targetDeviceId, selectedTool, activeRiskTier]);
 
+  // UX-04/UX-09/UX-23: runs only from ConfirmDestructive. When live the
+  // stored idempotency key is sent with the request, so retrying the same
+  // dispatch (e.g. after a failed attempt) cannot create a second task.
+  const confirmDispatch = useCallback(async () => {
+    const draft = dispatchDraft;
+    if (!draft || isSubmitting) return;
     setIsSubmitting(true);
     try {
-      const newTask = await dispatchTask({
-        deviceId: targetHost,
-        tool: selectedTool,
-        args: parsedArgs,
-        riskTier: activeRiskTier,
+      let newTask: TaskInvocation | undefined;
+      if (isLive) {
+        const res = await api.submitTask(
+          draft.deviceId,
+          draft.tool,
+          draft.args,
+          undefined,
+          // The stored key is a UUID string; the cast only bridges the
+          // template-literal parameter type of submitTask's requestKey.
+          dispatchKeyRef.current as Parameters<typeof api.submitTask>[4] | undefined
+        );
+        newTask = res as TaskInvocation | undefined;
+      } else {
+        newTask = await dispatchTask({
+          deviceId: draft.deviceId,
+          tool: draft.tool,
+          args: draft.args,
+          riskTier: draft.riskTier,
+        });
+      }
+      const createdId = newTask?.id || (newTask as unknown as { task_id?: string })?.task_id;
+      const deviceName =
+        devices.find((d) => d.id === draft.deviceId)?.hostname || draft.deviceId;
+      if (createdId) {
+        selectTask(createdId);
+        setTrackedTaskId(createdId);
+      }
+      recordRecentDispatch({
+        deviceId: draft.deviceId,
+        tool: draft.tool,
+        args: draft.args,
+        riskTier: draft.riskTier,
+        dispatchedAt: Date.now(),
+        taskId: createdId,
       });
-      const createdId = newTask?.id || (newTask as any)?.task_id;
-      if (createdId) setSelectedTaskId(createdId);
+      // The dispatch intent is complete: a later, different dispatch gets
+      // a fresh key. A failed dispatch keeps the key for its retry.
+      dispatchKeyRef.current = null;
+      setDispatchDraft(null);
+      pushNotice({
+        tone: "success",
+        title: createdId ? `Task #${createdId} dispatched` : "Task dispatched",
+        message: `${draft.tool} on ${deviceName} (${draft.riskTier.replace("_", " ")}).`,
+        actionLabel: createdId ? "View task" : undefined,
+        actionHref: createdId ? "#task-queue-and-vision" : undefined,
+      });
       await refreshLive?.();
-    } catch (err: any) {
-      setJsonError(err.message || "Task dispatch rejected");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Task dispatch rejected";
+      setJsonError(message);
+      pushNotice({ tone: "error", title: "Task dispatch failed", message });
     } finally {
-      setTimeout(() => {
-        setIsSubmitting(false);
-      }, 600);
+      setIsSubmitting(false);
     }
-  }, [isSubmitting, argsJson, dispatchTask, targetHost, selectedTool, activeRiskTier, refreshLive]);
+  }, [dispatchDraft, isSubmitting, isLive, devices, dispatchTask, recordRecentDispatch, refreshLive, selectTask]);
+
+  // UX-34: re-dispatch a recent entry — refill the form and open the same
+  // confirm dialog (with a fresh idempotency key for the new intent).
+  const redispatchRecent = useCallback((entry: RecentDispatch) => {
+    setTargetDeviceId(entry.deviceId);
+    setSelectedTool(entry.tool);
+    setActiveRiskTier(entry.riskTier);
+    setArgsJson(JSON.stringify(entry.args, null, 2));
+    setJsonError(null);
+    setActivePreset("");
+    if (!dispatchKeyRef.current) {
+      dispatchKeyRef.current =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `dispatch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    setDispatchDraft({
+      deviceId: entry.deviceId,
+      tool: entry.tool,
+      args: entry.args,
+      riskTier: entry.riskTier,
+    });
+  }, []);
+
+  const loadRecentIntoForm = useCallback((entry: RecentDispatch) => {
+    setTargetDeviceId(entry.deviceId);
+    setSelectedTool(entry.tool);
+    setActiveRiskTier(entry.riskTier);
+    setArgsJson(JSON.stringify(entry.args, null, 2));
+    setJsonError(null);
+    setActivePreset("");
+  }, []);
 
   const handleCancelTask = useCallback(
     async (taskId: string, e?: React.MouseEvent) => {
       e?.stopPropagation();
+      const key = `cancel:${taskId}`;
+      if (pendingAction) return;
+      setPendingAction(key);
       if (Boolean(token() || sessionToken())) {
         try {
           await api.cancelTask(taskId);
           await refreshLive?.();
-          setTaskActionNotice(`Cancelled task #${taskId}.`);
-          setTimeout(() => setTaskActionNotice(null), 3000);
-        } catch (err: any) {
-          setTaskActionNotice(`Cancel failed: ${err?.message || "Unknown error"}`);
+          pushNotice({ tone: "success", title: `Cancelled task #${taskId}.` });
+        } catch (err: unknown) {
+          pushNotice({
+            tone: "error",
+            title: "Cancel failed",
+            message: err instanceof Error ? err.message : "Unknown error",
+          });
+        } finally {
+          setPendingAction(null);
         }
         return;
       }
-      setTaskActionNotice(`Simulated cancellation for #${taskId}.`);
-      setTimeout(() => setTaskActionNotice(null), 3000);
+      pushNotice({ tone: "info", title: `Simulated cancellation for #${taskId}.` });
+      setPendingAction(null);
     },
-    [refreshLive]
+    [pendingAction, refreshLive]
   );
 
-  const handleDeleteTask = useCallback(
-    async (taskId: string, e?: React.MouseEvent) => {
-      e?.stopPropagation();
-      if (Boolean(token() || sessionToken())) {
-        try {
-          await api.deleteTask(taskId);
-          await refreshLive?.();
-          setTaskActionNotice(`Deleted task #${taskId}.`);
-          setTimeout(() => setTaskActionNotice(null), 3000);
-        } catch (err: any) {
-          setTaskActionNotice(`Delete failed: ${err?.message || "Unknown error"}`);
-        }
-        return;
+  // UX-03: the row button only opens the confirm dialog; the API call
+  // happens in confirmDeleteTask.
+  const requestDeleteTask = useCallback((taskId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setDeleteTarget(taskId);
+  }, []);
+
+  const confirmDeleteTask = useCallback(async () => {
+    const taskId = deleteTarget;
+    if (!taskId) return;
+    const key = `delete:${taskId}`;
+    if (pendingAction) return;
+    setDeleteTarget(null);
+    setPendingAction(key);
+    if (Boolean(token() || sessionToken())) {
+      try {
+        await api.deleteTask(taskId);
+        await refreshLive?.();
+        pushNotice({ tone: "success", title: `Deleted task #${taskId}.` });
+      } catch (err: unknown) {
+        pushNotice({
+          tone: "error",
+          title: "Delete failed",
+          message: err instanceof Error ? err.message : "Unknown error",
+        });
+      } finally {
+        setPendingAction(null);
       }
-      setTaskActionNotice(`Simulated deletion for #${taskId}.`);
-      setTimeout(() => setTaskActionNotice(null), 3000);
-    },
-    [refreshLive]
-  );
+      return;
+    }
+    pushNotice({ tone: "info", title: `Simulated deletion for #${taskId}.` });
+    setPendingAction(null);
+  }, [deleteTarget, pendingAction, refreshLive]);
 
-  const handleClearTasks = useCallback(async () => {
+  const confirmClearTasks = useCallback(async () => {
+    if (pendingAction) return;
+    setClearConfirmOpen(false);
+    setPendingAction("clear");
     if (Boolean(token() || sessionToken())) {
       try {
         const res = await api.clearTasks(statusFilter !== "all" ? statusFilter : undefined);
         await refreshLive?.();
-        setTaskActionNotice(`Cleared ${res?.deleted_count ?? 0} tasks.`);
-        setTimeout(() => setTaskActionNotice(null), 3000);
-      } catch (err: any) {
-        setTaskActionNotice(`Clear tasks failed: ${err?.message || "Unknown error"}`);
+        pushNotice({ tone: "success", title: `Cleared ${res?.deleted_count ?? 0} tasks.` });
+      } catch (err: unknown) {
+        pushNotice({
+          tone: "error",
+          title: "Clear tasks failed",
+          message: err instanceof Error ? err.message : "Unknown error",
+        });
+      } finally {
+        setPendingAction(null);
       }
       return;
     }
-    setTaskActionNotice("Simulated clearing finished tasks.");
-    setTimeout(() => setTaskActionNotice(null), 3000);
-  }, [statusFilter, refreshLive]);
+    pushNotice({ tone: "info", title: "Simulated clearing finished tasks." });
+    setPendingAction(null);
+  }, [pendingAction, statusFilter, refreshLive]);
 
   const findApprovalIdForTask = useCallback(
     (task: TaskInvocation): string | undefined => {
@@ -348,15 +618,40 @@ export const TaskQueueVisionView: React.FC = () => {
     [approvals]
   );
 
+  // UX-09: the approval for a task (pending first, otherwise the most
+  // recent one), so the row can show its id/status and link to it.
+  const findApprovalForTask = useCallback(
+    (task: TaskInvocation) => {
+      if (task.approvalId) {
+        return approvals.find((a) => a.id === task.approvalId);
+      }
+      return (
+        approvals.find((a) => a.taskId === task.id && a.status === "pending") ||
+        approvals.find((a) => a.taskId === task.id)
+      );
+    },
+    [approvals]
+  );
+
   const handleDecideTask = useCallback(
     async (task: TaskInvocation, verdict: "approved" | "denied", e?: React.MouseEvent) => {
       e?.stopPropagation();
       const approvalId = findApprovalIdForTask(task);
       if (!approvalId) {
-        setTaskActionNotice(`No pending approval record found for task #${task.id}.`);
-        setTimeout(() => setTaskActionNotice(null), 4000);
+        // UX-09: dead-ending in a notice is not enough — link to the
+        // Human Approvals view where the record (if any) lives.
+        pushNotice({
+          tone: "warning",
+          title: `No pending approval record found for task #${task.id}.`,
+          message: "Open Human Approvals to review the approval for this task.",
+          actionLabel: "Open Human Approvals",
+          actionHref: "#human-approvals",
+        });
         return;
       }
+      const key = `decide:${task.id}`;
+      if (pendingAction) return;
+      setPendingAction(key);
       try {
         await resolveApproval(
           approvalId,
@@ -366,38 +661,50 @@ export const TaskQueueVisionView: React.FC = () => {
             : "Denied from Task Queue"
         );
         await refreshLive?.();
-        setTaskActionNotice(
-          `${verdict === "approved" ? "Approved" : "Denied"} task #${task.id}.`
-        );
-        setTimeout(() => setTaskActionNotice(null), 3000);
-      } catch (err: any) {
-        setTaskActionNotice(
-          `${verdict === "approved" ? "Approve" : "Deny"} failed: ${err?.message || "Unknown error"}`
-        );
+        pushNotice({
+          tone: "success",
+          title: `${verdict === "approved" ? "Approved" : "Denied"} task #${task.id}.`,
+        });
+      } catch (err: unknown) {
+        pushNotice({
+          tone: "error",
+          title: `${verdict === "approved" ? "Approve" : "Deny"} failed`,
+          message: err instanceof Error ? err.message : "Unknown error",
+        });
+      } finally {
+        setPendingAction(null);
       }
     },
-    [findApprovalIdForTask, resolveApproval, refreshLive]
+    [findApprovalIdForTask, resolveApproval, refreshLive, pendingAction]
   );
 
   const handleRetryTask = useCallback(
     async (task: TaskInvocation, e?: React.MouseEvent) => {
       e?.stopPropagation();
+      const key = `retry:${task.id}`;
+      if (pendingAction) return;
+      setPendingAction(key);
       if (Boolean(token() || sessionToken())) {
         try {
           await api.updateTask(task.id, { status: "queued" });
           await refreshLive?.();
-          setTaskActionNotice(`Re-queued task #${task.id}.`);
-          setTimeout(() => setTaskActionNotice(null), 3000);
-        } catch (err: any) {
-          setTaskActionNotice(`Retry failed: ${err?.message || "Unknown error"}`);
+          pushNotice({ tone: "success", title: `Re-queued task #${task.id}.` });
+        } catch (err: unknown) {
+          pushNotice({
+            tone: "error",
+            title: "Retry failed",
+            message: err instanceof Error ? err.message : "Unknown error",
+          });
+        } finally {
+          setPendingAction(null);
         }
         return;
       }
       await dispatchTask({ deviceId: task.deviceId, tool: task.tool, args: task.args, riskTier: task.riskTier });
-      setTaskActionNotice(`Re-dispatched ${task.tool}.`);
-      setTimeout(() => setTaskActionNotice(null), 3000);
+      pushNotice({ tone: "info", title: `Re-dispatched ${task.tool}.` });
+      setPendingAction(null);
     },
-    [dispatchTask, refreshLive]
+    [dispatchTask, refreshLive, pendingAction]
   );
 
   const openEditTask = useCallback((task: TaskInvocation, e?: React.MouseEvent) => {
@@ -426,9 +733,8 @@ export const TaskQueueVisionView: React.FC = () => {
         await api.updateTask(editingTask.id, { tool: editTool.trim(), args: parsed });
         await refreshLive?.();
       }
-      setTaskActionNotice(`Updated task #${editingTask.id}.`);
+      pushNotice({ tone: "success", title: `Updated task #${editingTask.id}.` });
       setEditingTask(null);
-      setTimeout(() => setTaskActionNotice(null), 3000);
     } catch (err: any) {
       setEditError(err?.message || "Failed to update task.");
     }
@@ -480,17 +786,25 @@ export const TaskQueueVisionView: React.FC = () => {
         });
         setHistoryTasks(items);
         setHistoryTotal(Number(res?.total) || items.length);
-      } catch {
+        setHistoryError(null);
+        setHistoryLoaded(true);
+      } catch (err: unknown) {
         if (!cancelled) {
           setHistoryTasks([]);
           setHistoryTotal(0);
+          setHistoryLoaded(true);
+          // UX-23: a failed load is recoverable in-view (Retry below),
+          // not only by reloading the page.
+          setHistoryError(
+            err instanceof Error ? err.message : "Could not load server task history."
+          );
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [useServerHistory, isLive, searchQuery, statusFilter, deviceFilter, page]);
+  }, [useServerHistory, isLive, searchQuery, statusFilter, deviceFilter, page, historyReload]);
 
   // Filtered task list (client-side when not using server history)
   const filteredTasks = useMemo(() => {
@@ -522,11 +836,92 @@ export const TaskQueueVisionView: React.FC = () => {
     setPage(1);
   }, [statusFilter, deviceFilter, searchQuery, useServerHistory]);
 
+  // UX-13: write the list filters back to the hash (replaceState, so
+  // typing a search does not spam history). updateRouteParams merges, so
+  // ?task= is preserved.
+  useEffect(() => {
+    updateRouteParams(
+      { q: searchQuery || undefined, status: statusFilter !== "all" ? statusFilter : undefined },
+      true
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, statusFilter]);
+
+  // UX-13: resolve the ?task= deep link once the list exists. If the id
+  // is on the loaded list, select it and scroll to its row. In live mode
+  // the list is one server-history page, so an id that is not on the page
+  // is probed with taskDetail before it is declared missing.
+  useEffect(() => {
+    if (!routeTaskId || resolvedRouteTaskRef.current === routeTaskId) return;
+    if (useServerHistory && isLive && !historyLoaded) return;
+    if (tasks.some((t) => t.id === routeTaskId)) {
+      resolvedRouteTaskRef.current = routeTaskId;
+      setSelectedTaskId(routeTaskId);
+      setTaskNotFound(false);
+      requestAnimationFrame(() => {
+        document.getElementById(`task-row-${routeTaskId}`)?.scrollIntoView({ block: "nearest" });
+      });
+      return;
+    }
+    if (linkedTask && linkedTask.id === routeTaskId) {
+      resolvedRouteTaskRef.current = routeTaskId;
+      setSelectedTaskId(routeTaskId);
+      setTaskNotFound(false);
+      return;
+    }
+    if (isLive) {
+      let cancelled = false;
+      api
+        .taskDetail(routeTaskId)
+        .then((res: any) => {
+          if (cancelled) return;
+          if (!res || typeof res !== "object" || !res.id) {
+            resolvedRouteTaskRef.current = routeTaskId;
+            setTaskNotFound(true);
+            return;
+          }
+          const tierNum = Number(res.tier ?? 1);
+          setLinkedTask({
+            id: String(res.id),
+            deviceId: String(res.device_id || ""),
+            deviceHostname: String(res.device_id || ""),
+            tool: String(res.tool || ""),
+            args: typeof res.args_json === "string" ? JSON.parse(res.args_json || "{}") : (res.args || {}),
+            riskTier: (tierNum >= 4 ? "tier4_kernel" : tierNum >= 3 ? "tier3_shell" : tierNum >= 2 ? "tier2_workspace" : "tier1_safe") as TaskRiskTier,
+            status: (res.status || "pending") as TaskStatus,
+            invoker: "history",
+            createdAt: String(res.created_at || ""),
+          });
+          resolvedRouteTaskRef.current = routeTaskId;
+          setSelectedTaskId(routeTaskId);
+          setTaskNotFound(false);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            resolvedRouteTaskRef.current = routeTaskId;
+            setTaskNotFound(true);
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+    resolvedRouteTaskRef.current = routeTaskId;
+    setTaskNotFound(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks, historyLoaded, routeTaskId]);
+
   // Active inspected task
   const [liveTaskDetailResult, setLiveTaskDetailResult] = useState<any>(null);
   const baseActiveTask = useMemo(() => {
-    return tasks.find((t) => t.id === selectedTaskId) || tasks[0];
-  }, [tasks, selectedTaskId]);
+    const found = tasks.find((t) => t.id === selectedTaskId);
+    if (found) return found;
+    if (linkedTask && linkedTask.id === selectedTaskId) return linkedTask;
+    // UX-27: a deep-linked id that is not in the list never falls back to
+    // the first task — the caller renders "Task not available" instead.
+    if (routeTaskId && selectedTaskId === routeTaskId) return undefined;
+    return tasks[0];
+  }, [tasks, selectedTaskId, linkedTask, routeTaskId]);
 
   useEffect(() => {
     if (!isLive || !selectedTaskId) {
@@ -559,34 +954,45 @@ export const TaskQueueVisionView: React.FC = () => {
 
   const handleCaptureLiveScreenshot = useCallback(async () => {
     if (Boolean(token() || sessionToken())) {
-      const devId = activeTask?.deviceId || targetHost;
+      const devId = activeTask?.deviceId || targetDeviceId;
+      if (pendingAction) return;
+      setPendingAction("capture");
       try {
         const frame = await api.desktopFrame(devId);
         if (frame?.base64_data) {
           setLiveCapturedBase64(frame.base64_data);
-          setTaskActionNotice(`Captured live frame from ${devId}.`);
-          setTimeout(() => setTaskActionNotice(null), 3000);
+          pushNotice({ tone: "success", title: `Captured live frame from ${devId}.` });
         } else {
-          setTaskActionNotice(frame?.error || "No live frame available from device.");
-          setTimeout(() => setTaskActionNotice(null), 3000);
+          pushNotice({
+            tone: "warning",
+            title: "No live frame available from device.",
+            message: frame?.error || undefined,
+          });
         }
-      } catch (err: any) {
-        setTaskActionNotice(`Screenshot capture failed: ${err?.message || "Unknown error"}`);
+      } catch (err: unknown) {
+        pushNotice({
+          tone: "error",
+          title: "Screenshot capture failed",
+          message: err instanceof Error ? err.message : "Unknown error",
+        });
+      } finally {
+        setPendingAction(null);
       }
     }
-  }, [activeTask, targetHost]);
+  }, [activeTask, targetDeviceId, pendingAction]);
 
-  // Keyboard shortcut listener (⌘/Ctrl + Enter)
+  // Keyboard shortcut listener (⌘/Ctrl + Enter) — UX-04: opens the same
+  // confirm dialog as the Dispatch button; it never dispatches directly.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
-        handleDispatch();
+        openDispatchConfirm();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handleDispatch]);
+  }, [openDispatchConfirm]);
 
   const liveScreenshotDataUrl = useMemo(() => {
     const res: any = activeTask?.result;
@@ -636,43 +1042,63 @@ export const TaskQueueVisionView: React.FC = () => {
     }
   };
 
-  const getStatusBadge = (status: TaskStatus) => {
-    switch (status) {
-      case "completed":
-        return (
-          <span className="inline-flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-            <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Completed
-          </span>
-        );
-      case "running":
-        return (
-          <span className="inline-flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-            <RefreshCw className="w-3 h-3 text-cyan-400 animate-spin" /> Running
-          </span>
-        );
-      case "needs_approval":
-        return (
-          <span className="inline-flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
-            <AlertTriangle className="w-3 h-3 text-amber-400" /> Needs Review
-          </span>
-        );
-      case "failed":
-        return (
-          <span className="inline-flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
-            <XCircle className="w-3 h-3 text-rose-400" /> Failed
-          </span>
-        );
-      default:
-        return (
-          <span className="inline-flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)] border border-[var(--product-line)]">
-            <Clock className="w-3 h-3 text-[var(--product-text-tertiary)]" /> {status}
-          </span>
-        );
-    }
-  };
+  // UX-09: the tracked task, resolved live from the store list so the
+  // tracking chip below always shows its current status.
+  const trackedTask = useMemo(
+    () => (trackedTaskId ? tasks.find((t) => t.id === trackedTaskId) : undefined),
+    [trackedTaskId, tasks]
+  );
+
+  const clearScopeCount = useServerHistory && isLive ? historyTotal : filteredTasks.length;
 
   return (
     <div className="space-y-4">
+      {/* UX-36/UX-06: explicit <h1> plus the live sync indicator. */}
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-[var(--product-text)]">Task Queue &amp; Vision</h1>
+          <p className="text-xs text-[var(--product-text-tertiary)]">
+            Dispatch a task to a device and inspect the result.
+          </p>
+        </div>
+        {isLive && (
+          <Freshness checkedAt={lastSyncAt} loading={syncState === "loading" || getSyncState() === "loading"} />
+        )}
+      </header>
+      {isLive && syncError && (
+        <div role="alert" className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center justify-between gap-2">
+          <span>Sync with the control plane failed: {syncError}</span>
+          <button
+            type="button"
+            onClick={() => void refreshLive?.()}
+            className="px-2.5 py-1 rounded-lg bg-rose-500/20 border border-rose-500/40 font-semibold shrink-0"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {trackedTaskId && (
+        <div role="status" className="px-3 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-200 text-xs font-mono flex flex-wrap items-center gap-2">
+          <span>Tracking task #{trackedTaskId}</span>
+          {trackedTask && <StatusBadge status={trackedTask.status === "needs_approval" ? "pending_approval" : trackedTask.status} label={trackedTask.status === "needs_approval" ? "Needs review" : undefined} />}
+          {!trackedTask && <span className="text-[var(--product-text-tertiary)]">Status updates when the list refreshes.</span>}
+          <button
+            type="button"
+            onClick={() => selectTask(trackedTaskId)}
+            className="px-2 py-0.5 rounded-lg bg-indigo-600 text-white font-semibold"
+          >
+            View task
+          </button>
+          <button
+            type="button"
+            onClick={() => setTrackedTaskId(null)}
+            aria-label="Stop tracking this task"
+            className="ml-auto text-[11px] opacity-75 hover:opacity-100"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {/* Main Split Studio Grid */}
       <JXGrid columns={12} gap="lg">
         {/* LEFT COLUMN: Tool Dispatch Studio (5 cols) */}
@@ -683,18 +1109,26 @@ export const TaskQueueVisionView: React.FC = () => {
               icon={<Zap className="w-4 h-4 text-indigo-400" />}
             />
             <JXCardContent>
-              <div className="space-y-4">
-              {/* Target Host System */}
+              {/* UX-10: a real <form> — Enter submits, and the submit button
+                  opens the confirm dialog (UX-04), never dispatches directly. */}
+              <form
+                className="space-y-4"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  openDispatchConfirm();
+                }}
+              >
+              {/* Target device */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
-                  <label htmlFor="target-host-select" className="font-medium text-[var(--product-text-secondary)]">
+                  <label htmlFor="target-device-select" className="font-medium text-[var(--product-text-secondary)]">
                     Device
                   </label>
                 </div>
                 <select
-                  id="target-host-select"
-                  value={targetHost}
-                  onChange={(e) => setTargetHost(e.target.value)}
+                  id="target-device-select"
+                  value={targetDeviceId}
+                  onChange={(e) => setTargetDeviceId(e.target.value)}
                   className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[var(--product-canvas)]/80 border border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors cursor-pointer"
                 >
                   {devices.map((d) => (
@@ -711,7 +1145,7 @@ export const TaskQueueVisionView: React.FC = () => {
                   <label htmlFor="tool-select" className="font-medium text-[var(--product-text-secondary)]">
                     Tool
                   </label>
-                  <span className={`font-mono text-[10px] px-2 py-0.5 rounded font-semibold uppercase ${getRiskBadgeColor(activeRiskTier)}`}>
+                  <span className={`font-mono text-[11px] px-2 py-0.5 rounded font-semibold uppercase ${getRiskBadgeColor(activeRiskTier)}`}>
                     {activeRiskTier.replace("_", " ")}
                   </span>
                 </div>
@@ -739,6 +1173,21 @@ export const TaskQueueVisionView: React.FC = () => {
                     <option value="get_system_info">get_system_info [Tier 1: Safe ReadOnly]</option>
                   </optgroup>
                 </select>
+                {/* UX-25: tier legend — the per-tool tier labels above mean:
+                    Tier 1 read-only, Tier 2 workspace edits, Tier 3 elevated
+                    shell, Tier 4 kernel. Compact one-liner + glossary. */}
+                <p className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-1 text-[11px] text-[var(--product-text-tertiary)]">
+                  <span className="inline-flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-emerald-400" />Tier 1 — read-only</span>
+                  <span className="inline-flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-indigo-400" />Tier 2 — workspace edits</span>
+                  <span className="inline-flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-amber-400" />Tier 3 — elevated shell</span>
+                  <span className="inline-flex items-center gap-1"><span aria-hidden="true" className="h-2 w-2 rounded-full bg-rose-400" />Tier 4 — kernel</span>
+                  <button type="button" onClick={() => setGlossaryOpen(true)} aria-label="Open glossary: what is a tier?"
+                    className="ml-1 inline-flex h-5 w-5 items-center justify-center rounded-full border border-[color:var(--product-line)] font-semibold text-[var(--product-text-secondary)] hover:text-[var(--product-text)]"
+                  >
+                    ?
+                  </button>
+                </p>
+                <GlossaryModal open={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
               </div>
 
               {/* Parameter Presets Quick-Chips */}
@@ -767,51 +1216,106 @@ export const TaskQueueVisionView: React.FC = () => {
                 </div>
               </div>
 
-              {/* JSON Argument Editor */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-medium text-[var(--product-text-secondary)]">Invocation Arguments (JSON)</span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={beautifyJson}
-                      className="text-[11px] font-mono text-indigo-400 hover:text-indigo-300 transition-colors"
-                    >
-                      Format JSON
-                    </button>
-                    <span
-                      className={`font-mono text-[10px] px-1.5 py-0.5 rounded font-semibold ${
-                        jsonError
-                          ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                          : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                      }`}
-                    >
-                      {jsonError ? "Syntax Error" : "Valid JSON"}
-                    </span>
+              {/* UX-39: run_shell gets a typed command form; raw JSON is an
+                  advanced toggle. Other tools keep the JSON editor. */}
+              {selectedTool === "run_shell" && !showRawJson ? (
+                <div className="space-y-3">
+                  <div className="space-y-1.5">
+                    <label htmlFor="run-shell-command" className="block text-xs font-medium text-[var(--product-text-secondary)]">
+                      Command
+                    </label>
+                    <textarea
+                      id="run-shell-command"
+                      rows={3}
+                      value={typeof parsedArgs?.command === "string" ? parsedArgs.command : ""}
+                      onChange={(e) => updateShellArg({ command: e.target.value })}
+                      spellCheck={false}
+                      placeholder="e.g. journalctl -u ai-bridge-agent -n 50"
+                      className="w-full px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs leading-relaxed outline-none resize-none focus:border-indigo-500"
+                    />
                   </div>
+                  <div className="space-y-1.5">
+                    <label htmlFor="run-shell-timeout" className="block text-xs font-medium text-[var(--product-text-secondary)]">
+                      Timeout (seconds)
+                    </label>
+                    <input
+                      id="run-shell-timeout"
+                      type="number"
+                      min={1}
+                      max={3600}
+                      value={typeof parsedArgs?.timeout_seconds === "number" ? parsedArgs.timeout_seconds : 30}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        updateShellArg({ timeout_seconds: Number.isFinite(n) ? Math.max(1, Math.min(3600, n)) : 30 });
+                      }}
+                      className="w-32 px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] font-mono text-xs outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowRawJson(true)}
+                    className="text-[11px] font-mono text-indigo-400 hover:text-indigo-300 transition-colors"
+                  >
+                    Advanced: edit raw JSON
+                  </button>
                 </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    {/* UX-19: associated label for the args textarea. */}
+                    <label htmlFor="task-args-json" className="font-medium text-[var(--product-text-secondary)]">Task arguments (JSON)</label>
+                    <div className="flex items-center gap-2">
+                      {selectedTool === "run_shell" && (
+                        <button
+                          type="button"
+                          onClick={() => setShowRawJson(false)}
+                          className="text-[11px] font-mono text-indigo-400 hover:text-indigo-300 transition-colors"
+                        >
+                          Use command form
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={beautifyJson}
+                        className="text-[11px] font-mono text-indigo-400 hover:text-indigo-300 transition-colors"
+                      >
+                        Format JSON
+                      </button>
+                      <span
+                        className={`font-mono text-[11px] px-1.5 py-0.5 rounded font-semibold ${
+                          jsonError
+                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                            : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                        }`}
+                      >
+                        {jsonError ? "Syntax Error" : "Valid JSON"}
+                      </span>
+                    </div>
+                  </div>
 
-                <div className="relative rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] p-2 font-mono text-xs">
-                  <textarea
-                    aria-label="Tool arguments JSON"
-                    rows={7}
-                    value={argsJson}
-                    onChange={handleJsonChange}
-                    spellCheck={false}
-                    className="w-full bg-transparent text-[var(--product-text-secondary)] font-mono text-xs leading-relaxed outline-none resize-none border-none p-1"
-                  />
+                  <div className="relative rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] p-2 font-mono text-xs">
+                    <textarea
+                      id="task-args-json"
+                      rows={7}
+                      value={argsJson}
+                      onChange={handleJsonChange}
+                      spellCheck={false}
+                      aria-invalid={Boolean(jsonError)}
+                      aria-describedby={jsonError ? "task-args-error" : undefined}
+                      className="w-full bg-transparent text-[var(--product-text-secondary)] font-mono text-xs leading-relaxed outline-none resize-none border-none p-1"
+                    />
+                  </div>
+                  {jsonError && (
+                    <p id="task-args-error" role="alert" className="text-[11px] font-mono text-rose-400 mt-1">{jsonError}</p>
+                  )}
                 </div>
-                {jsonError && (
-                  <p className="text-[11px] font-mono text-rose-400 mt-1">{jsonError}</p>
-                )}
-              </div>
+              )}
 
               {/* Dispatch Action Button */}
               <div className="pt-2">
                 <button
-                  type="button"
+                  type="submit"
                   disabled={isSubmitting || Boolean(jsonError)}
-                  onClick={handleDispatch}
                   className={`w-full min-h-[44px] px-4 py-2.5 rounded-xl text-white font-semibold text-xs flex items-center justify-between transition-all shadow-lg ${
                     isSubmitting || jsonError
                       ? "bg-[var(--product-raised)] text-[var(--product-text-tertiary)] cursor-not-allowed border border-[var(--product-line)]"
@@ -824,13 +1328,71 @@ export const TaskQueueVisionView: React.FC = () => {
                     ) : (
                       <Send className="w-4 h-4 text-indigo-200" />
                     )}
-                    <span>{isSubmitting ? "Dispatching Invocation..." : "Dispatch Tool to Host"}</span>
+                    <span>{isSubmitting ? "Dispatching task..." : "Dispatch task to device"}</span>
                   </div>
-                  <kbd className="font-mono text-[10px] px-2 py-0.5 rounded bg-black/30 text-indigo-200">
+                  <kbd className="font-mono text-[11px] px-2 py-0.5 rounded bg-black/30 text-indigo-200">
                     ⌘ + Enter
                   </kbd>
                 </button>
               </div>
+
+              {/* UX-34: recent dispatches — re-dispatch without re-selecting
+                  device + tool + args. */}
+              {recentDispatches.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-[var(--product-text-secondary)]">Recent dispatches</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRecentDispatches([]);
+                        try {
+                          localStorage.removeItem(RECENT_DISPATCHES_KEY);
+                        } catch {
+                          // Storage unavailable; the in-memory list is cleared.
+                        }
+                      }}
+                      className="text-[11px] font-mono text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <ul className="space-y-1.5">
+                    {recentDispatches.map((entry) => {
+                      const deviceName =
+                        devices.find((d) => d.id === entry.deviceId)?.hostname || entry.deviceId;
+                      const argsPreview = JSON.stringify(entry.args);
+                      return (
+                        <li
+                          key={`${entry.dispatchedAt}-${entry.tool}-${entry.deviceId}`}
+                          className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--product-canvas)]/70 border border-[var(--product-line)] text-xs font-mono"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => loadRecentIntoForm(entry)}
+                            title="Load this dispatch into the form"
+                            className="min-w-0 flex-1 text-left truncate text-[var(--product-text-secondary)] hover:text-[var(--product-text)]"
+                          >
+                            <span className="font-semibold text-indigo-400">{entry.tool}</span>
+                            <span className="text-[var(--product-text-tertiary)]"> on {deviceName} · </span>
+                            <span className="text-[var(--product-text-tertiary)]">
+                              {argsPreview.length > 60 ? `${argsPreview.slice(0, 60)}…` : argsPreview}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isSubmitting}
+                            onClick={() => redispatchRecent(entry)}
+                            className="shrink-0 px-2 py-1 rounded-lg bg-indigo-600/20 border border-indigo-500/40 text-indigo-300 hover:bg-indigo-600/30 font-semibold disabled:opacity-40"
+                          >
+                            Re-dispatch
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
 
               {/* Security Guardrail Callout */}
               <div className="p-3 rounded-xl bg-[var(--product-canvas)]/70 border border-[var(--product-line)]/80 flex items-center justify-between text-[11px] font-mono text-[var(--product-text-tertiary)]">
@@ -839,7 +1401,7 @@ export const TaskQueueVisionView: React.FC = () => {
                 </span>
                 <span>Signer: SecOps-CA-2026</span>
               </div>
-            </div>
+              </form>
           </JXCardContent>
           </JXCard>
         </JXGridItem>
@@ -891,7 +1453,7 @@ export const TaskQueueVisionView: React.FC = () => {
                         }`}
                       >
                         <span>{filter.label}</span>
-                        <span className="px-1.5 py-0.2 rounded bg-black/30 text-[10px] font-bold">
+                        <span className="px-1.5 py-0.2 rounded bg-black/30 text-[11px] font-bold">
                           {filter.count}
                         </span>
                       </button>
@@ -911,22 +1473,16 @@ export const TaskQueueVisionView: React.FC = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => void handleClearTasks()}
+                      disabled={pendingAction === "clear"}
+                      onClick={() => setClearConfirmOpen(true)}
                       title="Clear finished tasks"
-                      className="px-2.5 py-1.5 rounded-xl bg-[var(--product-canvas)]/80 border border-[var(--product-line)] text-[var(--product-text-secondary)] hover:text-rose-300 text-xs font-mono flex items-center gap-1.5"
+                      className="px-2.5 py-1.5 rounded-xl bg-[var(--product-canvas)]/80 border border-[var(--product-line)] text-[var(--product-text-secondary)] hover:text-rose-300 text-xs font-mono flex items-center gap-1.5 disabled:opacity-40"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      <span>Clear finished</span>
+                      <span>{pendingAction === "clear" ? "Clearing..." : "Clear finished"}</span>
                     </button>
                   </div>
                 </div>
-
-                {taskActionNotice && (
-                  <div role="status" className="px-3 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-200 text-xs font-mono flex items-center justify-between gap-2">
-                    <span>{taskActionNotice}</span>
-                    <button type="button" onClick={() => setTaskActionNotice(null)} className="text-[11px] opacity-75 hover:opacity-100">Dismiss</button>
-                  </div>
-                )}
 
                 {/* Search & Device Filter */}
                 <div className="flex flex-wrap items-center gap-2">
@@ -954,25 +1510,53 @@ export const TaskQueueVisionView: React.FC = () => {
                 </div>
 
                 {/* Task Table */}
+                {historyError && useServerHistory && isLive ? (
+                  <div role="alert" className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center justify-between gap-2">
+                    <span>Could not load server task history: {historyError}</span>
+                    <button
+                      type="button"
+                      onClick={() => setHistoryReload((n) => n + 1)}
+                      className="px-2.5 py-1 rounded-lg bg-rose-500/20 border border-rose-500/40 font-semibold shrink-0"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : pagedTasks.length === 0 ? (
+                  <EmptyState
+                    variant="card"
+                    title="No tasks match these filters"
+                    description="Try a different status, device, or search — or dispatch a task to create one."
+                    actionLabel="Clear filters"
+                    onAction={() => {
+                      setStatusFilter("all");
+                      setDeviceFilter("all");
+                      setSearchQuery("");
+                      setPage(1);
+                    }}
+                  />
+                ) : (
                 <div className="overflow-x-auto rounded-xl border border-[var(--product-line)]/80 bg-[var(--product-canvas)]/60">
                   <table className="w-full text-left text-xs">
+                    <caption className="sr-only">Task queue: one row per dispatched task, with its device, tool, status, and actions</caption>
                     <thead>
                       <tr className="bg-[var(--product-surface)]/80 text-[var(--product-text-tertiary)] font-mono text-[11px] uppercase border-b border-[var(--product-line)]">
-                        <th className="py-2.5 px-3">Task ID</th>
-                        <th className="py-2.5 px-3">Target & Tool</th>
-                        <th className="py-2.5 px-3">Status</th>
-                        <th className="py-2.5 px-3">Invoker</th>
-                        <th className="py-2.5 px-3 text-right">Actions</th>
+                        <th scope="col" className="py-2.5 px-3">Task ID</th>
+                        <th scope="col" className="py-2.5 px-3">Target &amp; Tool</th>
+                        <th scope="col" className="py-2.5 px-3">Status</th>
+                        <th scope="col" className="py-2.5 px-3">Invoker</th>
+                        <th scope="col" className="py-2.5 px-3 text-right">Actions</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-800/60 font-mono">
+                    <tbody className="divide-y divide-[var(--product-line)]/60 font-mono">
                       {pagedTasks.map((t) => {
                         const isSelected = selectedTaskId === t.id;
                         const canCancel = t.status === "pending" || t.status === "running" || t.status === "needs_approval" || (t.status as string) === "queued";
+                        const approval = findApprovalForTask(t);
                         return (
                           <tr
                             key={t.id}
-                            onClick={() => setSelectedTaskId(t.id)}
+                            id={`task-row-${t.id}`}
+                            onClick={() => selectTask(t.id)}
                             className={`cursor-pointer transition-colors ${
                               isSelected
                                 ? "bg-indigo-950/40 text-[var(--product-text)]"
@@ -985,10 +1569,28 @@ export const TaskQueueVisionView: React.FC = () => {
                             <td className="py-2.5 px-3">
                               <div className="flex flex-col">
                                 <span className="font-semibold text-[var(--product-text-secondary)]">{t.tool}</span>
-                                <span className="text-[10px] text-[var(--product-text-tertiary)]">{t.deviceHostname || t.deviceId}</span>
+                                <span className="text-[11px] text-[var(--product-text-tertiary)]">{t.deviceHostname || t.deviceId}</span>
                               </div>
                             </td>
-                            <td className="py-2.5 px-3">{getStatusBadge(t.status)}</td>
+                            <td className="py-2.5 px-3">
+                              {/* UX-05: shared StatusBadge; UX-09: the matching
+                                  approval id/status inline, linked to Approvals. */}
+                              <div className="flex flex-col gap-1">
+                                <StatusBadge
+                                  status={t.status === "needs_approval" ? "pending_approval" : t.status}
+                                  label={t.status === "needs_approval" ? "Needs review" : undefined}
+                                />
+                                {approval && (
+                                  <a
+                                    href="#human-approvals"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="text-[11px] text-indigo-400 hover:text-indigo-300 underline"
+                                  >
+                                    Approval {approval.id} · {approval.status}
+                                  </a>
+                                )}
+                              </div>
+                            </td>
                             <td className="py-2.5 px-3 text-[var(--product-text-tertiary)] text-[11px]">{t.invoker}</td>
                             <td className="py-2.5 px-3 text-right">
                               <div className="inline-flex items-center justify-end gap-1.5">
@@ -996,18 +1598,20 @@ export const TaskQueueVisionView: React.FC = () => {
                                   <>
                                     <button
                                       type="button"
+                                      disabled={pendingAction === `decide:${t.id}`}
                                       onClick={(e) => void handleDecideTask(t, "approved", e)}
                                       title="Approve task"
-                                      className="px-2 py-1 rounded-lg bg-emerald-600/20 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-600/30 text-[11px] font-semibold inline-flex items-center gap-1"
+                                      className="px-2 py-1 rounded-lg bg-emerald-600/20 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-600/30 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-40"
                                     >
                                       <CheckCircle2 className="w-3 h-3" />
                                       <span>Approve</span>
                                     </button>
                                     <button
                                       type="button"
+                                      disabled={pendingAction === `decide:${t.id}`}
                                       onClick={(e) => void handleDecideTask(t, "denied", e)}
                                       title="Deny task"
-                                      className="px-2 py-1 rounded-lg bg-rose-600/20 border border-rose-500/40 text-rose-300 hover:bg-rose-600/30 text-[11px] font-semibold inline-flex items-center gap-1"
+                                      className="px-2 py-1 rounded-lg bg-rose-600/20 border border-rose-500/40 text-rose-300 hover:bg-rose-600/30 text-[11px] font-semibold inline-flex items-center gap-1 disabled:opacity-40"
                                     >
                                       <XCircle className="w-3 h-3" />
                                       <span>Deny</span>
@@ -1017,9 +1621,10 @@ export const TaskQueueVisionView: React.FC = () => {
                                 {canCancel && (
                                   <button
                                     type="button"
+                                    disabled={pendingAction === `cancel:${t.id}`}
                                     onClick={(e) => void handleCancelTask(t.id, e)}
                                     title="Cancel task"
-                                    className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20"
+                                    className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 disabled:opacity-40"
                                   >
                                     <Ban className="w-3.5 h-3.5" />
                                   </button>
@@ -1027,9 +1632,10 @@ export const TaskQueueVisionView: React.FC = () => {
                                 {(t.status === "failed" || t.status === "cancelled" || t.status === "completed") && (
                                   <button
                                     type="button"
+                                    disabled={pendingAction === `retry:${t.id}`}
                                     onClick={(e) => void handleRetryTask(t, e)}
                                     title="Retry / Re-queue task"
-                                    className="p-1.5 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/20"
+                                    className="p-1.5 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/20 disabled:opacity-40"
                                   >
                                     <RotateCcw className="w-3.5 h-3.5" />
                                   </button>
@@ -1044,14 +1650,16 @@ export const TaskQueueVisionView: React.FC = () => {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={(e) => void handleDeleteTask(t.id, e)}
+                                  disabled={pendingAction === `delete:${t.id}`}
+                                  onClick={(e) => requestDeleteTask(t.id, e)}
                                   title="Delete task"
-                                  className="p-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20"
+                                  className="p-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20 disabled:opacity-40"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                                 <button
                                   type="button"
+                                  onClick={() => selectTask(t.id)}
                                   className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all ${
                                     isSelected
                                       ? "bg-indigo-600 text-white"
@@ -1068,6 +1676,7 @@ export const TaskQueueVisionView: React.FC = () => {
                     </tbody>
                   </table>
                 </div>
+                )}
 
                 {totalPages > 1 && (
                   <div className="flex items-center justify-between text-xs font-mono text-[var(--product-text-tertiary)] pt-1">
@@ -1090,6 +1699,24 @@ export const TaskQueueVisionView: React.FC = () => {
                 icon={<Crosshair className="w-4 h-4 text-emerald-400" />}
               />
               <JXCardContent>
+              {/* UX-13/UX-27: a deep-linked task id that matches nothing
+                  renders an explicit state instead of the first task. */}
+              {taskNotFound ? (
+                <EmptyState
+                  variant="card"
+                  title="Task not available"
+                  description={`The task “${routeTaskId}” is not in the current task list. The link may be stale, or the task may have been deleted.`}
+                  actionLabel="Show all tasks"
+                  onAction={() => {
+                    resolvedRouteTaskRef.current = null;
+                    setRouteTaskId(null);
+                    setTaskNotFound(false);
+                    setLinkedTask(null);
+                    setSelectedTaskId(tasks[0]?.id ?? "");
+                    updateRouteParams({ task: undefined });
+                  }}
+                />
+              ) : (
               <div className="space-y-4">
                 {/* Control bar: Zoom, SoM toggle, Task actions */}
                 <div className="flex flex-wrap items-center justify-between gap-3 p-2 rounded-xl bg-[var(--product-canvas)]/80 border border-[var(--product-line)]">
@@ -1097,23 +1724,25 @@ export const TaskQueueVisionView: React.FC = () => {
                     <span className="font-mono text-xs font-semibold text-indigo-400">
                       {activeTask?.tool}
                     </span>
-                    <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
+                    <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
                       {activeTask?.deviceHostname || activeTask?.deviceId}
                     </span>
                     {activeTask?.status === "needs_approval" && (
                       <>
                         <button
                           type="button"
+                          disabled={pendingAction === `decide:${activeTask.id}`}
                           onClick={() => void handleDecideTask(activeTask, "approved")}
-                          className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 text-xs font-mono font-semibold flex items-center gap-1"
+                          className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 text-xs font-mono font-semibold flex items-center gap-1 disabled:opacity-40"
                         >
                           <CheckCircle2 className="w-3.5 h-3.5" />
                           <span>Approve</span>
                         </button>
                         <button
                           type="button"
+                          disabled={pendingAction === `decide:${activeTask.id}`}
                           onClick={() => void handleDecideTask(activeTask, "denied")}
-                          className="px-2.5 py-1 rounded-lg bg-rose-600/20 border border-rose-500/40 text-rose-300 hover:bg-rose-600/30 text-xs font-mono font-semibold flex items-center gap-1"
+                          className="px-2.5 py-1 rounded-lg bg-rose-600/20 border border-rose-500/40 text-rose-300 hover:bg-rose-600/30 text-xs font-mono font-semibold flex items-center gap-1 disabled:opacity-40"
                         >
                           <XCircle className="w-3.5 h-3.5" />
                           <span>Deny</span>
@@ -1123,8 +1752,9 @@ export const TaskQueueVisionView: React.FC = () => {
                     {activeTask && (activeTask.status === "pending" || activeTask.status === "running" || activeTask.status === "needs_approval" || (activeTask.status as string) === "queued") && (
                       <button
                         type="button"
+                        disabled={pendingAction === `cancel:${activeTask.id}`}
                         onClick={() => void handleCancelTask(activeTask.id)}
-                        className="px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 text-xs font-mono font-semibold flex items-center gap-1"
+                        className="px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 text-xs font-mono font-semibold flex items-center gap-1 disabled:opacity-40"
                       >
                         <Ban className="w-3.5 h-3.5" />
                         <span>Cancel</span>
@@ -1133,8 +1763,9 @@ export const TaskQueueVisionView: React.FC = () => {
                     {activeTask && (activeTask.status === "failed" || activeTask.status === "cancelled" || activeTask.status === "completed") && (
                       <button
                         type="button"
+                        disabled={pendingAction === `retry:${activeTask.id}`}
                         onClick={() => void handleRetryTask(activeTask)}
-                        className="px-2.5 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/20 text-xs font-mono font-semibold flex items-center gap-1"
+                        className="px-2.5 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/20 text-xs font-mono font-semibold flex items-center gap-1 disabled:opacity-40"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
                         <span>Retry</span>
@@ -1153,8 +1784,9 @@ export const TaskQueueVisionView: React.FC = () => {
                     {activeTask && (
                       <button
                         type="button"
-                        onClick={() => void handleDeleteTask(activeTask.id)}
-                        className="px-2.5 py-1 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20 text-xs font-mono font-semibold flex items-center gap-1"
+                        disabled={pendingAction === `delete:${activeTask.id}`}
+                        onClick={() => requestDeleteTask(activeTask.id)}
+                        className="px-2.5 py-1 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20 text-xs font-mono font-semibold flex items-center gap-1 disabled:opacity-40"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                         <span>Delete</span>
@@ -1165,8 +1797,9 @@ export const TaskQueueVisionView: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
+                      disabled={pendingAction === "capture"}
                       onClick={() => void handleCaptureLiveScreenshot()}
-                      className="px-3 py-1 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 bg-indigo-600/20 text-indigo-300 border border-indigo-500/40 hover:bg-indigo-600/30"
+                      className="px-3 py-1 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 bg-indigo-600/20 text-indigo-300 border border-indigo-500/40 hover:bg-indigo-600/30 disabled:opacity-40"
                     >
                       <Camera className="w-3.5 h-3.5" />
                       <span>Capture Live</span>
@@ -1191,6 +1824,7 @@ export const TaskQueueVisionView: React.FC = () => {
                         type="button"
                         onClick={handleZoomOut}
                         title="Zoom Out"
+                        aria-label="Zoom out"
                         className="p-1.5 text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)] transition-colors"
                       >
                         <ZoomOut className="w-3.5 h-3.5" />
@@ -1202,6 +1836,7 @@ export const TaskQueueVisionView: React.FC = () => {
                         type="button"
                         onClick={handleZoomIn}
                         title="Zoom In"
+                        aria-label="Zoom in"
                         className="p-1.5 text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)] transition-colors"
                       >
                         <ZoomIn className="w-3.5 h-3.5" />
@@ -1210,7 +1845,8 @@ export const TaskQueueVisionView: React.FC = () => {
                         type="button"
                         onClick={handleZoomReset}
                         title="Reset Zoom"
-                        className="px-2 py-0.5 font-mono text-[10px] text-indigo-400 hover:text-indigo-300"
+                        aria-label="Reset zoom to fit"
+                        className="px-2 py-0.5 font-mono text-[11px] text-indigo-400 hover:text-indigo-300"
                       >
                         Fit
                       </button>
@@ -1223,7 +1859,7 @@ export const TaskQueueVisionView: React.FC = () => {
                   {liveScreenshotDataUrl ? (
                     <img
                       src={liveScreenshotDataUrl}
-                      alt={`Desktop frame for ${activeTask?.deviceHostname || activeTask?.deviceId || targetHost}`}
+                      alt={`Desktop frame for ${activeTask?.deviceHostname || activeTask?.deviceId || targetDeviceId}`}
                       className="h-full w-full object-contain bg-black"
                     />
                   ) : (
@@ -1249,13 +1885,13 @@ export const TaskQueueVisionView: React.FC = () => {
                     {/* Window Area */}
                     <div className="flex-1 p-3 grid grid-cols-12 gap-3 relative overflow-hidden">
                       {/* Simulated Window 1: Terminal */}
-                      <div className="col-span-7 rounded-lg bg-[var(--product-surface)]/95 border border-[var(--product-line)] p-2.5 font-mono text-xs flex flex-col relative shadow-lg">
+                      <div className="col-span-12 sm:col-span-7 rounded-lg bg-[var(--product-surface)]/95 border border-[var(--product-line)] p-2.5 font-mono text-xs flex flex-col relative shadow-lg">
                         <div className="flex items-center justify-between pb-1.5 border-b border-[var(--product-line)]/80 mb-2">
                           <div className="flex items-center gap-1.5">
                             <span className="w-2.5 h-2.5 rounded-full bg-rose-500/80"></span>
                             <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80"></span>
                             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80"></span>
-                            <span className="ml-2 text-[10px] text-[var(--product-text-tertiary)]">bash — 80x24</span>
+                            <span className="ml-2 text-[11px] text-[var(--product-text-tertiary)]">bash — 80x24</span>
                           </div>
                         </div>
                         <div className="space-y-1 text-[var(--product-text-secondary)] text-[11px]">
@@ -1267,8 +1903,8 @@ export const TaskQueueVisionView: React.FC = () => {
                       </div>
 
                       {/* Simulated Window 2: Web Preview */}
-                      <div className="col-span-5 rounded-lg bg-[var(--product-surface)]/90 border border-[var(--product-line)] p-2.5 flex flex-col relative shadow-lg">
-                        <div className="flex items-center justify-between pb-1.5 border-b border-[var(--product-line)]/80 mb-2 text-[10px] text-[var(--product-text-tertiary)] font-mono">
+                      <div className="col-span-12 sm:col-span-5 rounded-lg bg-[var(--product-surface)]/90 border border-[var(--product-line)] p-2.5 flex flex-col relative shadow-lg">
+                        <div className="flex items-center justify-between pb-1.5 border-b border-[var(--product-line)]/80 mb-2 text-[11px] text-[var(--product-text-tertiary)] font-mono">
                           <span>Bridge Gateway Inspector</span>
                           <span className="text-amber-400">● Simulated</span>
                         </div>
@@ -1279,7 +1915,7 @@ export const TaskQueueVisionView: React.FC = () => {
                             <div className="flex-1 bg-indigo-500/80 rounded-t h-[85%]"></div>
                             <div className="flex-1 bg-cyan-400 rounded-t h-[95%]"></div>
                           </div>
-                          <span className="font-mono text-[10px] text-[var(--product-text-dim)] text-center">Packets/Sec</span>
+                          <span className="font-mono text-[11px] text-[var(--product-text-dim)] text-center">Packets/Sec</span>
                         </div>
                       </div>
 
@@ -1307,7 +1943,7 @@ export const TaskQueueVisionView: React.FC = () => {
                             selectedMarkId === mark.id ? "ring-2 ring-white shadow-xl scale-[1.01]" : ""
                           }`}
                         >
-                          <span className="absolute -top-3 -left-1 px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-[var(--product-surface)] text-white shadow-md border border-[var(--product-line)]">
+                          <span className="absolute -top-3 -left-1 px-1.5 py-0.2 rounded text-[11px] font-mono font-bold bg-[var(--product-surface)] text-white shadow-md border border-[var(--product-line)]">
                             [{mark.id}]
                           </span>
                         </div>
@@ -1362,7 +1998,7 @@ export const TaskQueueVisionView: React.FC = () => {
                   <div className="flex items-center justify-between text-xs">
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-[var(--product-text-secondary)]">Execution Return Payload</span>
-                      <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                      <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                         200 OK
                       </span>
                     </div>
@@ -1394,7 +2030,7 @@ export const TaskQueueVisionView: React.FC = () => {
                               status: activeTask.status,
                               taskId: activeTask.id,
                               tool: activeTask.tool,
-                              targetNode: activeTask.deviceHostname || activeTask.deviceId,
+                              targetDevice: activeTask.deviceHostname || activeTask.deviceId,
                               args: activeTask.args,
                               result: activeTask.result,
                             }
@@ -1402,7 +2038,7 @@ export const TaskQueueVisionView: React.FC = () => {
                               status: activeTask?.status || "pending",
                               taskId: activeTask?.id,
                               tool: activeTask?.tool,
-                              targetNode: activeTask?.deviceHostname || activeTask?.deviceId,
+                              targetDevice: activeTask?.deviceHostname || activeTask?.deviceId,
                               args: activeTask?.args || {},
                             },
                         null,
@@ -1412,6 +2048,7 @@ export const TaskQueueVisionView: React.FC = () => {
                   </pre>
                 </div>
               </div>
+              )}
             </JXCardContent>
             </JXCard>
           </div>
@@ -1428,12 +2065,12 @@ export const TaskQueueVisionView: React.FC = () => {
             {editError && <div role="alert" className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono">{editError}</div>}
             <div className="space-y-3">
               <div>
-                <label className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">Tool</label>
-                <input value={editTool} onChange={(e) => setEditTool(e.target.value)} className="w-full px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono text-[var(--product-text)]" />
+                <label htmlFor="edit-task-tool" className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">Tool</label>
+                <input id="edit-task-tool" value={editTool} onChange={(e) => setEditTool(e.target.value)} className="w-full px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono text-[var(--product-text)]" />
               </div>
               <div>
-                <label className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">Arguments (JSON)</label>
-                <textarea rows={6} value={editArgsJson} onChange={(e) => setEditArgsJson(e.target.value)} className="w-full px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono text-[var(--product-text)]" />
+                <label htmlFor="edit-task-args" className="block text-xs font-mono text-[var(--product-text-tertiary)] mb-1">Arguments (JSON)</label>
+                <textarea id="edit-task-args" rows={6} value={editArgsJson} onChange={(e) => setEditArgsJson(e.target.value)} className="w-full px-3 py-2 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono text-[var(--product-text)]" />
               </div>
             </div>
             <div className="flex justify-end gap-2">
@@ -1443,6 +2080,73 @@ export const TaskQueueVisionView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* UX-04: dispatch confirmation. Tier 3/4 uses hold-to-confirm;
+          the dialog shows device, tool, tier, and a truncated args preview.
+          The dispatch itself runs only in confirmDispatch. */}
+      <ConfirmDestructive
+        open={dispatchDraft !== null}
+        title="Dispatch task?"
+        objectName={
+          dispatchDraft
+            ? `${dispatchDraft.tool} on ${
+                devices.find((d) => d.id === dispatchDraft.deviceId)?.hostname ||
+                dispatchDraft.deviceId
+              }`
+            : undefined
+        }
+        consequence={
+          dispatchDraft
+            ? `This dispatches ${dispatchDraft.tool} (${dispatchDraft.riskTier.replace("_", " ")}) to the selected device with these arguments: ${
+                JSON.stringify(dispatchDraft.args).length > 300
+                  ? `${JSON.stringify(dispatchDraft.args).slice(0, 300)}…`
+                  : JSON.stringify(dispatchDraft.args)
+              }`
+            : ""
+        }
+        confirmLabel={
+          dispatchDraft && (dispatchDraft.riskTier === "tier3_shell" || dispatchDraft.riskTier === "tier4_kernel")
+            ? "Hold to dispatch"
+            : "Dispatch task"
+        }
+        requireHold={
+          !!dispatchDraft &&
+          (dispatchDraft.riskTier === "tier3_shell" || dispatchDraft.riskTier === "tier4_kernel")
+        }
+        tone={
+          dispatchDraft && (dispatchDraft.riskTier === "tier3_shell" || dispatchDraft.riskTier === "tier4_kernel")
+            ? "error"
+            : "warning"
+        }
+        onConfirm={() => void confirmDispatch()}
+        onCancel={() => setDispatchDraft(null)}
+      />
+
+      {/* UX-03: delete-task confirmation. */}
+      <ConfirmDestructive
+        open={deleteTarget !== null}
+        title="Delete task?"
+        objectName={deleteTarget ? `Task #${deleteTarget}` : undefined}
+        consequence="This permanently deletes the task record. The task cannot be recovered, and its result and history entry are gone."
+        confirmLabel="Delete task"
+        onConfirm={() => void confirmDeleteTask()}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
+      {/* UX-03: clear-tasks confirmation (bulk delete of the filtered set). */}
+      <ConfirmDestructive
+        open={clearConfirmOpen}
+        title="Clear tasks?"
+        objectName={
+          statusFilter === "all"
+            ? "All tasks in this list"
+            : `Tasks with status “${statusFilter}”`
+        }
+        consequence={`This permanently deletes ${clearScopeCount} task(s) matching the current filter. Deleted tasks cannot be recovered.`}
+        confirmLabel="Clear tasks"
+        onConfirm={() => void confirmClearTasks()}
+        onCancel={() => setClearConfirmOpen(false)}
+      />
     </div>
   );
 };

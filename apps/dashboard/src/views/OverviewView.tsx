@@ -11,9 +11,11 @@ import {
   ProductModePill,
 } from "../ui";
 import { api, token, sessionToken } from "../api";
-import { PageEmpty } from "../components/PageEmpty";
+import { EmptyState, StatusBadge } from "../ui";
 import { Freshness } from "../components/Freshness";
 import { useDashboardStore } from "../state/dashboardStore";
+import { pushNotice } from "../state/notices";
+import { useLanguage } from "../i18n";
 import type { TaskInvocation } from "../types/dashboard";
 
 export const OverviewView: React.FC = () => {
@@ -21,6 +23,13 @@ export const OverviewView: React.FC = () => {
   const tasks = useDashboardStore((s) => s.tasks);
   const approvals = useDashboardStore((s) => s.approvals);
   const navigate = useDashboardStore((s) => s.setCurrentView);
+  // UX-06: surface the store sync state in the header instead of showing
+  // seed data with no freshness signal. Only rendered when live.
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
+  const refreshLive = useDashboardStore((s) => s.refreshLive);
+  const { number } = useLanguage();
   const [selectedTask, setSelectedTask] = useState<TaskInvocation | null>(null);
   const [metricsSummary, setMetricsSummary] = useState<{
     completed_1h?: number;
@@ -30,30 +39,49 @@ export const OverviewView: React.FC = () => {
     avg_task_duration_sec?: number | null;
   } | null>(null);
   const [recentFailures, setRecentFailures] = useState<{ id: string; tool: string; role?: string }[]>([]);
+  // UX-18 / UX-23: a failed live load is a retryable error, not silent.
+  // A 401 means the session ended: show an expired state instead of
+  // falling back to the seed demo data.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
+  const [recovering, setRecovering] = useState(false);
   const isLive = Boolean(token() || sessionToken());
   const online = devices.filter((device) => device.status === "online").length;
   const active = tasks.filter((task) => task.status === "running" || task.status === "pending").length;
   const pending = approvals.filter((approval) => approval.status === "pending").length;
 
+  const loadMetrics = async () => {
+    if (!isLive) return;
+    const wasLive = Boolean(token() || sessionToken());
+    setLoadError(null);
+    try {
+      const [summary, activity] = await Promise.all([
+        api.metricsSummary().catch(() => null),
+        api.liveActivity(20).catch(() => null),
+      ]);
+      if (summary) setMetricsSummary(summary);
+      if (activity?.recent_failures) setRecentFailures(activity.recent_failures.slice(0, 5));
+    } catch (err) {
+      const status = (err as { status?: number })?.status;
+      if (wasLive && status === 401) {
+        setExpired(true);
+        return;
+      }
+      setLoadError(err instanceof Error ? err.message : "Could not load live metrics.");
+    }
+  };
+
   useEffect(() => {
     if (!isLive) return;
     let cancelled = false;
     void (async () => {
-      try {
-        const [summary, activity] = await Promise.all([
-          api.metricsSummary().catch(() => null),
-          api.liveActivity(20).catch(() => null),
-        ]);
-        if (cancelled) return;
-        if (summary) setMetricsSummary(summary);
-        if (activity?.recent_failures) setRecentFailures(activity.recent_failures.slice(0, 5));
-      } catch {
-        /* keep store KPIs */
-      }
+      if (cancelled) return;
+      await loadMetrics();
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLive]);
 
   return <div className="space-y-5">
@@ -63,7 +91,11 @@ export const OverviewView: React.FC = () => {
           <h1 className="text-xl font-semibold text-[var(--product-text)]">Fleet overview</h1>
           <ProductModePill live={isLive} detail={isLive ? "Control plane" : "Sample fleet"} />
         </div>
-        <Freshness checkedAt={Date.now()} label={isLive ? "Live snapshot" : "Demo snapshot"} />
+        <Freshness
+          checkedAt={isLive ? lastSyncAt : Date.now()}
+          loading={isLive && syncState === "loading"}
+          label={isLive ? "Live snapshot" : "Demo snapshot"}
+        />
       </div>
       <MagneticButton
         variant="outline"
@@ -75,8 +107,24 @@ export const OverviewView: React.FC = () => {
       </MagneticButton>
     </header>
 
-    {!isLive && (
-      <PageEmpty
+    {isLive && syncState === "error" && !expired && (
+      <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-700/50 bg-rose-950/30 px-4 py-2 text-xs text-rose-300">
+        <span>Sync with the control plane failed{syncError ? `: ${syncError}` : "."} Showing the last known data.</span>
+        <JXButton variant="outlined" color="neutral" size="sm" onClick={() => void refreshLive?.()}>Retry</JXButton>
+      </div>
+    )}
+
+    {expired ? (
+      <EmptyState
+        variant="card"
+        title="Your session expired"
+        description="Sign in again to see your live fleet. The numbers below are sample data, not your fleet."
+        actionLabel="Sign in"
+        onAction={() => navigate("login")}
+      />
+    ) : !isLive && (
+      <EmptyState
+        variant="card"
         demo
         title="Exploring the demo overview"
         description="Numbers and devices on this page are simulated. Connect a control plane to see your real fleet."
@@ -87,42 +135,49 @@ export const OverviewView: React.FC = () => {
       />
     )}
 
+    {loadError && !expired && (
+      <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-700/50 bg-amber-950/30 px-4 py-2 text-xs text-amber-300">
+        <span>Live metrics failed to load: {loadError}</span>
+        <JXButton variant="outlined" color="neutral" size="sm" onClick={() => void loadMetrics()}>Retry</JXButton>
+      </div>
+    )}
+
     <BentoGrid>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <ProductMetricCard
           label="Devices online"
-          value={`${online} / ${devices.length}`}
+          value={`${number(online)} / ${number(devices.length)}`}
           hint={isLive ? "Enrolled fleet" : "Simulated inventory"}
           trend={online > 0 ? "up" : "flat"}
           onClick={() => navigate("devices")}
         />
         <ProductMetricCard
           label="Active tasks"
-          value={active}
+          value={number(active)}
           hint="Running or queued"
           trend={active > 0 ? "up" : "flat"}
           onClick={() => navigate("task-queue-and-vision")}
         />
         <ProductMetricCard
           label="Awaiting approval"
-          value={pending}
+          value={number(pending)}
           hint="Human-in-the-loop queue"
           trend={pending > 0 ? "down" : "flat"}
           onClick={() => navigate("human-approvals")}
         />
         <ProductMetricCard
           label="Completed (1h)"
-          value={metricsSummary?.completed_1h ?? "—"}
+          value={metricsSummary?.completed_1h != null ? number(metricsSummary.completed_1h) : "—"}
           hint="Control-plane throughput"
           trend="flat"
           onClick={() => navigate("task-queue-and-vision")}
         />
         <ProductMetricCard
           label="Failed (1h)"
-          value={metricsSummary?.failed_1h ?? "—"}
+          value={metricsSummary?.failed_1h != null ? number(metricsSummary.failed_1h) : "—"}
           hint={
             metricsSummary?.stale_device_count
-              ? `${metricsSummary.stale_device_count} stale heartbeats`
+              ? `${number(metricsSummary.stale_device_count)} stale heartbeats`
               : "Recent failures"
           }
           trend={(metricsSummary?.failed_1h ?? 0) > 0 ? "down" : "flat"}
@@ -130,10 +185,10 @@ export const OverviewView: React.FC = () => {
         />
         <ProductMetricCard
           label="Queue depth"
-          value={metricsSummary?.queue_depth ?? "—"}
+          value={metricsSummary?.queue_depth != null ? number(metricsSummary.queue_depth) : "—"}
           hint={
             metricsSummary?.avg_task_duration_sec != null
-              ? `avg ${metricsSummary.avg_task_duration_sec}s`
+              ? `avg ${number(metricsSummary.avg_task_duration_sec)}s`
               : "Queued tasks"
           }
           trend="flat"
@@ -150,14 +205,31 @@ export const OverviewView: React.FC = () => {
             variant="outlined"
             color="neutral"
             size="sm"
+            loading={recovering}
+            disabled={recovering}
             onClick={async () => {
               const role = recentFailures.find((f) => f.role)?.role || "developer";
+              setRecovering(true);
               try {
                 await api.supervisorRecover({ role });
                 const activity = await api.liveActivity(20).catch(() => null);
                 if (activity?.recent_failures) setRecentFailures(activity.recent_failures.slice(0, 5));
-              } catch {
-                /* ignore */
+                pushNotice({ tone: "success", title: `Recovery requested for the ${role} role` });
+              } catch (err) {
+                const status = (err as { status?: number })?.status;
+                pushNotice({
+                  tone: "error",
+                  title: "Recovery failed",
+                  message: status === 403
+                    ? "Access denied (403). Your account may lack permission to recover roles — ask an admin to check your role."
+                    : status && status >= 500
+                      ? `Control plane error (${status}). Try again, and check the audit trail to see whether the recovery ran.`
+                      : err instanceof Error ? err.message : "Recovery failed.",
+                  actionLabel: "Check audit trail",
+                  actionHref: "#/audit-trail",
+                });
+              } finally {
+                setRecovering(false);
               }
             }}
           >
@@ -184,7 +256,8 @@ export const OverviewView: React.FC = () => {
           </div>
           <JXButton variant="text" color="neutral" size="sm" onClick={() => navigate("task-queue-and-vision")}>View all</JXButton>
         </div>
-        {tasks.length === 0 ? <p className="py-8 text-sm text-[var(--product-text-tertiary)]">No tasks yet.</p> :
+        {tasks.length === 0 ? <EmptyState variant="bare" title="No tasks yet."
+            description="Dispatched tasks will appear here. Run a task from the Tasks view to get started." /> :
           <ul className="divide-y divide-[var(--product-line)]/80">
             {tasks.slice(0, 5).map((task) => <li key={task.id}>
               <button type="button" onClick={() => setSelectedTask(task)}
@@ -193,9 +266,7 @@ export const OverviewView: React.FC = () => {
                   <span className="block break-all text-sm text-[var(--product-text-secondary)]">{task.tool}</span>
                   <span className="mt-1 block break-all text-xs text-[var(--product-text-tertiary)]">{task.deviceHostname}</span>
                 </span>
-                <span className={`text-xs ${task.status === "failed" ? "text-rose-300" : task.status === "needs_approval" ? "text-amber-200" : "text-[var(--product-text-tertiary)]"}`}>
-                  {task.status.replace(/_/g, " ")}
-                </span>
+                <StatusBadge status={task.status} />
               </button>
             </li>)}
           </ul>}
@@ -203,7 +274,7 @@ export const OverviewView: React.FC = () => {
 
       <div className="space-y-3">
         {([
-          { view: "devices" as const, icon: Server, tone: "text-indigo-300", title: "Fleet inventory", hint: "Enroll agents and inspect nodes" },
+          { view: "devices" as const, icon: Server, tone: "text-indigo-300", title: "Fleet inventory", hint: "Enroll agents and inspect devices" },
           { view: "human-approvals" as const, icon: ShieldCheck, tone: "text-amber-300", title: "Approvals queue", hint: `${pending} waiting for review` },
           { view: "mcp-and-oauth" as const, icon: ListChecks, tone: "text-emerald-300", title: "MCP connections", hint: "ChatGPT, Claude, Gemini setup" },
         ]).map((item) => (

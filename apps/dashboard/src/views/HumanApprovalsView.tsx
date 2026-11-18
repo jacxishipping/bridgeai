@@ -9,6 +9,8 @@ import { motion, AnimatePresence } from "motion/react";
 import { useScrollShadow } from "../hooks/useScrollShadow";
 import {
   GlassModal,
+  ConfirmDestructive,
+  EmptyState,
   HoldToConfirmButton,
   JXCard,
   JXCardHeader,
@@ -27,6 +29,7 @@ import {
   ProductStatusDot,
   SlideToAction,
 } from "../ui";
+import { Freshness } from "../components/Freshness";
 import {
   ShieldAlert,
   Clock,
@@ -63,8 +66,14 @@ export const HumanApprovalsView: React.FC = () => {
   const resolveApproval = useDashboardStore((s) => s.resolveApproval);
   const refreshLive = useDashboardStore((s) => s.refreshLive);
   const operatorProfile = useDashboardStore((s) => s.operatorProfile);
+  // UX-06: live sync state surfaced via Freshness in the header.
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
   const tableScrollRef = useRef<HTMLDivElement>(null);
   const scrollShadow = useScrollShadow(tableScrollRef);
+  // UX-03: pending approval deletion; only runs from ConfirmDestructive.
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; label: string } | null>(null);
 
   // Active selected approval for inspection
   const [selectedId, setSelectedId] = useState<string>(
@@ -178,7 +187,7 @@ export const HumanApprovalsView: React.FC = () => {
       await resolveApproval(
         activeApproval.id,
         "approved",
-        "Operator validated blast radius and target node scope."
+        "Operator validated blast radius and target device scope."
       );
     } catch (err: any) {
       setActionError(err?.message || "Failed to approve request.");
@@ -256,8 +265,7 @@ export const HumanApprovalsView: React.FC = () => {
     setTimeout(() => setRePlanMessage(null), 4000);
   };
 
-  const handleDeleteApproval = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleDeleteApproval = async (id: string) => {
     setActionError(null);
     if (isLive) {
       try {
@@ -321,15 +329,21 @@ export const HumanApprovalsView: React.FC = () => {
           <h1 className="text-xl font-semibold text-[var(--product-text)]">Human approvals</h1>
           <ProductModePill live={isLive} detail={`${pendingCount} pending`} />
         </div>
-        <ProductSegmented
-          ariaLabel="Approval queue filter"
-          value={queueFilter}
-          onChange={setQueueFilter}
-          options={[
-            { id: "all", label: `All (${approvals.length})` },
-            { id: "pending", label: `Pending (${pendingCount})` },
-          ]}
-        />
+        <div className="flex flex-wrap items-center gap-3">
+          {isLive && <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} />}
+          {isLive && syncState === "error" && syncError && (
+            <span role="alert" className="text-xs text-rose-300">Sync failed: {syncError}</span>
+          )}
+          <ProductSegmented
+            ariaLabel="Approval queue filter"
+            value={queueFilter}
+            onChange={setQueueFilter}
+            options={[
+              { id: "all", label: `All (${approvals.length})` },
+              { id: "pending", label: `Pending (${pendingCount})` },
+            ]}
+          />
+        </div>
       </header>
 
       {/* Main Split: Left Urgent Queue, Right Approval Inspector */}
@@ -369,7 +383,7 @@ export const HumanApprovalsView: React.FC = () => {
                           {req.id}
                         </span>
                         <span
-                          className={`font-mono text-[10px] px-1.5 py-0.5 rounded uppercase font-semibold ${
+                          className={`font-mono text-[11px] px-1.5 py-0.5 rounded uppercase font-semibold ${
                             req.riskTier === "tier4_kernel"
                               ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
                               : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
@@ -381,7 +395,7 @@ export const HumanApprovalsView: React.FC = () => {
 
                       <div className="flex items-center gap-1.5">
                         <span
-                          className={`font-mono text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
+                          className={`font-mono text-[11px] px-2 py-0.5 rounded font-bold uppercase ${
                             req.status === "approved"
                               ? "bg-emerald-500/20 text-emerald-300"
                               : req.status === "denied"
@@ -394,8 +408,9 @@ export const HumanApprovalsView: React.FC = () => {
                         {isLive && (
                           <button
                             type="button"
-                            onClick={(e) => void handleDeleteApproval(req.id, e)}
+                            onClick={(e) => { e.stopPropagation(); setPendingDelete({ id: req.id, label: `${req.id} — ${req.reason}` }); }}
                             title="Delete approval record"
+                            aria-label={`Delete approval ${req.id}`}
                             className="p-1 rounded hover:bg-rose-500/20 text-[var(--product-text-dim)] hover:text-rose-300"
                           >
                             <Trash2 className="w-3 h-3" />
@@ -443,21 +458,21 @@ export const HumanApprovalsView: React.FC = () => {
               <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)]">
                 <JXCardHeader
                   title={`Approval Inspector — ${activeApproval.id}`}
-                  subheader={`Host: ${activeApproval.deviceHostname} • Requester: ${activeApproval.requester}`}
+                  subheader={`Device: ${activeApproval.deviceHostname} • Requester: ${activeApproval.requester}`}
                   icon={<ShieldAlert className="w-5 h-5 text-amber-400" />}
                 />
                 <JXCardContent>
-                  <div className="grid grid-cols-3 gap-3 p-3 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono">
                     <div>
-                      <span className="text-[var(--product-text-tertiary)] uppercase tracking-wider block text-[10px]">
-                        Target Host Node
+                      <span className="text-[var(--product-text-tertiary)] uppercase tracking-wider block text-[11px]">
+                        Target device
                       </span>
                       <span className="font-semibold text-[var(--product-text-secondary)]">
                         {activeApproval.deviceHostname}
                       </span>
                     </div>
                     <div>
-                      <span className="text-[var(--product-text-tertiary)] uppercase tracking-wider block text-[10px]">
+                      <span className="text-[var(--product-text-tertiary)] uppercase tracking-wider block text-[11px]">
                         Permission Tier
                       </span>
                       <span className="font-semibold text-amber-400">
@@ -465,7 +480,7 @@ export const HumanApprovalsView: React.FC = () => {
                       </span>
                     </div>
                     <div>
-                      <span className="text-[var(--product-text-tertiary)] uppercase tracking-wider block text-[10px]">
+                      <span className="text-[var(--product-text-tertiary)] uppercase tracking-wider block text-[11px]">
                         SLA remaining
                       </span>
                       <span className="text-[var(--product-text-secondary)] truncate block">
@@ -488,7 +503,7 @@ export const HumanApprovalsView: React.FC = () => {
                 <JXCardContent>
                   <div className="space-y-3">
                     <div className="p-4 rounded-xl bg-[var(--product-canvas)] border border-[var(--product-line)]">
-                      <span className="text-[10px] font-mono text-[var(--product-text-tertiary)] uppercase tracking-wider block mb-2">
+                      <span className="text-[11px] font-mono text-[var(--product-text-tertiary)] uppercase tracking-wider block mb-2">
                         Requested Command String
                       </span>
                       {renderHighlightedCommand(activeApproval.command)}
@@ -539,11 +554,17 @@ export const HumanApprovalsView: React.FC = () => {
                 </JXCard>
               ) : (
                 <ProductNotice tone="info">
-                  No desktop screenshot attached to this approval. Review the command string and host carefully before authorizing.
+                  No desktop screenshot attached to this approval. Review the command string and device carefully before authorizing.
                 </ProductNotice>
               )}
 
-              {/* Mandatory Safety Checklist & Decision Action Ribbon */}
+              {/* Mandatory Safety Checklist & Decision Action Ribbon.
+                  Approve/deny split (UX-22), kept deliberately asymmetric:
+                  Approve is a non-destructive authorisation, so it uses the
+                  checklist-gated SlideToAction; Deny is a terminal decision
+                  with a mandatory reason, so it uses a GlassModal with a
+                  hold-to-deny button. Record deletion is destructive and
+                  uses ConfirmDestructive instead of either mechanism. */}
               {activeApproval.status === "pending" && (
                 <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)]">
                   <JXCardHeader
@@ -632,8 +653,8 @@ export const HumanApprovalsView: React.FC = () => {
                         {allChecklistSatisfied ? (
                           <ProductGlass className="p-2">
                             <SlideToAction
-                              label="Slide to authorize"
-                              completedText="Authorized"
+                              label="Approve"
+                              completedText="Approved"
                               onComplete={() => { void handleAuthorize(); }}
                             />
                           </ProductGlass>
@@ -656,9 +677,11 @@ export const HumanApprovalsView: React.FC = () => {
               )}
             </div>
           ) : (
-            <div className="p-8 text-center text-[var(--product-text-tertiary)] font-mono text-xs">
-              No approval selected.
-            </div>
+            <EmptyState
+              variant="bare"
+              title="No approval selected"
+              description="Select an approval from the queue to inspect it."
+            />
           )}
         </JXGridItem>
       </JXGrid>
@@ -671,18 +694,19 @@ export const HumanApprovalsView: React.FC = () => {
         />
         <JXCardContent>
           <div ref={tableScrollRef} tabIndex={0} role="region" aria-label="Approval decision history" className="overflow-x-auto scroll-shadow rounded-xl border border-[var(--product-line)]" data-scroll-left={scrollShadow.left} data-scroll-right={scrollShadow.right}>
-            <table className="product-table-sticky-first w-full text-left text-xs border-collapse">
+            <table className="product-table-sticky-first w-full min-w-[720px] text-left text-xs border-collapse">
+              <caption className="sr-only">Approval decision history</caption>
               <thead>
                 <tr className="bg-[var(--product-canvas)] border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] font-mono uppercase">
-                  <th className="p-3">Request ID</th>
-                  <th className="p-3">Command</th>
-                  <th className="p-3">Deciding Operator</th>
-                  <th className="p-3">Verdict</th>
-                  <th className="p-3">Timestamp (UTC)</th>
-                  <th className="p-3">Justification</th>
+                  <th scope="col" className="p-3">Request ID</th>
+                  <th scope="col" className="p-3">Command</th>
+                  <th scope="col" className="p-3">Deciding Operator</th>
+                  <th scope="col" className="p-3">Verdict</th>
+                  <th scope="col" className="p-3">Timestamp (UTC)</th>
+                  <th scope="col" className="p-3">Justification</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800/60 font-mono">
+              <tbody className="divide-y divide-[var(--product-line)] font-mono">
                 {effectiveHistoryRecords.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="p-6 text-center text-[var(--product-text-tertiary)] font-sans">
@@ -699,7 +723,7 @@ export const HumanApprovalsView: React.FC = () => {
                       <td className="p-3 text-[var(--product-text-tertiary)]">{rec.decidedBy}</td>
                       <td className="p-3">
                         <span
-                          className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
+                          className={`px-2 py-0.5 rounded text-[11px] uppercase font-bold ${
                             rec.verdict === "approved"
                               ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                               : "bg-rose-500/20 text-rose-300 border border-rose-500/40"
@@ -784,6 +808,18 @@ export const HumanApprovalsView: React.FC = () => {
           </GlassModal>
         )}
       </AnimatePresence>
+
+      {pendingDelete && (
+        <ConfirmDestructive
+          open
+          title="Delete approval record"
+          objectName={pendingDelete.label}
+          consequence="This permanently deletes the approval record. The underlying task is not affected."
+          confirmLabel="Delete approval"
+          onConfirm={() => { const id = pendingDelete.id; setPendingDelete(null); void handleDeleteApproval(id); }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 };

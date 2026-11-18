@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { formatDate, languages, useLanguage } from "../../i18n";
+import { resolveLocale, translate } from "../../i18n/catalogs";
 
 export interface LiveDevice {
   id: string; name?: string; hostname?: string; os?: string; status?: string;
@@ -29,13 +30,14 @@ export const text = (value: unknown) => typeof value === "string" ? value : JSON
 export const message = (error: unknown) => error instanceof Error ? error.message : "Unable to complete this request.";
 export const deviceName = (device: LiveDevice) => device.name || device.hostname || device.id;
 export const deviceStatus = (device: LiveDevice) => device.revoked ? "revoked" : device.status || "unknown";
-export const time = (timestamp?: number | null) => timestamp ? formatDate(new Date(timestamp * 1000), { dateStyle: "medium", timeStyle: "medium" }) : "Not reported";
+/** Localised via the document locale (kept in sync by initializeLanguage). */
+export const time = (timestamp?: number | null) => timestamp ? formatDate(new Date(timestamp * 1000), { dateStyle: "medium", timeStyle: "medium" }) :
+  translate(resolveLocale(typeof document !== "undefined" ? document.documentElement.lang || "en" : "en"), "Not reported");
 export const taskStates = ["all", "queued", "running", "completed", "failed", "needs_approval", "canceled", "timed_out"];
 export const normalizeTaskStatus = (status: string) => status === "cancelled" ? "canceled" : status;
-export const taskStatus = (status: string) => ({
-  queued: "Submitted", running: "Running", completed: "Completed", failed: "Failed",
-  needs_approval: "Awaiting approval", canceled: "Canceled", cancelled: "Canceled", timed_out: "Timed out",
-}[status] || status.replace(/_/g, " "));
+// NOTE (UX-05): the old taskStatus() label helper was deleted — task states
+// render through the shared <StatusBadge> (ui.tsx) and option labels read
+// the shared STATUS_TONES map, so one state never gets two colours again.
 export function argsOf(task: LiveTask): Record<string, unknown> {
   try { const args = JSON.parse(task.args_json || "{}"); return args && typeof args === "object" && !Array.isArray(args) ? args : {}; }
   catch { return {}; }
@@ -72,11 +74,11 @@ export function useRead<T>(load: () => Promise<T>, poll = false) {
 }
 
 export function ReadState({ loading, error, checkedAt }: { loading: boolean; error: string; checkedAt?: Date }) {
-  const { date } = useLanguage();
+  const { date, t } = useLanguage();
   const updated = checkedAt ? date(checkedAt, { timeStyle: "medium" }) : "";
   return <div role="status" className="text-xs text-[var(--product-text-tertiary)]">
     {error ? <span className="text-amber-300">{error} Last successful update: {updated || "never"}. Refresh to reconnect.</span> :
-      loading ? "Refreshing…" : checkedAt ? `Updated ${updated}` : "Not loaded"}
+      loading ? t("Refreshing…") : checkedAt ? `${t("Updated")} ${updated}` : t("Not loaded")}
   </div>;
 }
 
@@ -93,8 +95,9 @@ export function Pagination({ page, total, size = 25, onPage }: { page: number; t
 }
 
 export function Payload({ title = "Technical details", value }: { title?: string; value: unknown }) {
-  return <details className="min-w-0 rounded-lg border border-[var(--product-line)] p-3">
-    <summary className="cursor-pointer text-sm text-[var(--product-text-secondary)]">{title}</summary>
+  const [open, setOpen] = useState(false);
+  return <details open={open} onToggle={(e) => setOpen(e.currentTarget.open)} className="min-w-0 rounded-lg border border-[var(--product-line)] p-3">
+    <summary aria-expanded={open} className="cursor-pointer text-sm text-[var(--product-text-secondary)]">{title}</summary>
     <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-all text-xs text-[var(--product-text-secondary)]">{text(value)}</pre>
   </details>;
 }

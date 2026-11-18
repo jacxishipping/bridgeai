@@ -32,6 +32,7 @@ import { runTier2Tests } from './tier2-boundary-corner.test.js';
 import { runTier3Tests } from './tier3-combinations.test.js';
 import { runTier4Tests } from './tier4-scenarios.test.js';
 import { runTier5AdversarialTests } from './tier5-adversarial.test.js';
+import { runP13DeviceIdentityTests } from './p1-3-device-identity.test.js';
 import { runChallengerStressTests } from './challenger-stress.test.js';
 import { runChallengerM12StressTests } from './challenger-m1-2-stress.test.js';
 import { runChallengerComplianceAudit } from './challenger-compliance.test.js';
@@ -68,30 +69,36 @@ async function main() {
     console.log('\x1b[33m[7/12] Running Tier 3 Suite (Cross-Feature Combinations)...\x1b[0m');
     await runTier3Tests();
 
-    console.log('\x1b[33m[8/12] Running Tier 4 Suite (Real-World Application Scenarios)...\x1b[0m');
+    console.log('\x1b[33m[8/13] Running Tier 4 Suite (Real-World Application Scenarios)...\x1b[0m');
     await runTier4Tests();
 
+    // P1-3 (device-token rotation + mTLS fingerprint): dashboard wave,
+    // runs after Tier 4 and before the challenger suites. It stubs
+    // fetch only inside its own test and restores it in `finally`.
+    console.log('\x1b[33m[9/13] Running P1-3 Suite (Device-token rotation + mTLS fingerprint)...\x1b[0m');
+    await runP13DeviceIdentityTests();
+
     // 3. Challenger Suites (external runners folded into the shared summary)
-    console.log('\x1b[33m[9/12] Running Challenger Stress Suite (Empirical State/Approval/Dispatch Stress)...\x1b[0m');
+    console.log('\x1b[33m[10/13] Running Challenger Stress Suite (Empirical State/Approval/Dispatch Stress)...\x1b[0m');
     const challengerStress = await runChallengerStressTests();
     for (const r of challengerStress.records) {
       recordExternalResult('Challenger Stress', 'challenger', r.name, r.passed, r.error ? new Error(r.error) : undefined, undefined, r.durationMs);
     }
 
-    console.log('\x1b[33m[10/12] Running Challenger M1.2 Suite (Empirical Adversarial Stress)...\x1b[0m');
+    console.log('\x1b[33m[11/13] Running Challenger M1.2 Suite (Empirical Adversarial Stress)...\x1b[0m');
     const challengerM12 = await runChallengerM12StressTests();
     for (const r of challengerM12.records) {
       recordExternalResult('Challenger M1.2 Stress', 'challenger', r.name, r.passed, r.error ? new Error(r.error) : undefined, undefined, r.durationMs);
     }
 
-    console.log('\x1b[33m[11/12] Running Challenger Compliance Suite (Static Compliance Audit)...\x1b[0m');
+    console.log('\x1b[33m[12/13] Running Challenger Compliance Suite (Static Compliance Audit)...\x1b[0m');
     const compliance = runChallengerComplianceAudit();
     for (const r of compliance.records) {
       recordExternalResult('Challenger Compliance Audit', 'challenger', r.name, r.passed, r.error ? new Error(r.error) : undefined, undefined, r.durationMs);
     }
 
     // 4. Tier 5 Adversarial Suite (runs last: it resolves all seed approvals)
-    console.log('\x1b[33m[12/12] Running Tier 5 Suite (Adversarial Coverage Hardening & Stress)...\x1b[0m');
+    console.log('\x1b[33m[13/13] Running Tier 5 Suite (Adversarial Coverage Hardening & Stress)...\x1b[0m');
     const tier5 = await runTier5AdversarialTests();
     for (const r of tier5.records) {
       recordExternalResult(r.suite, 'tier5', r.name, r.passed, r.error ? new Error(r.error) : undefined, undefined, r.durationMs);

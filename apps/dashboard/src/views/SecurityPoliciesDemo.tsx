@@ -8,6 +8,7 @@
 import React, { useState, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useScrollShadow } from "../hooks/useScrollShadow";
+import { formatDate } from "../i18n";
 import {
   GlassModal,
   JXCard,
@@ -308,7 +309,9 @@ export const SecurityPoliciesDemo: React.FC = () => {
           event: "TEST_PING",
           channel: target.name,
           status: `delivered (200 OK - ${latency}ms)`,
-          time: new Date().toLocaleTimeString() + " UTC",
+          // Local time in the app locale and display zone via formatDate
+          // (UX-29). No " UTC" suffix: this is a local time, not UTC.
+          time: formatDate(new Date(), { timeStyle: "medium" }),
         },
         ...prev,
       ]);
@@ -342,7 +345,7 @@ export const SecurityPoliciesDemo: React.FC = () => {
 
   const handlePublishNewVersion = () => {
     setPolicyVersion("v3.4.2");
-    setRollbackSuccess("Successfully published and distributed Policy Release v3.4.2 to 40 nodes.");
+    setRollbackSuccess("Successfully published and distributed Policy Release v3.4.2 to 40 devices.");
     setTimeout(() => setRollbackSuccess(null), 4000);
   };
 
@@ -423,17 +426,18 @@ export const SecurityPoliciesDemo: React.FC = () => {
             {/* Tab 1: Executable Allowlists */}
             {activeTab === "binaries" && (
               <div ref={binariesScrollRef} tabIndex={0} role="region" aria-label="Executable allowlists" className="overflow-x-auto scroll-shadow rounded-xl border border-[var(--product-line)]" data-scroll-left={binariesScrollShadow.left} data-scroll-right={binariesScrollShadow.right}>
-                <table className="w-full text-left text-xs border-collapse">
+                <table className="w-full min-w-[640px] text-left text-xs border-collapse">
+                  <caption className="sr-only">Executable allowlist</caption>
                   <thead>
                     <tr className="bg-[var(--product-canvas)] border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] font-mono uppercase">
-                      <th className="p-3">Binary Name</th>
-                      <th className="p-3">Filesystem Path</th>
-                      <th className="p-3">SHA-256 Cryptographic Hash</th>
-                      <th className="p-3">Governance Status</th>
-                      <th className="p-3 text-right">Actions</th>
+                      <th scope="col" className="p-3">Binary Name</th>
+                      <th scope="col" className="p-3">Filesystem Path</th>
+                      <th scope="col" className="p-3">SHA-256 Cryptographic Hash</th>
+                      <th scope="col" className="p-3">Governance Status</th>
+                      <th scope="col" className="p-3 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800/60 font-mono">
+                  <tbody className="divide-y divide-[var(--product-line)] font-mono">
                     {binaries.map((b) => (
                       <tr key={b.id} className="hover:bg-[var(--product-canvas)]/40 transition-colors">
                         <td className="p-3 font-semibold text-[var(--product-text-secondary)]">{b.name}</td>
@@ -445,7 +449,7 @@ export const SecurityPoliciesDemo: React.FC = () => {
                         </td>
                         <td className="p-3">
                           <span
-                            className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
+                            className={`px-2 py-0.5 rounded text-[11px] uppercase font-bold ${
                               b.status === "allowed"
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                                 : "bg-rose-500/20 text-rose-300 border border-rose-500/40"
@@ -475,15 +479,16 @@ export const SecurityPoliciesDemo: React.FC = () => {
             {/* Tab 2: Restricted Paths */}
             {activeTab === "paths" && (
               <div ref={pathsScrollRef} tabIndex={0} role="region" aria-label="Restricted paths" className="overflow-x-auto scroll-shadow rounded-xl border border-[var(--product-line)]" data-scroll-left={pathsScrollShadow.left} data-scroll-right={pathsScrollShadow.right}>
-                <table className="w-full text-left text-xs border-collapse">
+                <table className="w-full min-w-[640px] text-left text-xs border-collapse">
+                  <caption className="sr-only">Restricted filesystem paths</caption>
                   <thead>
                     <tr className="bg-[var(--product-canvas)] border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] font-mono uppercase">
-                      <th className="p-3">Protected Filesystem Glob</th>
-                      <th className="p-3">Protection Description</th>
-                      <th className="p-3">Kernel Enforcement Level</th>
+                      <th scope="col" className="p-3">Protected Filesystem Glob</th>
+                      <th scope="col" className="p-3">Protection Description</th>
+                      <th scope="col" className="p-3">Kernel Enforcement Level</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800/60 font-mono">
+                  <tbody className="divide-y divide-[var(--product-line)] font-mono">
                     {paths.map((p) => (
                       <tr key={p.id} className="hover:bg-[var(--product-canvas)]/40 transition-colors">
                         <td className="p-3 text-rose-400 font-bold">
@@ -491,7 +496,7 @@ export const SecurityPoliciesDemo: React.FC = () => {
                         </td>
                         <td className="p-3 text-[var(--product-text-secondary)] font-sans">{p.description}</td>
                         <td className="p-3">
-                          <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[10px] uppercase font-bold">
+                          <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[11px] uppercase font-bold">
                             Zero-Bypass Kernel Hook
                           </span>
                         </td>
@@ -685,7 +690,7 @@ export const SecurityPoliciesDemo: React.FC = () => {
                       Subscribed Incident Events
                     </span>
 
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
                           type="checkbox"
@@ -703,7 +708,7 @@ export const SecurityPoliciesDemo: React.FC = () => {
                           onChange={() => handleToggleSubscription(wh.id, "agentOffline")}
                           className="w-3.5 h-3.5 rounded bg-[var(--product-surface)] border-[var(--product-line)] accent-indigo-500 cursor-pointer"
                         />
-                        <span className="text-[var(--product-text-secondary)]">Node Disconnected</span>
+                        <span className="text-[var(--product-text-secondary)]">Device disconnected</span>
                       </label>
 
                       <label className="flex items-center gap-2 cursor-pointer">
@@ -772,64 +777,74 @@ export const SecurityPoliciesDemo: React.FC = () => {
               exit={{ opacity: 0, scale: 0.95 }}
               className="space-y-4"
             >
-              <div className="flex items-center justify-between border-b border-[var(--product-line)] pb-3">
-                <div className="flex items-center gap-2 text-indigo-400 font-bold">
-                  <Plus className="w-5 h-5" />
-                  <span>Add Executable to Allowlist</span>
-                </div>
-                <button
-                  type="button"
-                  aria-label="Close executable form"
-                  onClick={() => setShowAddBinary(false)}
-                  className="text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
-                >
-                  <XCircle className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="space-y-3 text-xs font-mono">
-                <div>
-                  <label className="block text-[var(--product-text-tertiary)] mb-1">Absolute Binary Path:</label>
-                  <input
-                    type="text"
-                    value={newBinaryPath}
-                    onChange={(e) => setNewBinaryPath(e.target.value)}
-                    placeholder="/usr/bin/node"
-                    className="w-full p-2.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] focus:outline-none"
-                  />
+              <form onSubmit={(e) => { e.preventDefault(); handleAddBinary(); }} className="space-y-4">
+                <div className="flex items-center justify-between border-b border-[var(--product-line)] pb-3">
+                  <div className="flex items-center gap-2 text-indigo-400 font-bold">
+                    <Plus className="w-5 h-5" />
+                    <span>Add Executable to Allowlist</span>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Close executable form"
+                    onClick={() => setShowAddBinary(false)}
+                    className="text-[var(--product-text-tertiary)] hover:text-[var(--product-text-secondary)]"
+                  >
+                    <XCircle className="w-5 h-5" />
+                  </button>
                 </div>
 
-                <div>
-                  <label className="block text-[var(--product-text-tertiary)] mb-1">SHA-256 Digest:</label>
-                  <input
-                    type="text"
-                    value={newBinarySha}
-                    onChange={(e) => setNewBinarySha(e.target.value)}
-                    placeholder="7f49a13b..."
-                    className="w-full p-2.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] focus:outline-none"
-                  />
-                </div>
-              </div>
+                <div className="space-y-3 text-xs font-mono">
+                  <div>
+                    <label htmlFor="demo-binary-path" className="block text-[var(--product-text-tertiary)] mb-1">
+                      Absolute Binary Path: <span aria-hidden="true" className="text-rose-400">*</span><span className="sr-only"> (required)</span>
+                    </label>
+                    <input
+                      id="demo-binary-path"
+                      type="text"
+                      required
+                      value={newBinaryPath}
+                      onChange={(e) => setNewBinaryPath(e.target.value)}
+                      placeholder="/usr/bin/node"
+                      className="w-full p-2.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] focus:outline-none"
+                    />
+                  </div>
 
-              <div className="flex justify-end gap-2 pt-2">
-                <JXButton
-                  variant="outlined"
-                  color="neutral"
-                  size="sm"
-                  onClick={() => setShowAddBinary(false)}
-                >
-                  Cancel
-                </JXButton>
-                <JXButton
-                  variant="contained"
-                  color="primary"
-                  size="sm"
-                  disabled={!newBinaryPath.trim() || !newBinarySha.trim()}
-                  onClick={handleAddBinary}
-                >
-                  Register Binary
-                </JXButton>
-              </div>
+                  <div>
+                    <label htmlFor="demo-binary-sha" className="block text-[var(--product-text-tertiary)] mb-1">
+                      SHA-256 Digest: <span aria-hidden="true" className="text-rose-400">*</span><span className="sr-only"> (required)</span>
+                    </label>
+                    <input
+                      id="demo-binary-sha"
+                      type="text"
+                      required
+                      value={newBinarySha}
+                      onChange={(e) => setNewBinarySha(e.target.value)}
+                      placeholder="7f49a13b..."
+                      className="w-full p-2.5 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-[var(--product-text-secondary)] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <JXButton
+                    variant="outlined"
+                    color="neutral"
+                    size="sm"
+                    type="button"
+                    onClick={() => setShowAddBinary(false)}
+                  >
+                    Cancel
+                  </JXButton>
+                  <JXButton
+                    variant="contained"
+                    color="primary"
+                    size="sm"
+                    type="submit"
+                  >
+                    Register Binary
+                  </JXButton>
+                </div>
+              </form>
             </motion.div>
           </GlassModal>
         )}

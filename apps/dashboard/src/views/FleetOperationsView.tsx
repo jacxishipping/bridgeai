@@ -19,6 +19,8 @@ import {
   JXTextField,
   JXStack,
   JXLinearProgress,
+  StatusBadge,
+  EmptyState,
 } from "../ui";
 import {
   Radio,
@@ -48,6 +50,9 @@ import {
 } from "lucide-react";
 import { useDashboardStore } from "../state/dashboardStore";
 import { api, token, sessionToken, toIsoTimestamp } from "../api";
+import { pushNotice } from "../state/notices";
+import { Freshness } from "../components/Freshness";
+import { useLanguage, formatDate } from "../i18n";
 
 function isLiveMode(): boolean {
   return typeof window !== "undefined" && Boolean(token() || sessionToken());
@@ -104,8 +109,16 @@ export const FleetOperationsView: React.FC = () => {
   const devices = useDashboardStore((s) => s.devices);
   const tasks = useDashboardStore((s) => s.tasks);
   const refreshLive = useDashboardStore((s) => s.refreshLive);
+  const setCurrentView = useDashboardStore((s) => s.setCurrentView);
   const tableScrollRef = useRef<HTMLDivElement>(null);
   const scrollShadow = useScrollShadow(tableScrollRef);
+  // UX-06: sync freshness in the header when live; UX-29: timestamps and
+  // numbers go through useLanguage() with an explicit timeZone.
+  const syncState = useDashboardStore((s) => s.syncState);
+  const lastSyncAt = useDashboardStore((s) => s.lastSyncAt);
+  const syncError = useDashboardStore((s) => s.syncError);
+  const { date, number } = useLanguage();
+  const isLive = isLiveMode();
 
   // Target fleet selection
   const [targetScope, setTargetScope] = useState<"all" | "production-east" | "gpu-runners" | "custom">("all");
@@ -115,6 +128,18 @@ export const FleetOperationsView: React.FC = () => {
 
   // Broadcast execution state
   const [isBroadcasting, setIsBroadcasting] = useState<boolean>(false);
+  // UX-23: Cancel calls POST /api/fleet/broadcast/{batch_id}/cancel, so
+  // tasks in the batch that have not started yet are stopped on the
+  // control plane before any agent picks them up. Tasks already running
+  // on a device are left alone (the endpoint never aborts in-flight
+  // device work) — the notice says so instead of implying a recall.
+  // The poll timer id is kept so Cancel can clear it, and the live
+  // batch id is kept so Cancel knows which batch to stop.
+  const broadcastCancelRef = useRef(false);
+  const broadcastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const broadcastBatchIdRef = useRef<string | null>(null);
+  const [broadcastCancelled, setBroadcastCancelled] = useState(false);
+  const [broadcastCancelling, setBroadcastCancelling] = useState(false);
   const [broadcastProgress, setBroadcastProgress] = useState<{
     succeeded: number;
     inProgress: number;
@@ -127,12 +152,12 @@ export const FleetOperationsView: React.FC = () => {
     total: 40,
   });
   const [selectedFailedNode, setSelectedFailedNode] = useState<{
-    nodeId: string;
+    deviceId: string;
     exitCode: number;
     stderr: string;
   } | null>(null);
   const [lastFailedNode, setLastFailedNode] = useState<{
-    nodeId: string;
+    deviceId: string;
     exitCode: number;
     stderr: string;
   } | null>(null);
@@ -144,7 +169,22 @@ export const FleetOperationsView: React.FC = () => {
     git_branch?: string;
   } | null>(null);
   const [isUpdatingFleet, setIsUpdatingFleet] = useState<boolean>(false);
-  const [fleetNotice, setFleetNotice] = useState<string | null>(null);
+  // UX-23: the fleet update is a broadcast of update_fleet_agent, so it
+  // shares the broadcast batch id and the same cancel endpoint. Cancel
+  // pressed while the update POST is in flight is honoured once the
+  // batch id comes back (see handleUpdateFleetAgents).
+  const updateCancelRef = useRef(false);
+  const updateBatchIdRef = useRef<string | null>(null);
+  const [updateCancelled, setUpdateCancelled] = useState(false);
+  const [updateCancelling, setUpdateCancelling] = useState(false);
+  // UX-23: a failed live config load is a retryable error, not silent.
+  // A 401 means the session ended: show an expired state instead of the
+  // seed rules/schedules.
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
+  // UX-20: blur validation for the two creation forms.
+  const [ruleNameTouched, setRuleNameTouched] = useState(false);
+  const [schedNameTouched, setSchedNameTouched] = useState(false);
 
   // Live creation inputs
   const [newRuleName, setNewRuleName] = useState<string>("");
@@ -211,7 +251,7 @@ export const FleetOperationsView: React.FC = () => {
       name: "Nightly Enclave Key Rotation",
       description: "Renew ephemeral RSA/ECDSA signing pairs & flush TLS session tickets",
       cronExpr: "0 2 * * *",
-      targets: "All Nodes (40)",
+      targets: "All devices (40)",
       lastStatus: "success",
       lastDuration: "42s",
       nextRun: "In 18 mins",
@@ -233,7 +273,7 @@ export const FleetOperationsView: React.FC = () => {
       name: "Weekly TPM PCR Attestation Integrity Scan",
       description: "Cryptographic hash verification of PCR-7 boot measurements across fleet",
       cronExpr: "0 0 * * 0",
-      targets: "All Nodes (40)",
+      targets: "All devices (40)",
       lastStatus: "success",
       lastDuration: "1m 18s",
       nextRun: "In 4 days",
@@ -256,6 +296,8 @@ export const FleetOperationsView: React.FC = () => {
 
   const loadLiveFleetConfig = useCallback(async () => {
     if (!isLiveMode()) return;
+    const wasLive = isLiveMode();
+    setConfigError(null);
     try {
       const [trigRes, schedRes, verRes, framesRes] = await Promise.all([
         api.triggers().catch(() => null),
@@ -300,7 +342,7 @@ export const FleetOperationsView: React.FC = () => {
             enabled: Boolean(t.enabled),
             firedCount: t.last_triggered_at ? 1 : 0,
             lastFired: t.last_triggered_at
-              ? toIsoTimestamp(t.last_triggered_at, "Never")
+              ? formatDate(new Date(toIsoTimestamp(t.last_triggered_at, new Date().toISOString())), { dateStyle: "medium", timeStyle: "short" })
               : "Never",
             category: cat,
             isBackend: true,
@@ -319,15 +361,38 @@ export const FleetOperationsView: React.FC = () => {
           lastStatus: "success",
           lastDuration: s.last_run_at ? "completed" : "pending",
           nextRun: s.next_run_at
-            ? toIsoTimestamp(s.next_run_at, `Every ${s.interval_seconds || 300}s`)
+            ? formatDate(new Date(toIsoTimestamp(s.next_run_at, new Date().toISOString())), { dateStyle: "medium", timeStyle: "short" })
             : `Every ${s.interval_seconds || 300}s`,
           enabled: Boolean(s.enabled),
           isBackend: true,
         }));
         setCronJobs(mappedJobs);
       }
-    } catch {
-      // Keep existing state if fetch fails
+      setExpired(false);
+    } catch (err) {
+      // A 401 means the session ended: show the expired state instead of
+      // the seed rules/schedules. Any other failure is retryable (UX-23).
+      const status = (err as { status?: number })?.status;
+      if (wasLive && status === 401) {
+        setExpired(true);
+        pushNotice({
+          tone: "error",
+          title: "Your session expired",
+          message: "Sign in again to manage fleet operations.",
+          actionLabel: "Sign in",
+          actionHref: "#/login",
+        });
+        return;
+      }
+      setConfigError(
+        status === 403
+          ? "Access denied (403). Your account may lack permission to read fleet automation — ask an admin to check your role."
+          : status === 429
+            ? "Too many requests (429). Wait a minute, then use Retry."
+            : status && status >= 500
+              ? `Control plane error (${status}). Fleet automation failed to load — use Retry.`
+              : err instanceof Error ? err.message : "Fleet automation failed to load."
+      );
     }
   }, []);
 
@@ -344,8 +409,72 @@ export const FleetOperationsView: React.FC = () => {
       ? 6
       : 8;
 
+  /** UX-23: cancel the live broadcast batch on the control plane, then
+      stop polling. Queued tasks in the batch are stopped before any
+      agent picks them up; tasks already running on a device finish —
+      the notice reports both counts. In demo mode there is no batch,
+      so cancel stays local-only. */
+  const cancelBroadcast = async () => {
+    broadcastCancelRef.current = true;
+    if (broadcastTimerRef.current) {
+      clearTimeout(broadcastTimerRef.current);
+      broadcastTimerRef.current = null;
+    }
+    const batchId = broadcastBatchIdRef.current;
+    if (isLiveMode() && batchId) {
+      setBroadcastCancelling(true);
+      try {
+        const res = await api.cancelBroadcast(batchId);
+        const cancelled = Number(res?.cancelled ?? 0);
+        const stillRunning = Number(res?.still_running ?? 0);
+        setBroadcastProgress((prev) =>
+          prev ? { ...prev, inProgress: 0 } : prev
+        );
+        setBroadcastCancelled(true);
+        pushNotice({
+          tone: "warning",
+          title: "Broadcast cancelled",
+          message:
+            stillRunning > 0
+              ? `${cancelled} task${cancelled === 1 ? "" : "s"} stopped before running; ${stillRunning} already running on a device will finish — check the task list to see what went out.`
+              : `${cancelled} task${cancelled === 1 ? "" : "s"} stopped before running — nothing further was dispatched to a device.`,
+          actionLabel: "Check tasks",
+          actionHref: "#/task-queue-and-vision",
+        });
+      } catch {
+        setBroadcastCancelled(true);
+        pushNotice({
+          tone: "error",
+          title: "Broadcast cancel failed",
+          message: "Polling stopped, but the control plane did not confirm the cancel — check the task list to see what went out.",
+          actionLabel: "Check tasks",
+          actionHref: "#/task-queue-and-vision",
+        });
+      } finally {
+        setBroadcastCancelling(false);
+        setIsBroadcasting(false);
+      }
+      return;
+    }
+    setBroadcastCancelled(true);
+    setIsBroadcasting(false);
+    setBroadcastProgress((prev) =>
+      prev ? { ...prev, inProgress: 0 } : prev
+    );
+    pushNotice({
+      tone: "warning",
+      title: "Broadcast cancelled in the dashboard",
+      message: "Polling stopped. This is a demo broadcast with no live batch, so there was nothing to cancel on the control plane.",
+      actionLabel: "Check tasks",
+      actionHref: "#/task-queue-and-vision",
+    });
+  };
+
   const handleBroadcast = async () => {
     if (!scriptPayload.trim()) return;
+    broadcastCancelRef.current = false;
+    broadcastBatchIdRef.current = null;
+    setBroadcastCancelled(false);
     setIsBroadcasting(true);
     setBroadcastProgress({
       succeeded: 0,
@@ -380,15 +509,19 @@ export const FleetOperationsView: React.FC = () => {
 
         if (res?.batch_id) {
           const batchId = String(res.batch_id);
+          broadcastBatchIdRef.current = batchId;
           let attempts = 0;
           const pollBatch = async () => {
+            if (broadcastCancelRef.current) return;
             attempts += 1;
             try {
               const statusRes = await api.broadcastStatus(batchId);
+              if (broadcastCancelRef.current) return;
               const total = Number(statusRes?.total_tasks || totalTasks);
               const succeeded = Number(statusRes?.completed || 0);
               const failed = Number(statusRes?.failed || 0);
-              const inProgress = Math.max(0, total - succeeded - failed);
+              const cancelledCount = Number(statusRes?.cancelled || 0);
+              const inProgress = Math.max(0, total - succeeded - failed - cancelledCount);
               setBroadcastProgress({
                 succeeded,
                 inProgress,
@@ -399,32 +532,59 @@ export const FleetOperationsView: React.FC = () => {
                 const failedTask = statusRes.tasks.find((t: any) => t.status === "failed");
                 if (failedTask) {
                   setLastFailedNode({
-                    nodeId: String(failedTask.device_name || failedTask.device_id || "unknown"),
+                    deviceId: String(failedTask.device_name || failedTask.device_id || "unknown"),
                     exitCode: Number(failedTask.result?.returncode ?? 1),
                     stderr: String(failedTask.result?.stderr || failedTask.result?.error || "Task execution failed"),
                   });
                 }
               }
-              if (statusRes?.status === "completed" || attempts >= 8) {
+              // UX-23: "cancelled" is terminal too — the batch may have
+              // been cancelled from another tab/session.
+              if (statusRes?.status === "completed" || statusRes?.status === "cancelled" || attempts >= 8) {
                 setIsBroadcasting(false);
+                pushNotice({
+                  tone: statusRes?.status === "cancelled" ? "warning" : failed > 0 ? "warning" : "success",
+                  title:
+                    statusRes?.status === "cancelled"
+                      ? `Broadcast cancelled: ${succeeded}/${total} devices succeeded${cancelledCount > 0 ? `, ${cancelledCount} stopped` : ""}${failed > 0 ? `, ${failed} failed` : ""}`
+                      : `Broadcast finished: ${succeeded}/${total} devices succeeded${failed > 0 ? `, ${failed} failed` : ""}`,
+                  actionLabel: "Check tasks",
+                  actionHref: "#/task-queue-and-vision",
+                });
                 void refreshLive?.();
               } else {
-                setTimeout(() => void pollBatch(), 1500);
+                broadcastTimerRef.current = setTimeout(() => void pollBatch(), 1500);
               }
             } catch {
               setIsBroadcasting(false);
             }
           };
-          setTimeout(() => void pollBatch(), 1000);
+          broadcastTimerRef.current = setTimeout(() => void pollBatch(), 1000);
           return;
         }
         setIsBroadcasting(false);
         return;
       } catch (err: any) {
+        // UX-18: map common statuses to plain language with a next step,
+        // and link to the task list so the operator can check what ran.
+        const status = (err as { status?: number })?.status;
+        const uncertain = (err as { uncertain?: boolean })?.uncertain;
+        const detail =
+          status === 403
+            ? "Access denied (403). Your account may lack permission to broadcast — ask an admin to check your role."
+            : status === 409
+              ? "Conflict (409). The fleet state changed under this broadcast — reload and try again."
+              : status === 429
+                ? "Too many requests (429). Wait a minute and try again."
+                : status && status >= 500
+                  ? `Control plane error (${status}). The broadcast may or may not have been dispatched — check the task list before sending it again.`
+                  : uncertain
+                    ? `${err?.message || "Broadcast failed."} Outcome unknown — the server may have received this request. Check the task list before sending it again.`
+                    : err?.message || "Failed to dispatch fleet broadcast";
         setLastFailedNode({
-          nodeId: "control-plane-broadcast",
+          deviceId: "control-plane-broadcast",
           exitCode: 1,
-          stderr: err?.message || "Failed to dispatch fleet broadcast",
+          stderr: detail,
         });
         setBroadcastProgress({
           succeeded: 0,
@@ -433,11 +593,19 @@ export const FleetOperationsView: React.FC = () => {
           total: Math.max(1, targetCount),
         });
         setIsBroadcasting(false);
+        pushNotice({
+          tone: "error",
+          title: "Broadcast failed",
+          message: detail,
+          actionLabel: "Check tasks",
+          actionHref: "#/task-queue-and-vision",
+        });
         return;
       }
     }
 
-    setTimeout(() => {
+    broadcastTimerRef.current = setTimeout(() => {
+      if (broadcastCancelRef.current) return;
       setBroadcastProgress({
         succeeded: Math.max(1, targetCount - 2),
         inProgress: 2,
@@ -449,25 +617,109 @@ export const FleetOperationsView: React.FC = () => {
   };
 
   const handleUpdateFleetAgents = async (targetOs?: string) => {
+    updateCancelRef.current = false;
+    updateBatchIdRef.current = null;
+    setUpdateCancelled(false);
     setIsUpdatingFleet(true);
     if (isLiveMode()) {
       try {
         const res = await api.updateFleet(targetOs);
-        setFleetNotice(
-          `Dispatched fleet agent update batch ${res?.batch_id || "ok"} (${res?.device_count ?? devices.length} nodes)`
-        );
+        const batchId = res?.batch_id ? String(res.batch_id) : null;
+        if (batchId) updateBatchIdRef.current = batchId;
+        if (updateCancelRef.current) {
+          // UX-23: Cancel was pressed while the update POST was in flight.
+          // The update is a broadcast batch, so stop it on the control
+          // plane now that the batch id is known.
+          if (batchId) {
+            setUpdateCancelling(true);
+            try {
+              const cancelRes = await api.cancelBroadcast(batchId);
+              const cancelled = Number(cancelRes?.cancelled ?? 0);
+              const stillRunning = Number(cancelRes?.still_running ?? 0);
+              pushNotice({
+                tone: "warning",
+                title: "Fleet update cancelled",
+                message:
+                  stillRunning > 0
+                    ? `${cancelled} update task${cancelled === 1 ? "" : "s"} stopped before running; ${stillRunning} already running on a device will finish — check the audit trail to confirm what ran.`
+                    : `${cancelled} update task${cancelled === 1 ? "" : "s"} stopped before running.`,
+                actionLabel: "Check audit trail",
+                actionHref: "#/audit-trail",
+              });
+            } catch {
+              pushNotice({
+                tone: "error",
+                title: "Fleet update cancel failed",
+                message: "The update was dispatched and the control plane did not confirm the cancel — check the audit trail to confirm what ran.",
+                actionLabel: "Check audit trail",
+                actionHref: "#/audit-trail",
+              });
+            } finally {
+              setUpdateCancelling(false);
+            }
+          } else {
+            pushNotice({
+              tone: "warning",
+              title: "Fleet update cancelled in the dashboard",
+              message: "The update request had already been sent and may still have been dispatched — check the audit trail to confirm what ran.",
+              actionLabel: "Check audit trail",
+              actionHref: "#/audit-trail",
+            });
+          }
+          return;
+        }
+        pushNotice({
+          tone: "success",
+          title: `Fleet agent update dispatched (batch ${res?.batch_id || "ok"}, ${number(res?.device_count ?? devices.length)} devices)`,
+          actionLabel: "Check tasks",
+          actionHref: "#/task-queue-and-vision",
+        });
         void refreshLive?.();
       } catch (err: any) {
-        setFleetNotice(err?.message || "Fleet update request dispatched");
+        const status = (err as { status?: number })?.status;
+        pushNotice({
+          tone: "error",
+          title: "Fleet update failed",
+          message:
+            status === 403
+              ? "Access denied (403). Your account may lack permission to update fleet agents — ask an admin to check your role."
+              : status && status >= 500
+                ? `Control plane error (${status}). The update may or may not have been dispatched — check the audit trail before retrying.`
+                : err?.message || "Fleet update request failed",
+          actionLabel: "Check audit trail",
+          actionHref: "#/audit-trail",
+        });
       } finally {
         setIsUpdatingFleet(false);
       }
       return;
     }
-    setTimeout(() => {
-      setFleetNotice(`Simulated fleet agent rolling update across ${devices.length} nodes`);
+    broadcastTimerRef.current = setTimeout(() => {
       setIsUpdatingFleet(false);
+      if (!updateCancelRef.current) {
+        pushNotice({ tone: "info", title: `Simulated fleet agent rolling update across ${number(devices.length)} devices` });
+      }
     }, 600);
+  };
+
+  /** UX-23: Cancel a fleet-agent update. In live mode the batch id is
+      only known once the update POST returns, so this marks the cancel
+      and handleUpdateFleetAgents calls the cancel endpoint with the
+      batch id when it arrives; in demo mode there is no batch, so the
+      cancel stays local-only. */
+  const cancelFleetUpdate = () => {
+    updateCancelRef.current = true;
+    setUpdateCancelled(true);
+    setIsUpdatingFleet(false);
+    if (!isLiveMode()) {
+      pushNotice({
+        tone: "warning",
+        title: "Fleet update cancelled in the dashboard",
+        message: "This is a demo update with no live batch, so there was nothing to cancel on the control plane.",
+        actionLabel: "Check audit trail",
+        actionHref: "#/audit-trail",
+      });
+    }
   };
 
   const handleCreateLiveTrigger = async () => {
@@ -604,7 +856,7 @@ export const FleetOperationsView: React.FC = () => {
         name: newSchedName.trim(),
         description: `Tool: ${newSchedTool || "get_system_info"}`,
         cronExpr: `every ${newSchedInterval}s`,
-        targets: devices[0]?.hostname || "All Nodes",
+        targets: devices[0]?.hostname || "All devices",
         lastStatus: "success",
         lastDuration: "0s",
         nextRun: `In ${newSchedInterval}s`,
@@ -697,6 +949,39 @@ export const FleetOperationsView: React.FC = () => {
 
   return (
     <div className="space-y-4">
+      {/* UX-36: explicit top-level heading (this view previously had none). */}
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="space-y-1">
+          <h1 className="text-xl font-semibold text-[var(--product-text)]">Fleet operations</h1>
+          <p className="text-xs text-[var(--product-text-tertiary)]">
+            Broadcast a shell task to many devices at once, watch self-healing rules, and manage schedules.
+          </p>
+        </div>
+        {isLive && (
+          <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} label="Updated" />
+        )}
+      </header>
+      {isLive && syncState === "error" && !expired && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-700/50 bg-rose-950/30 px-4 py-2 text-xs text-rose-300">
+          <span>Sync with the control plane failed{syncError ? `: ${syncError}` : "."} Showing the last known data.</span>
+          <JXButton variant="outlined" color="neutral" size="sm" onClick={() => void refreshLive?.()}>Retry</JXButton>
+        </div>
+      )}
+      {isLive && configError && !expired && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-700/50 bg-amber-950/30 px-4 py-2 text-xs text-amber-300">
+          <span>Fleet automation failed to load: {configError}</span>
+          <JXButton variant="outlined" color="neutral" size="sm" onClick={() => void loadLiveFleetConfig()}>Retry</JXButton>
+        </div>
+      )}
+      {expired && (
+        <EmptyState
+          variant="card"
+          title="Your session expired"
+          description="Sign in again to manage fleet operations. The rules and schedules below are samples, not your live automation."
+          actionLabel="Sign in"
+          onAction={() => setCurrentView("login")}
+        />
+      )}
       {/* SECTION 1: Multi-Node Command Bus */}
       <JXCard className="bg-[var(--product-surface)]/60 border-[var(--product-line)]">
         <JXCardHeader
@@ -707,13 +992,14 @@ export const FleetOperationsView: React.FC = () => {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6">
             {/* Target Fleet Selector & Concurrency */}
             <div className="lg:col-span-4 space-y-4">
-              <div>
-                <label className="block text-xs font-mono font-semibold text-[var(--product-text-tertiary)] uppercase tracking-wider mb-2">
+              <fieldset>
+                <legend className="mb-2 block text-xs font-mono font-semibold text-[var(--product-text-tertiary)] uppercase tracking-wider">
                   Target Fleet Scope
-                </label>
+                </legend>
                 <div className="space-y-2">
                     <button
                       type="button"
+                      aria-pressed={targetScope === "all"}
                       onClick={() => setTargetScope("all")}
                       className={`w-full flex items-center justify-between p-3 rounded-xl border text-xs text-left transition-colors ${
                         targetScope === "all"
@@ -723,7 +1009,7 @@ export const FleetOperationsView: React.FC = () => {
                     >
                       <div className="flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full bg-indigo-400" />
-                        <span className="font-semibold">All Fleet Nodes</span>
+                        <span className="font-semibold">All fleet devices</span>
                       </div>
                       <span className="font-mono px-2 py-0.5 rounded bg-[var(--product-raised)] text-[var(--product-text-secondary)]">
                         {devices.length}
@@ -732,6 +1018,7 @@ export const FleetOperationsView: React.FC = () => {
 
                     <button
                       type="button"
+                      aria-pressed={targetScope === "production-east"}
                       onClick={() => setTargetScope("production-east")}
                       className={`w-full flex items-center justify-between p-3 rounded-xl border text-xs text-left transition-colors ${
                         targetScope === "production-east"
@@ -750,6 +1037,7 @@ export const FleetOperationsView: React.FC = () => {
 
                     <button
                       type="button"
+                      aria-pressed={targetScope === "gpu-runners"}
                       onClick={() => setTargetScope("gpu-runners")}
                       className={`w-full flex items-center justify-between p-3 rounded-xl border text-xs text-left transition-colors ${
                         targetScope === "gpu-runners"
@@ -766,6 +1054,7 @@ export const FleetOperationsView: React.FC = () => {
 
                     <button
                       type="button"
+                      aria-pressed={targetScope === "custom"}
                       onClick={() => setTargetScope("custom")}
                       className={`w-full flex items-center justify-between p-3 rounded-xl border text-xs text-left transition-colors ${
                         targetScope === "custom"
@@ -780,18 +1069,18 @@ export const FleetOperationsView: React.FC = () => {
                       <ChevronRight className="w-3.5 h-3.5 text-[var(--product-text-tertiary)]" />
                     </button>
                   </div>
-                </div>
+                </fieldset>
 
                 {/* Concurrency Rollout Slider */}
                 <div className="p-3 rounded-xl bg-[var(--product-canvas)]/60 border border-[var(--product-line)] space-y-3">
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-[var(--product-text-secondary)] font-semibold">Concurrency Rollout</span>
                     <span className="font-mono text-indigo-400 font-bold">
-                      {concurrency} nodes in parallel
+                      {number(concurrency)} devices in parallel
                     </span>
                   </div>
                   <input
-                    aria-label="Concurrent nodes"
+                    aria-label="Devices to update in parallel"
                     type="range"
                     min={1}
                     max={20}
@@ -800,7 +1089,7 @@ export const FleetOperationsView: React.FC = () => {
                     onChange={(e) => setConcurrency(Math.min(20, Math.max(1, Number(e.target.value))))}
                     className="w-full accent-indigo-500 bg-[var(--product-raised)] rounded-lg cursor-pointer"
                   />
-                  <div className="flex justify-between text-[10px] font-mono text-[var(--product-text-tertiary)]">
+                  <div className="flex justify-between text-[11px] font-mono text-[var(--product-text-tertiary)]">
                     <span>1 (Staged)</span>
                     <span>5 (Default)</span>
                     <span>20 (Full Burst)</span>
@@ -814,6 +1103,7 @@ export const FleetOperationsView: React.FC = () => {
                   <div className="flex items-center gap-1.5 p-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)]">
                     <button
                       type="button"
+                      aria-pressed={scriptLang === "bash"}
                       onClick={() => handleLanguageChange("bash")}
                       className={`px-3 py-1 rounded text-xs font-mono transition-colors ${
                         scriptLang === "bash"
@@ -825,6 +1115,7 @@ export const FleetOperationsView: React.FC = () => {
                     </button>
                     <button
                       type="button"
+                      aria-pressed={scriptLang === "powershell"}
                       onClick={() => handleLanguageChange("powershell")}
                       className={`px-3 py-1 rounded text-xs font-mono transition-colors ${
                         scriptLang === "powershell"
@@ -836,6 +1127,7 @@ export const FleetOperationsView: React.FC = () => {
                     </button>
                     <button
                       type="button"
+                      aria-pressed={scriptLang === "python"}
                       onClick={() => handleLanguageChange("python")}
                       className={`px-3 py-1 rounded text-xs font-mono transition-colors ${
                         scriptLang === "python"
@@ -873,7 +1165,9 @@ export const FleetOperationsView: React.FC = () => {
                   <div className="p-4 rounded-xl bg-[var(--product-canvas)]/70 border border-[var(--product-line)] space-y-2">
                     <div className="flex items-center justify-between text-xs font-mono">
                       <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        {/* UX-24: a running broadcast is a busy state, not a
+                            live/online indicator — a spinner, not pulse. */}
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400" aria-hidden="true" />
                         <span className="text-[var(--product-text-secondary)] font-semibold">
                           Broadcast Progress: {broadcastProgress.succeeded}/{broadcastProgress.total} Succeeded
                         </span>
@@ -901,7 +1195,7 @@ export const FleetOperationsView: React.FC = () => {
                       onClick={() =>
                         setSelectedFailedNode(
                           lastFailedNode || {
-                            nodeId: "srv-us-east-412",
+                            deviceId: "srv-us-east-412",
                             exitCode: 1,
                             stderr: "Permission denied: access to enclave socket restricted",
                           }
@@ -928,28 +1222,64 @@ export const FleetOperationsView: React.FC = () => {
                     )}
                     {fleetFramesCount !== null && (
                       <span className="text-[11px] font-mono text-[var(--product-text-tertiary)]">
-                        {fleetFramesCount} live frame{fleetFramesCount === 1 ? "" : "s"}
+                        {number(fleetFramesCount)} live frame{fleetFramesCount === 1 ? "" : "s"}
                       </span>
                     )}
-                    {fleetNotice && (
-                      <span className="text-[11px] font-mono text-emerald-400">
-                        {fleetNotice}
+                    {isUpdatingFleet && (
+                      <JXButton
+                        variant="outlined"
+                        color="warning"
+                        size="sm"
+                        loading={updateCancelling}
+                        disabled={updateCancelling}
+                        onClick={cancelFleetUpdate}
+                      >
+                        Cancel update
+                      </JXButton>
+                    )}
+                    {updateCancelled && !isUpdatingFleet && (
+                      <span className="text-[11px] font-mono text-amber-300">
+                        Update cancelled — tasks not yet started were stopped on the control plane; any already running finish on their devices. Check the audit trail.
                       </span>
                     )}
                   </div>
 
-                  <JXButton
-                    variant="contained"
-                    color="primary"
-                    size="md"
-                    loading={isBroadcasting}
-                    onClick={() => void handleBroadcast()}
-                    startIcon={<Send className="w-4 h-4" />}
-                    disabled={targetCount === 0 || !scriptPayload.trim()}
-                  >
-                    Broadcast to {targetCount} Nodes
-                  </JXButton>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {isBroadcasting && (
+                      <JXButton
+                        variant="outlined"
+                        color="warning"
+                        size="md"
+                        loading={broadcastCancelling}
+                        disabled={broadcastCancelling}
+                        onClick={() => void cancelBroadcast()}
+                      >
+                        Cancel broadcast
+                      </JXButton>
+                    )}
+                    <JXButton
+                      variant="contained"
+                      color="primary"
+                      size="md"
+                      loading={isBroadcasting}
+                      onClick={() => void handleBroadcast()}
+                      startIcon={<Send className="w-4 h-4" />}
+                      disabled={targetCount === 0 || !scriptPayload.trim()}
+                    >
+                      Broadcast to {number(targetCount)} devices
+                    </JXButton>
+                  </div>
                 </div>
+
+                {/* UX-25: payload/target summary at the point of action — the
+                    operator confirms WHAT runs WHERE before dispatching. */}
+                <p className="text-xs leading-relaxed text-[var(--product-text-tertiary)]" role="note">
+                  {isBroadcasting
+                    ? `Broadcast running on ${number(broadcastProgress?.total ?? targetCount)} devices — Cancel asks the control plane to stop the batch; tasks not yet started are cancelled, tasks already running on a device finish.`
+                    : broadcastCancelled
+                      ? "Broadcast cancelled. Tasks not yet started were stopped on the control plane; any already running finished on their devices — check the task list to see what went out."
+                      : `Ready to run on ${number(targetCount)} device${targetCount === 1 ? "" : "s"} (${targetScope === "all" ? "whole fleet" : targetScope === "production-east" ? "tag #production-east" : targetScope === "gpu-runners" ? "tag #gpu-runners" : "custom selection"}) · ${scriptLang} · ${number(concurrency)} devices in parallel · ${number(scriptPayload.trim().split("\n").length)} line${scriptPayload.trim().split("\n").length === 1 ? "" : "s"} of script. The payload runs as an elevated shell task (Tier 3) on every target device — check the script before dispatching.`}
+                </p>
               </div>
             </div>
         </JXCardContent>
@@ -965,12 +1295,19 @@ export const FleetOperationsView: React.FC = () => {
           <div className="flex flex-wrap items-center gap-2">
             <input
               type="text"
+              id="fleet-new-rule-name"
               aria-label="New rule name"
+              aria-invalid={ruleNameTouched && !newRuleName.trim()}
+              aria-describedby={ruleNameTouched && !newRuleName.trim() ? "fleet-rule-name-error" : undefined}
               placeholder="New rule name..."
               value={newRuleName}
               onChange={(e) => setNewRuleName(e.target.value)}
+              onBlur={() => setRuleNameTouched(true)}
               className="px-2.5 py-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono text-[var(--product-text-secondary)] focus:outline-none"
             />
+            {ruleNameTouched && !newRuleName.trim() && (
+              <p id="fleet-rule-name-error" role="alert" className="text-[11px] text-amber-300">Give the rule a name before adding it.</p>
+            )}
             <select
               aria-label="Rule metric"
               value={newRuleMetric}
@@ -1020,9 +1357,7 @@ export const FleetOperationsView: React.FC = () => {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-mono text-[var(--product-text-tertiary)]">
-                      {rule.enabled ? "Active" : "Disabled"}
-                    </span>
+                    <StatusBadge status={rule.enabled ? "active" : "paused"} label={rule.enabled ? "Active" : "Disabled"} />
                     <JXSwitch
                       label={`Enable ${rule.name}`}
                       cardMode={false}
@@ -1034,14 +1369,14 @@ export const FleetOperationsView: React.FC = () => {
                 <JXCardContent>
                   <div className="space-y-2.5">
                     <div className="p-2.5 rounded-lg bg-[var(--product-canvas)]/70 border border-[var(--product-line)]/80 text-xs">
-                      <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--product-text-tertiary)] block mb-0.5">
+                      <span className="text-[11px] font-mono uppercase tracking-wider text-[var(--product-text-tertiary)] block mb-0.5">
                         Trigger Condition
                       </span>
                       <code className="text-[var(--product-text-secondary)] font-mono">{rule.condition}</code>
                     </div>
 
                     <div className="p-2.5 rounded-lg bg-[var(--product-canvas)]/70 border border-[var(--product-line)]/80 text-xs">
-                      <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--product-text-tertiary)] block mb-0.5">
+                      <span className="text-[11px] font-mono uppercase tracking-wider text-[var(--product-text-tertiary)] block mb-0.5">
                         Remediation Action
                       </span>
                       <code className="text-emerald-400 font-mono">{rule.action}</code>
@@ -1049,7 +1384,7 @@ export const FleetOperationsView: React.FC = () => {
 
                     <div className="flex items-center justify-between pt-1 text-xs">
                       <span className="font-mono text-[var(--product-text-tertiary)]">
-                        Triggered: <strong className="text-[var(--product-text-secondary)]">{rule.firedCount} times</strong>
+                        Triggered: <strong className="text-[var(--product-text-secondary)]">{number(rule.firedCount)} times</strong>
                       </span>
                       <div className="flex items-center gap-1.5">
                         {rule.isBackend && (
@@ -1092,12 +1427,19 @@ export const FleetOperationsView: React.FC = () => {
           <div className="flex items-center justify-end gap-2 pb-3">
             <input
               type="text"
+              id="fleet-new-schedule-name"
               aria-label="New schedule name"
+              aria-invalid={schedNameTouched && !newSchedName.trim()}
+              aria-describedby={schedNameTouched && !newSchedName.trim() ? "fleet-schedule-name-error" : undefined}
               placeholder="Schedule name..."
               value={newSchedName}
               onChange={(e) => setNewSchedName(e.target.value)}
+              onBlur={() => setSchedNameTouched(true)}
               className="px-2.5 py-1 rounded-lg bg-[var(--product-canvas)] border border-[var(--product-line)] text-xs font-mono text-[var(--product-text-secondary)] focus:outline-none"
             />
+            {schedNameTouched && !newSchedName.trim() && (
+              <p id="fleet-schedule-name-error" role="alert" className="text-[11px] text-amber-300">Give the schedule a name before adding it.</p>
+            )}
             <JXButton
               variant="soft"
               color="primary"
@@ -1109,19 +1451,20 @@ export const FleetOperationsView: React.FC = () => {
               Add Schedule
             </JXButton>
           </div>
-          <div ref={tableScrollRef} tabIndex={0} role="region" aria-label="Scheduled jobs" className="overflow-x-auto scroll-shadow rounded-xl border border-[var(--product-line)]" data-scroll-left={scrollShadow.left} data-scroll-right={scrollShadow.right}>
-            <table className="w-full text-left text-xs border-collapse">
+          <div ref={tableScrollRef} tabIndex={0} role="region" aria-label="Fleet schedules" className="overflow-x-auto scroll-shadow rounded-xl border border-[var(--product-line)]" data-scroll-left={scrollShadow.left} data-scroll-right={scrollShadow.right}>
+            <table className="w-full min-w-[720px] text-left text-xs border-collapse">
+              <caption className="sr-only">Fleet schedules: name, cron expression, target devices, last execution, and next run</caption>
               <thead>
                 <tr className="bg-[var(--product-canvas)] border-b border-[var(--product-line)] text-[var(--product-text-tertiary)] font-mono uppercase">
-                  <th className="p-3">Job Name</th>
-                  <th className="p-3">Cron Syntax</th>
-                  <th className="p-3">Target Nodes</th>
-                  <th className="p-3">Last Execution</th>
-                  <th className="p-3">Next Run</th>
-                  <th className="p-3 text-right">Actions</th>
+                  <th scope="col" className="p-3">Schedule name</th>
+                  <th scope="col" className="p-3">Cron Syntax</th>
+                  <th scope="col" className="p-3">Target devices</th>
+                  <th scope="col" className="p-3">Last Execution</th>
+                  <th scope="col" className="p-3">Next Run</th>
+                  <th scope="col" className="p-3 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800/60 font-mono">
+              <tbody className="divide-y divide-[var(--product-line)]/60 font-mono">
                 {cronJobs.map((job) => (
                   <tr key={job.id} className="hover:bg-[var(--product-canvas)]/40 transition-colors">
                     <td className="p-3">
@@ -1136,16 +1479,7 @@ export const FleetOperationsView: React.FC = () => {
                     <td className="p-3 text-[var(--product-text-secondary)]">{job.targets}</td>
                     <td className="p-3">
                       <div className="flex items-center gap-1.5">
-                        {job.lastStatus === "success" && (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                        )}
-                        {job.lastStatus === "running" && (
-                          <RotateCcw className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
-                        )}
-                        {job.lastStatus === "failed" && (
-                          <XCircle className="w-3.5 h-3.5 text-rose-400" />
-                        )}
-                        <span className="text-[var(--product-text-secondary)] capitalize">{job.lastStatus}</span>
+                        <StatusBadge status={job.lastStatus} />
                         <span className="text-[var(--product-text-dim)]">({job.lastDuration})</span>
                       </div>
                     </td>
@@ -1209,8 +1543,8 @@ export const FleetOperationsView: React.FC = () => {
 
               <div className="space-y-3 text-xs font-mono">
                 <div>
-                  <span className="text-[var(--product-text-tertiary)]">Node Identifier:</span>
-                  <div className="text-[var(--product-text-secondary)] font-semibold">{selectedFailedNode.nodeId}</div>
+                  <span className="text-[var(--product-text-tertiary)]">Device:</span>
+                  <div className="text-[var(--product-text-secondary)] font-semibold">{selectedFailedNode.deviceId}</div>
                 </div>
                 <div>
                   <span className="text-[var(--product-text-tertiary)]">Exit Status Code:</span>

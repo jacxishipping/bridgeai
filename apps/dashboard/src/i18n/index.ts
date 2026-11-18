@@ -30,8 +30,23 @@ export function setLanguage(next: Locale): boolean {
   catch { return false; }
 }
 
+/**
+ * The app's display time zone, resolved once from the runtime. Timestamps
+ * are rendered in this zone explicitly (UX-29) instead of relying on the
+ * Intl default, so every call site states which zone its time is in.
+ * This is the user's local zone; callers that need UTC pass
+ * { timeZone: "UTC" } explicitly and label the value as UTC.
+ */
+export const displayTimeZone: string = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+})();
+
 export function formatDate(value: Date, options?: Intl.DateTimeFormatOptions) {
-  return new Intl.DateTimeFormat(locale, options).format(value);
+  return new Intl.DateTimeFormat(locale, { timeZone: displayTimeZone, ...options }).format(value);
 }
 
 export function useLanguage() {
@@ -44,7 +59,8 @@ export function useLanguage() {
     locale: current,
     t: (message: Message, values?: Record<string, string | number>) => translate(current, message, values),
     number: (value: number) => new Intl.NumberFormat(current).format(value),
-    date: (value: Date, options?: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat(current, options).format(value),
+    date: (value: Date, options?: Intl.DateTimeFormatOptions) =>
+      new Intl.DateTimeFormat(current, { timeZone: displayTimeZone, ...options }).format(value),
   };
 }
 

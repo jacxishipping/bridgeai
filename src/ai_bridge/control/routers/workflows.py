@@ -561,6 +561,8 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
         results = []
         completed_count = 0
         failed_count = 0
+        cancelled_count = 0
+        timed_out_count = 0
         for r in task_rows:
             dev = conn.execute("SELECT name, os FROM devices WHERE id=?", (r["device_id"],)).fetchone()
             d_name = dev["name"] if dev else r["device_id"]
@@ -570,6 +572,13 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
                 completed_count += 1
             elif status == "failed":
                 failed_count += 1
+            elif status == "cancelled":
+                # UX-23: cancelled tasks are terminal — without this a
+                # cancelled batch would poll "running" forever, because
+                # completed + failed could never reach the total.
+                cancelled_count += 1
+            elif status == "timed_out":
+                timed_out_count += 1
             res_val = None
             if r["result"]:
                 try:
@@ -589,14 +598,97 @@ def create_workflows_router(ctx: ControlContext) -> APIRouter:
                 }
             )
 
-        overall = "completed" if (completed_count + failed_count == len(task_rows)) else "running"
+        # Terminal: completed / failed / cancelled / timed_out. A batch with
+        # no active task left reports "cancelled" when at least one task was
+        # cancelled, so the dashboard poll loop can stop on it.
+        active_count = len(task_rows) - completed_count - failed_count - cancelled_count - timed_out_count
+        if active_count > 0:
+            overall = "running"
+        elif cancelled_count > 0:
+            overall = "cancelled"
+        else:
+            overall = "completed"
         return {
             "batch_id": batch_id,
             "status": overall,
             "total_tasks": len(task_rows),
             "completed": completed_count,
             "failed": failed_count,
+            "cancelled": cancelled_count,
+            "timed_out": timed_out_count,
             "tasks": results,
+        }
+
+    @router.post("/api/fleet/broadcast/{batch_id}/cancel")
+    def cancel_broadcast(
+        batch_id: str,
+        x_admin_token: str | None = Header(default=None),
+        x_session_token: str | None = Header(default=None),
+    ):
+        """Cancel a running fleet broadcast (or fleet-agent update) batch.
+
+        UX-23: stops the batch from dispatching further. The broadcast
+        fan-out itself is synchronous — by the time a caller holds a
+        batch_id every task row already exists — so "cancel" means: every
+        task in the batch that has not started yet (status ``queued`` or
+        ``needs_approval``) is marked ``cancelled``, which the agent claim
+        path will never pick up (it claims only ``status='queued'``).
+        Tasks already ``running`` on a device are deliberately left alone:
+        cancelling them would cooperatively abort in-flight device work.
+        Idempotent: re-cancelling a cancelled/finished batch is a 200
+        no-op reporting the current counts. Unknown batch: 404, matching
+        GET /api/fleet/broadcast/{batch_id}.
+        """
+        actor = require_role("operator", x_admin_token, x_session_token)
+        task_rows = conn.execute("SELECT * FROM tasks WHERE id LIKE ?", (f"bcast-{batch_id}-%",)).fetchall()
+        if not task_rows:
+            raise HTTPException(status_code=404, detail="Broadcast batch not found.")
+        _require_row_tenant(task_rows[0], x_admin_token, x_session_token)
+        cancelled = 0
+        cancelled_total = 0
+        still_running = 0
+        already_terminal = 0
+        for r in task_rows:
+            status = r["status"]
+            if status in {"queued", "needs_approval"}:
+                conn.execute("UPDATE tasks SET status='cancelled', updated_at=? WHERE id=?", (dbmod.now(), r["id"]))
+                notify_tasks(r["device_id"], r["id"], cancel=True)
+                cancelled += 1
+                cancelled_total += 1
+            elif status == "running":
+                still_running += 1
+            elif status == "cancelled":
+                cancelled_total += 1
+                already_terminal += 1
+            else:
+                already_terminal += 1
+        conn.commit()
+        notify_tasks()
+        audit(
+            actor,
+            "fleet",
+            "cancel_broadcast",
+            {"batch_id": batch_id, "cancelled": cancelled, "still_running": still_running},
+            "allowed",
+            tenant=task_rows[0]["tenant"],
+        )
+        # Overall mirrors GET /api/fleet/broadcast/{batch_id}: a batch with
+        # any cancelled task reports "cancelled" (even on a re-cancel that
+        # itself cancelled nothing), so a re-cancel never downgrades the
+        # batch to "completed".
+        if cancelled_total > 0:
+            overall = "cancelled"
+        elif still_running > 0:
+            overall = "running"
+        else:
+            overall = "completed"
+        return {
+            "batch_id": batch_id,
+            "status": overall,
+            "total_tasks": len(task_rows),
+            "cancelled": cancelled,
+            "still_running": still_running,
+            "already_terminal": already_terminal,
         }
 
     @router.get("/api/triggers")

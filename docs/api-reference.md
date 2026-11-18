@@ -133,6 +133,7 @@ beyond the approver.
 | PUT | `/api/devices/{device_id}/policy` | Admin, Device, Session | set_device_policy_api |
 | POST | `/api/devices/{device_id}/refresh` | Admin, Session | refresh_device_telemetry |
 | POST | `/api/devices/{device_id}/revoke` | Admin, Session | revoke |
+| POST | `/api/devices/{device_id}/rotate-token` | Admin, Session | rotate_device_token |
 | GET | `/api/devices/{device_id}/telemetry` | Admin, Session | get_device_telemetry |
 | GET | `/api/devices/{device_id}/terminal/sessions` | Admin, Session | list_terminal_endpoint |
 | POST | `/api/devices/{device_id}/terminal/sessions` | Admin, Session | create_terminal_endpoint |
@@ -368,6 +369,7 @@ beyond the approver.
 | GET | `/api/events/stream` | Admin, Session | stream_control_events |
 | POST | `/api/fleet/broadcast` | Admin, Session | broadcast_fleet_command |
 | GET | `/api/fleet/broadcast/{batch_id}` | Admin, Session | get_broadcast_status |
+| POST | `/api/fleet/broadcast/{batch_id}/cancel` | Admin, Session | cancel_broadcast |
 | GET | `/api/fleet/desktop-capabilities` | Admin, Session | fleet_desktop_capabilities |
 | GET | `/api/fleet/desktop/frames` | Admin, Session | get_fleet_desktop_frames |
 | GET | `/api/fleet/health` | Admin, Session | fleet_health_summary |
@@ -387,7 +389,7 @@ beyond the approver.
 | GET | `/api/supervisor/handoffs/{handoff_id}` | Admin, Session | supervisor_handoff_status_api |
 | POST | `/api/supervisor/recover` | Admin, Session | supervisor_recover_api |
 
-*227 (method, path) pairs listed — generated from the live app; see the note at the top of this file.*
+*229 (method, path) pairs listed — generated from the live app; see the note at the top of this file.*
 <!-- END GENERATED ROUTES -->
 
 ## Mounted surfaces (combined app)

@@ -218,6 +218,82 @@ export class ApiError extends Error {
   constructor(message: string, public uncertain = false, public status?: number) { super(message); }
 }
 
+/**
+ * GET /api/audit/verify — result of dbmod.verify_audit_chain(conn)
+ * (src/ai_bridge/control/routers/audit.py:73-76, db.py:724-736).
+ * `ok` is false when the chain is broken; `checked` counts rows examined
+ * up to and including the broken row (or all rows when intact);
+ * `broken_at` is the id of the first broken row (null when intact);
+ * `legacy_rows` counts pre-DB-05 rows, recognised not broken.
+ */
+export interface AuditVerifyResult {
+  ok: boolean;
+  checked: number;
+  broken_at: number | null;
+  legacy_rows: number;
+  [key: string]: unknown;
+}
+
+/**
+ * POST /api/audit/retention — result of apply_audit_retention
+ * (routers/audit.py:78-95). `days` is a QUERY parameter (FastAPI scalar),
+ * clamped server-side to 30–3650. Refused with 409 when WORM/SIEM export
+ * is required but unconfigured, and 502 when the export fails — in both
+ * cases nothing is deleted.
+ */
+export interface AuditRetentionResult {
+  retention_days: number;
+  deleted_count: number;
+  [key: string]: unknown;
+}
+
+/**
+ * POST /api/policy/simulate — per-tool dry-run result
+ * (routers/admin.py:150-228, policy_simulation.py:90-131). Executes
+ * NOTHING. `tier` is the tool's tier (1–4) or null for unknown tools;
+ * `rule` names the policy rule that fired so the operator sees why.
+ * Distinct from simulatePolicy() (/api/policies/simulate), which
+ * simulates a whole proposed policy against every tool.
+ */
+export interface PolicySimulateResult {
+  tool: string;
+  tier: number | null;
+  tier_name?: string | null;
+  allowed: boolean;
+  needs_approval: boolean;
+  reason: string;
+  rule?: string;
+  actor?: string | null;
+  device_id?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * P1-3: POST /api/devices/{device_id}/rotate-token (admin). The old
+ * token is invalid immediately; the new token is returned exactly once
+ * and must never be persisted (no localStorage, no store, no URL) —
+ * callers hold it in component state only until the user dismisses it.
+ */
+export interface RotateDeviceTokenResult {
+  device_id: string;
+  device_token: string;
+  token_expires_at: number;
+  token_ttl_days: number;
+  note?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * P1-3: POST /api/devices/{device_id}/mtls-fingerprint (admin).
+ * `mtls_fingerprint` is null when the fingerprint was cleared.
+ */
+export interface SetMtlsFingerprintResult {
+  ok: boolean;
+  device_id: string;
+  mtls_fingerprint: string | null;
+  [key: string]: unknown;
+}
+
 async function call(path: string, method = "GET", body?: unknown, extraHeaders: Record<string, string> = {}) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   Object.assign(headers, extraHeaders);
@@ -252,6 +328,12 @@ export const api = {
   devices: () => call("/api/devices"),
   enroll: (name: string) => call("/api/devices/enroll", "POST", { name }),
   revoke: (id: string) => call(`/api/devices/${id}/revoke`, "POST", {}),
+  /** P1-3: reissue a device token (admin). Old token dies immediately; the new one is shown once. */
+  rotateDeviceToken: (deviceId: string): Promise<RotateDeviceTokenResult> =>
+    call(`/api/devices/${encodeURIComponent(deviceId)}/rotate-token`, "POST", {}),
+  /** P1-3: set the device mTLS fingerprint (admin). Pass "" to clear it (contract: empty clears, returns mtls_fingerprint null). */
+  setDeviceMtlsFingerprint: (deviceId: string, fingerprint: string): Promise<SetMtlsFingerprintResult> =>
+    call(`/api/devices/${encodeURIComponent(deviceId)}/mtls-fingerprint`, "POST", { fingerprint }),
   updateDevice: (id: string, body: { name?: string; hostname?: string; os?: string; revoked?: boolean }) =>
     call(`/api/devices/${encodeURIComponent(id)}`, "PUT", body),
   deleteDevice: (id: string) => call(`/api/devices/${encodeURIComponent(id)}`, "DELETE"),
@@ -313,6 +395,14 @@ export const api = {
   deleteApproval: (id: string) => call(`/api/approvals/${encodeURIComponent(id)}`, "DELETE"),
   audit: () => call("/api/audit"),
   exportAudit: () => call("/api/audit/export"),
+  /** UX-01: real chain verification (replaces the always-fails notice). Requires admin. */
+  verifyAudit: (): Promise<AuditVerifyResult> => call("/api/audit/verify"),
+  /** UX-01: prune audit rows older than `days` (query param, server-clamped 30–3650). Requires admin. */
+  setAuditRetention: (days: number): Promise<AuditRetentionResult> =>
+    call(`/api/audit/retention?days=${encodeURIComponent(String(Math.trunc(days)))}`, "POST", {}),
+  /** UX-31: per-tool dry-run against the live policy (tool + device + approval toggle). Executes nothing. */
+  simulateTool: (tool: string, deviceId?: string, approvalGranted = false): Promise<PolicySimulateResult> =>
+    call("/api/policy/simulate", "POST", { tool, device_id: deviceId, approval_granted: approvalGranted }),
   emergencyStop: () => call("/api/emergency-stop", "POST", {}),
   emergencyClear: () => call("/api/emergency-stop/clear", "POST", {}),
   login: (username: string, password: string) => fetch(BASE + "/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }), signal: AbortSignal.timeout(15000) }).then(async r => { if (!r.ok) throw new Error("Username or password rejected."); return r.json(); }),
@@ -451,6 +541,11 @@ export const api = {
   fleetBroadcast: (body: { tool: string; args?: any; target_os?: string; target_device_ids?: string[] }) =>
     call("/api/fleet/broadcast", "POST", body),
   broadcastStatus: (batch_id: string) => call(`/api/fleet/broadcast/${encodeURIComponent(batch_id)}`),
+  // UX-23: cancel a running broadcast / fleet-update batch. Queued tasks
+  // in the batch are stopped before any agent picks them up; tasks
+  // already running on a device are left alone (see cancel_broadcast).
+  cancelBroadcast: (batch_id: string) =>
+    call(`/api/fleet/broadcast/${encodeURIComponent(batch_id)}/cancel`, "POST", {}),
   triggers: () => call("/api/triggers"),
   createTrigger: (body: any) => call("/api/triggers", "POST", body),
   deleteTrigger: (id: string) => call(`/api/triggers/${encodeURIComponent(id)}`, "DELETE"),

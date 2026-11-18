@@ -25,7 +25,8 @@ import {
   TiltCard,
   JXAlert as Alert, JXBox, JXButton as Button, JXCard as Card, JXChip, JXTabs as Tabs, JXTextField as TextField,
 } from "@jacxishippingorg/jx-ui-react";
-import { TrendingUp, TrendingDown, Minus, X, Wifi, WifiOff } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, CircleHelp, CircleMinus, Clock, FileText, Hourglass, Info, Pause, Play, RefreshCw, ShieldAlert, ShieldCheck, TrendingUp, TrendingDown, Minus, X, XCircle, Wifi, WifiOff } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
 export * from "@jacxishippingorg/jx-ui-react";
 export {
@@ -74,7 +75,7 @@ export function ProductMetricCard({
   return (
     <InteractiveCard
       hoverLift
-      className={`product-surface rounded-2xl! border border-[var(--product-line)]! bg-[var(--product-surface)]/70! p-0! shadow-none! ${className}`}
+      className={`product-surface rounded-xl! border border-[var(--product-line)]! bg-[var(--product-surface)]/70! p-0! shadow-none! ${className}`}
     >
       <button type="button" onClick={onClick} className="flex w-full flex-col gap-1 p-4 text-left">
         <span className="text-xs font-medium text-[var(--product-text-tertiary)]">{label}</span>
@@ -97,7 +98,7 @@ export function ProductMetricCard({
 /** Glass surface for hero / wizard panels without breaking operational density elsewhere. */
 export function ProductGlass({ children, className = "" }: React.PropsWithChildren<{ className?: string }>) {
   return (
-    <AdaptiveGlass className={`rounded-2xl border border-[var(--product-line)] bg-[var(--product-surface)]/50 ${className}`}>
+    <AdaptiveGlass className={`rounded-xl border border-[var(--product-line)] bg-[var(--product-surface)]/50 ${className}`}>
       {children}
     </AdaptiveGlass>
   );
@@ -125,8 +126,12 @@ export function ProductStatusDot({
     status === "warn" ? "text-amber-400" :
     status === "idle" ? "text-[var(--product-text-tertiary)]" :
     "text-rose-400";
+  // No role="status" here (UX-37): the dot is permanently rendered and
+  // poll-driven, so a live region on it would re-announce on every poll.
+  // Call sites that must announce wrap it in their own role="status"
+  // (Freshness, ConnectionsView probe wrappers).
   return (
-    <span className={`inline-flex items-center gap-2 ${className}`} role="status">
+    <span className={`inline-flex items-center gap-2 ${className}`}>
       <span className="relative flex h-2.5 w-2.5 shrink-0 items-center justify-center">
         {pulse && status === "online" && (
           <span className={`absolute inline-flex h-full w-full rounded-full opacity-60 animate-ping ${tone}`} />
@@ -249,7 +254,7 @@ export function ProductStepProgress({
               <span className={`h-0.5 w-5 ${done || active ? "bg-indigo-500" : "bg-[var(--product-line)]"}`} aria-hidden="true" />
             )}
             <span
-              className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${
+              className={`flex h-5 w-5 items-center justify-center rounded-full text-[11px] font-bold ${
                 done || active
                   ? "bg-indigo-600 text-white"
                   : "bg-[var(--product-raised)] text-[var(--product-text-tertiary)]"
@@ -315,6 +320,99 @@ export function JXBadge({ color = "primary", statusText, count, children, classN
   return <JXChip tone={tones[color as keyof typeof tones] || "neutral"} label={String(statusText ?? children ?? count ?? 0)} className={`text-[11px] ${className}`} />;
 }
 
+/**
+ * Shared status → tone map (UX-05). One canonical code for every semantic
+ * state in the app, so the same state never gets a different colour on a
+ * different screen. Colours use the existing status palette only: emerald
+ * for success/completed/online, cyan for running/active, rose for
+ * failed/error/denied/revoked, amber for warning/pending/degraded, indigo
+ * ONLY for info (the colour ProductNotice already uses for info), and
+ * theme tokens for neutral states. Keys are matched case-insensitively;
+ * spaces and hyphens normalise to underscores ("Pending approval" →
+ * "pending_approval"). Unknown keys fall back to the neutral tone and
+ * render the raw status text, humanised.
+ *
+ * View sites must NOT keep their own getStatusBadge/statusClass helpers:
+ * use <StatusBadge status={...} /> instead.
+ */
+export interface StatusTone {
+  background: string;
+  border: string;
+  text: string;
+  icon: LucideIcon;
+  label: string;
+  /** Spins the icon (running states). */
+  spin?: boolean;
+}
+
+export const STATUS_TONES: Record<string, StatusTone> = {
+  // Task states
+  queued: { background: "bg-amber-500/15", border: "border-amber-500/30", text: "text-amber-300", icon: Hourglass, label: "Queued" },
+  running: { background: "bg-cyan-500/15", border: "border-cyan-500/30", text: "text-cyan-300", icon: RefreshCw, label: "Running", spin: true },
+  completed: { background: "bg-emerald-500/15", border: "border-emerald-500/30", text: "text-emerald-300", icon: CheckCircle2, label: "Completed" },
+  failed: { background: "bg-rose-500/15", border: "border-rose-500/30", text: "text-rose-300", icon: XCircle, label: "Failed" },
+  cancelled: { background: "bg-[var(--product-raised)]/70", border: "border-[var(--product-line)]", text: "text-[var(--product-text-tertiary)]", icon: Ban, label: "Cancelled" },
+  pending: { background: "bg-amber-500/15", border: "border-amber-500/30", text: "text-amber-300", icon: Clock, label: "Pending" },
+  pending_approval: { background: "bg-amber-500/15", border: "border-amber-500/30", text: "text-amber-300", icon: Clock, label: "Pending approval" },
+  approved: { background: "bg-emerald-500/15", border: "border-emerald-500/30", text: "text-emerald-300", icon: ShieldCheck, label: "Approved" },
+  denied: { background: "bg-rose-500/15", border: "border-rose-500/30", text: "text-rose-300", icon: ShieldAlert, label: "Denied" },
+  // Device states
+  online: { background: "bg-emerald-500/15", border: "border-emerald-500/30", text: "text-emerald-300", icon: Wifi, label: "Online" },
+  offline: { background: "bg-[var(--product-raised)]/70", border: "border-[var(--product-line)]", text: "text-[var(--product-text-tertiary)]", icon: WifiOff, label: "Offline" },
+  degraded: { background: "bg-amber-500/15", border: "border-amber-500/30", text: "text-amber-300", icon: AlertTriangle, label: "Degraded" },
+  revoked: { background: "bg-rose-500/15", border: "border-rose-500/30", text: "text-rose-300", icon: Ban, label: "Revoked" },
+  unknown: { background: "bg-[var(--product-raised)]/70", border: "border-[var(--product-line)]", text: "text-[var(--product-text-tertiary)]", icon: CircleHelp, label: "Unknown" },
+  // Workflow states
+  draft: { background: "bg-[var(--product-raised)]/70", border: "border-[var(--product-line)]", text: "text-[var(--product-text-tertiary)]", icon: FileText, label: "Draft" },
+  active: { background: "bg-cyan-500/15", border: "border-cyan-500/30", text: "text-cyan-300", icon: Play, label: "Active" },
+  paused: { background: "bg-[var(--product-raised)]/70", border: "border-[var(--product-line)]", text: "text-[var(--product-text-tertiary)]", icon: Pause, label: "Paused" },
+  aborted: { background: "bg-[var(--product-raised)]/70", border: "border-[var(--product-line)]", text: "text-[var(--product-text-tertiary)]", icon: Ban, label: "Aborted" },
+  skipped: { background: "bg-[var(--product-raised)]/70", border: "border-[var(--product-line)]", text: "text-[var(--product-text-tertiary)]", icon: CircleMinus, label: "Skipped" },
+  // Generic tones
+  success: { background: "bg-emerald-500/15", border: "border-emerald-500/30", text: "text-emerald-300", icon: CheckCircle2, label: "Success" },
+  error: { background: "bg-rose-500/15", border: "border-rose-500/30", text: "text-rose-300", icon: XCircle, label: "Error" },
+  warning: { background: "bg-amber-500/15", border: "border-amber-500/30", text: "text-amber-300", icon: AlertTriangle, label: "Warning" },
+  info: { background: "bg-indigo-500/15", border: "border-indigo-500/30", text: "text-indigo-300", icon: Info, label: "Info" },
+  neutral: { background: "bg-[var(--product-raised)]/70", border: "border-[var(--product-line)]", text: "text-[var(--product-text-tertiary)]", icon: CircleMinus, label: "Neutral" },
+};
+
+/** Normalise a caller-supplied status to a STATUS_TONES key. */
+export function normalizeStatusKey(status: string): string {
+  return status.trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function humanizeStatus(status: string): string {
+  const cleaned = status.trim().replace(/[_-]+/g, " ");
+  return cleaned ? cleaned.charAt(0).toUpperCase() + cleaned.slice(1) : "Unknown";
+}
+
+/**
+ * Single shared status badge (UX-05). `status` is the canonical key
+ * (case-insensitive, e.g. "running", "Pending approval", "FAILED").
+ * Unknown statuses render in the neutral tone with the raw status as the
+ * label, so a new backend status never renders blank. `label` overrides
+ * the tone's default label.
+ */
+export function StatusBadge({ status, size = "sm", label }: {
+  status: string;
+  size?: "sm" | "md";
+  label?: string;
+}) {
+  const key = normalizeStatusKey(status);
+  const known = Object.prototype.hasOwnProperty.call(STATUS_TONES, key);
+  const tone = STATUS_TONES[key] ?? STATUS_TONES.neutral;
+  const Icon = tone.icon;
+  const display = label ?? (known ? tone.label : humanizeStatus(status));
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border font-semibold whitespace-nowrap ${tone.background} ${tone.border} ${tone.text} ${size === "md" ? "px-2.5 py-1 text-xs" : "px-2 py-0.5 text-[11px]"}`}
+    >
+      <Icon className={`${size === "md" ? "h-3.5 w-3.5" : "h-3 w-3"} shrink-0 ${tone.spin ? "animate-spin" : ""}`} aria-hidden="true" />
+      {display}
+    </span>
+  );
+}
+
 export function JXTextField(props: React.ComponentProps<typeof TextField>) {
   return <TextField {...props} showCharacterCounter={false} maxLength={props.maxLength ?? 4096}
     aria-label={props["aria-label"] || (typeof props.label === "string" ? props.label : props.placeholder) || "Text input"} />;
@@ -375,7 +473,7 @@ export function GlassModal({ open = true, onClose, title, children, closeLabel =
   return <dialog ref={ref} aria-labelledby={titleId}
     onCancel={(event) => { event.preventDefault(); close.current?.(); }}
     onClick={(event) => { if (event.target === event.currentTarget) close.current?.(); }}
-    className="product-dialog m-auto w-[calc(100%-2rem)] max-w-2xl max-h-[90dvh] overflow-y-auto rounded-2xl border border-[color:var(--product-line)]! p-0 text-[color:var(--product-text)]! shadow-2xl backdrop:backdrop-blur-sm"
+    className="product-dialog m-auto w-[calc(100%-2rem)] max-w-2xl max-h-[90dvh] overflow-y-auto rounded-xl border border-[color:var(--product-line)]! p-0 text-[color:var(--product-text)]! shadow-2xl backdrop:backdrop-blur-sm"
     data-dialog-backdrop>
     <JXBox padding="lg" border={false} className="min-w-0">
       <div className="mb-5 flex items-center justify-between gap-4">
@@ -388,4 +486,150 @@ export function GlassModal({ open = true, onClose, title, children, closeLabel =
       {open && children}
     </JXBox>
   </dialog>;
+}
+
+/**
+ * One confirmation dialog for every irreversible action (UX-03/UX-04/
+ * UX-22). Built on GlassModal, so it inherits the native <dialog> focus
+ * trap, Escape, backdrop-click close, and focus return. Shows the target
+ * object and the plain-language consequence BEFORE the user confirms;
+ * never use window.confirm for destructive actions.
+ *
+ * - `requireHold` swaps the plain confirm button for a HoldToConfirmButton
+ *   (1200 ms, the emergency-stop standard): use it for Tier 3/4 dispatch
+ *   and for "Unrestricted" policy changes.
+ * - `tone="error"` (default) is for irreversible destruction; use
+ *   `tone="warning"` for reversible-but-risky actions.
+ * Views wire this in by holding the pending action in state and calling
+ * onConfirm only from here; onCancel just closes the dialog.
+ */
+export interface ConfirmDestructiveProps {
+  open: boolean;
+  title: string;
+  /** The object the action applies to, e.g. device hostname or task id. */
+  objectName?: string;
+  /** Plain-language consequence, e.g. "This permanently deletes the device record. The device can re-enroll." */
+  consequence: string;
+  /** Confirm button label, e.g. "Delete device". */
+  confirmLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  /** When true, the confirm button requires a 1200 ms hold instead of a click. */
+  requireHold?: boolean;
+  tone?: "error" | "warning";
+}
+
+export function ConfirmDestructive({
+  open,
+  title,
+  objectName,
+  consequence,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  requireHold = false,
+  tone = "error",
+}: ConfirmDestructiveProps) {
+  const isError = tone !== "warning";
+  return (
+    <GlassModal open={open} onClose={onCancel} title={title}>
+      <div className="space-y-4">
+        {objectName && (
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-[color:var(--product-text-tertiary)]">Applies to</p>
+            <p className="rounded-lg border border-[color:var(--product-line)] bg-[var(--product-raised)]/60 px-3 py-2 font-mono text-xs break-all text-[color:var(--product-text)]">
+              {objectName}
+            </p>
+          </div>
+        )}
+        <p className="flex items-start gap-3 text-sm leading-relaxed text-[color:var(--product-text-secondary)]">
+          <AlertTriangle
+            className={`h-5 w-5 shrink-0 ${isError ? "text-rose-400" : "text-amber-400"}`}
+            aria-hidden="true"
+          />
+          {consequence}
+        </p>
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          <JXButton variant="outlined" color="neutral" onClick={onCancel}>
+            Cancel
+          </JXButton>
+          {requireHold ? (
+            <HoldToConfirmButton
+              label={confirmLabel}
+              tone={isError ? "danger" : "warning"}
+              variant="solid"
+              holdDurationMs={1200}
+              onConfirm={onConfirm}
+            />
+          ) : (
+            <JXButton variant="contained" color={isError ? "error" : "warning"} onClick={onConfirm}>
+              {confirmLabel}
+            </JXButton>
+          )}
+        </div>
+      </div>
+    </GlassModal>
+  );
+}
+
+/**
+ * Single shared empty state (UX-35). Replaces the two parallel components
+ * (PageEmpty card + live Empty bare) and the ~12 inline bare variants.
+ * `variant="card"` renders the glass-card form (PageEmpty); `variant="bare"`
+ * renders the plain centred form (live Empty). Keep the specific, actionable
+ * copy at the call site; this component only standardises presentation.
+ */
+export function EmptyState({
+  title,
+  description,
+  actionLabel,
+  onAction,
+  secondaryLabel,
+  onSecondary,
+  demo = false,
+  variant = "card",
+}: {
+  title: string;
+  description?: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+  demo?: boolean;
+  variant?: "card" | "bare";
+}) {
+  const body = (
+    <div role="status" className="flex flex-col items-center justify-center gap-3 text-center">
+      {demo && (
+        <span className="rounded-full border border-amber-500/40 bg-amber-950/40 px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-amber-200">
+          Sample data mode
+        </span>
+      )}
+      <h3 className="text-base font-semibold text-[var(--product-text)]">{title}</h3>
+      {description && (
+        <p className="max-w-md text-sm text-[var(--product-text-tertiary)]">{description}</p>
+      )}
+      {(actionLabel || secondaryLabel) && (
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+          {actionLabel && onAction && (
+            <MagneticButton
+              variant="solid"
+              tone="primary"
+              className="inline-flex items-center rounded-xl px-4 py-2 text-sm"
+              onClick={onAction}
+            >
+              {actionLabel}
+            </MagneticButton>
+          )}
+          {secondaryLabel && onSecondary && (
+            <JXButton variant="outlined" color="neutral" onClick={onSecondary}>{secondaryLabel}</JXButton>
+          )}
+        </div>
+      )}
+    </div>
+  );
+  if (variant === "bare") {
+    return <div className="space-y-3 py-10 text-center">{body}</div>;
+  }
+  return <ProductGlass className="px-6 py-12">{body}</ProductGlass>;
 }
