@@ -121,14 +121,21 @@ export const SidebarNav: React.FC<{ onNavigate?: () => void }> = ({ onNavigate }
                   className="product-nav-link">
                   <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
                   <span className="flex-1 text-left">{item.label}</span>
+                  {/* Badge counts are visual only (aria-hidden): the span's
+                      aria-label used to join the button's accessible name
+                      ("Devices 2 offline devices" once seed data loaded),
+                      so exact-name lookups raced the data load and timed
+                      out (dashboard.spec.ts mobile drawer, CI 44239238769).
+                      On #/live the count is still announced via the
+                      button's aria-label (badgeTextFor above). */}
                   {item.id === "human-approvals" && pending > 0 && (
-                    <span className="text-xs tabular-nums text-amber-200" aria-label={`${pending} pending`}>{pending}</span>
+                    <span className="text-xs tabular-nums text-amber-200" aria-hidden="true">{pending}</span>
                   )}
                   {item.id === "task-queue-and-vision" && failedTasks > 0 && (
-                    <span className="text-xs tabular-nums text-rose-300" aria-label={`${failedTasks} failed tasks`}>{failedTasks}</span>
+                    <span className="text-xs tabular-nums text-rose-300" aria-hidden="true">{failedTasks}</span>
                   )}
                   {item.id === "devices" && offlineDevices > 0 && (
-                    <span className="text-xs tabular-nums text-amber-200" aria-label={`${offlineDevices} offline devices`}>{offlineDevices}</span>
+                    <span className="text-xs tabular-nums text-amber-200" aria-hidden="true">{offlineDevices}</span>
                   )}
                 </button>
                 {selected && nested.length > 0 && (
