@@ -157,7 +157,7 @@ export const LoginView: React.FC = () => {
               <p className="text-xs leading-relaxed text-[color:var(--product-text-tertiary)]">
                 Just looking around?{" "}
                 <button type="button" onClick={() => navigate("overview")}
-                  className="font-medium text-indigo-300 underline decoration-indigo-300/50 underline-offset-2 hover:text-indigo-200">
+                  className="font-medium text-[color:var(--product-accent-text)] underline underline-offset-2 hover:text-[color:var(--product-text)]">
                   {t("Explore demo workspace")}
                 </button>
               </p>

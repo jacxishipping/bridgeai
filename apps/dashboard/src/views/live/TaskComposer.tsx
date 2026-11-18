@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import { api, ApiError } from "../../api";
-import { GlassModal, JXButton, StatusBadge } from "../../ui";
-import { deviceName, Field, fieldClass, LiveDevice, message, text } from "./shared";
+import { GlassModal, JXButton } from "../../ui";
+import { deviceName, Field, fieldClass, LiveDevice, message, taskStatus, text } from "./shared";
 
 export const taskTools = [
   { id: "get_system_info", label: "System information", risk: "Read-only" },
@@ -33,10 +33,10 @@ export function TaskComposer({ devices, initialTool = "get_system_info", initial
         try {
           const result = await api.submitTask(device.id, tool, args, device.tenant);
           if (!result.task_id) throw new ApiError("The response did not include a task ID.", true);
-          results.push({ device, status: result.status || "queued", id: result.task_id });
+          results.push({ device, status: taskStatus(result.status || "queued"), id: result.task_id });
         } catch (err) {
           unknown = err instanceof ApiError && err.uncertain;
-          results.push({ device, status: unknown ? "outcome_unknown" : "rejected", error: message(err) });
+          results.push({ device, status: unknown ? "Outcome unknown" : "Rejected", error: message(err) });
         }
       }
       setOutcomes([...results]);
@@ -44,12 +44,12 @@ export function TaskComposer({ devices, initialTool = "get_system_info", initial
     setBusy(false); onSubmitted();
   };
   const selectedTool = taskTools.find((item) => item.id === tool);
-  return <GlassModal title={outcomes.length ? "Dispatch results" : review ? "Review task" : "New task"} onClose={() => { if (!busy) onClose(); }}>
+  return <GlassModal title={outcomes.length ? "Submission results" : review ? "Review task" : "New task"} onClose={() => { if (!busy) onClose(); }}>
     <div className="space-y-5">
       {outcomes.length > 0 ? <>
-        <p className="text-sm text-[var(--product-text-secondary)]">{busy ? "Submitting…" : "Dispatch is not completion. Follow progress in Tasks."}</p>
+        <p className="text-sm text-[var(--product-text-secondary)]">{busy ? "Submitting…" : "Submission is not completion. Follow progress in Tasks."}</p>
         <ul aria-live="polite" className="divide-y divide-[var(--product-line)]">{outcomes.map((outcome) => <li key={outcome.device.id} className="space-y-1 py-3 text-sm">
-          <p className="flex flex-wrap items-center gap-2 break-all font-medium">{deviceName(outcome.device)} <StatusBadge status={outcome.status} /></p>
+          <p className="break-all font-medium">{deviceName(outcome.device)} — {outcome.status}</p>
           {outcome.id && <p className="break-all font-mono text-xs text-[var(--product-text-tertiary)]">Task {outcome.id}</p>}
           {outcome.error && <p className="text-amber-300">{outcome.error}</p>}
         </li>)}</ul>
@@ -79,7 +79,7 @@ export function TaskComposer({ devices, initialTool = "get_system_info", initial
         <div className="flex flex-wrap justify-end gap-2">
           <JXButton color="neutral" variant="outlined" disabled={busy} onClick={() => review ? setReview(false) : onClose()}>{review ? "Back" : "Cancel"}</JXButton>
           <JXButton disabled={busy || !canAct || !devices.length || (tool === "run_shell" && !command.trim())} loading={busy} loadingLabel="Submitting…"
-            onClick={() => review ? void submit() : setReview(true)}>{review ? "Dispatch task" : "Review task"}</JXButton>
+            onClick={() => review ? void submit() : setReview(true)}>{review ? "Submit task" : "Review task"}</JXButton>
         </div>
       </>}
     </div>

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import { EmptyState, JXButton, normalizeStatusKey, STATUS_TONES, StatusBadge } from "../../ui";
 import { TaskComposer } from "./TaskComposer";
-import { argsOf, deviceName, Field, fieldClass, LiveDevice, LiveTask, normalizeTaskStatus, Pagination, Payload, ReadState, taskStates, text, time, useRead } from "./shared";
+import { argsOf, deviceName, Field, fieldClass, LiveDevice, LiveTask, normalizeTaskStatus, Pagination, Payload, ReadState, taskStates, taskStatus, text, time, useRead } from "./shared";
 
 /** Option label from the shared status map (UX-05); "all" is not a status. */
 const taskStatusLabel = (value: string) => {
@@ -105,11 +105,19 @@ export function TasksPanel({ devices, device, canAct, onlyTool, status = "all", 
       const safeRetry = task.status === "failed" && ["get_system_info", "get_resource_usage", "get_network_info"].includes(task.tool) &&
         Object.keys(argsOf(task)).length === 0 && target && !target.revoked;
       return <li key={task.id} className="py-4">
-        <details className="group min-w-0" open={openTask === task.id} onToggle={(e) => setOpenTask(e.currentTarget.open ? task.id : null)}>
+        <details className="group min-w-0" open={openTask === task.id} onToggle={(e) => {
+          // Opening one task closes the previously open one; that close
+          // fires its own toggle event. Only clear the selection when the
+          // task being closed is the selected one — otherwise the close
+          // event from the previous task would immediately close the one
+          // just opened.
+          if (e.currentTarget.open) setOpenTask(task.id);
+          else if (openTask === task.id) setOpenTask(null);
+        }}>
           <summary aria-expanded={openTask === task.id} className="cursor-pointer rounded-lg text-sm">
             <span className="inline-flex max-w-full flex-wrap items-center gap-x-4 gap-y-1 align-middle">
               <span className="break-all font-medium">{task.tool}</span>
-              <StatusBadge status={task.status} />
+              <StatusBadge status={task.status} label={taskStatus(task.status)} />
               {!device && <span className="break-all text-[var(--product-text-tertiary)]">{target ? deviceName(target) : task.device_id}</span>}
               <span className="text-xs text-[var(--product-text-tertiary)]">{time(task.updated_at || task.created_at)}</span>
             </span>

@@ -231,6 +231,17 @@
 .product-button[data-tone="primary"][data-variant="contained"]:hover:not(:disabled) { background: var(--product-accent-hover); }
 .product-button[data-tone="primary"][data-variant="outlined"] { border-color: var(--product-accent-soft); color: var(--product-accent-text); }
 .product-button[data-tone="primary"][data-variant="soft"] { background: var(--product-accent-soft); border-color: var(--product-accent-soft); color: var(--product-accent-text); }
+/* Soft neutral buttons: the JXUI library renders these as bg-slate-100
+   dark:bg-slate-800 with hover:bg-slate-200/80. In the dark theme the
+   hover background is near-white while the text stays light slate-200
+   (1.5:1, fails WCAG 2 AA on hover — e.g. the Device360View "Flush DNS"
+   button). No neutral/soft override existed here (unlike primary soft
+   above), so the library hover won over the per-button
+   hover:bg-[var(--product-raised)] utility. Pin soft neutral to the
+   product tokens in both themes, including hover, so the label stays
+   readable (dark: #cbd5e1 on #192639; light: #334155 on #f1f5f9). */
+.product-button[data-tone="neutral"][data-variant="soft"] { background: var(--product-raised); border-color: var(--product-line); color: var(--product-text-secondary); }
+.product-button[data-tone="neutral"][data-variant="soft"]:hover:not(:disabled) { background: var(--product-raised); }
 .product-button[data-tone="neutral"][data-variant="contained"],
 .product-button[data-tone="primary"][aria-pressed="true"] {
   background: var(--product-accent-soft); border-color: var(--product-accent-soft); color: var(--product-accent-text);

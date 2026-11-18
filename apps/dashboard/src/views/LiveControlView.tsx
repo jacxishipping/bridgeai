@@ -1,11 +1,10 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { ArrowUpRight, RefreshCw, ShieldCheck } from "lucide-react";
-import { api, apiOrigin, ApiError, clearCredentials, token, sessionToken } from "../api";
+import { api, apiOrigin, ApiError, token, sessionToken } from "../api";
 import { EmptyState, JXAlert, JXBadge, JXButton, ProductGlass, ProductModePill, ProductStatusDot } from "../ui";
 import { EmergencyStopConfirm } from "../shell/TopHeader";
 import { Brand } from "../Brand";
 import { DensityControl } from "../DensityControl";
-import { LanguageControl } from "../LanguageControl";
 import { Freshness } from "../components/Freshness";
 import { useLanguage } from "../i18n";
 import { useDashboardStore } from "../state/dashboardStore";
@@ -218,11 +217,6 @@ export function LiveControlView() {
     const id = window.setInterval(() => { void refresh(); }, 8_000);
     return () => window.clearInterval(id);
   }, [snapshot, refresh]);
-  const signOut = async () => {
-    try { await api.logout(); } catch { /* Local credentials must still be cleared if the API is offline. */ }
-    clearCredentials();
-    navigate("login");
-  };
   const changeStop = async () => {
     if (!snapshot) return;
     setActing(true);
@@ -241,7 +235,9 @@ export function LiveControlView() {
       </header>
       <div className="product-container space-y-4 py-6" lang="en" dir="ltr">
         <JXAlert severity="error" title="Session expired" description="Your session expired. No sample data is shown while the session is invalid." />
-        <JXButton color="primary" onClick={() => { clearCredentials(); navigate("login"); }}>Sign out</JXButton>
+        {/* No sign-out button here: the AppShell banner (rendered while the
+            token was present) already offers "Sign out" on every view, and
+            this view's own copies were removed as duplicates (see header). */}
       </div>
     </div>;
   }
@@ -251,11 +247,13 @@ export function LiveControlView() {
     <header className="product-topbar">
       <div className="product-container flex min-h-14 flex-wrap items-center justify-between gap-3 py-2">
         <Brand />
+        {/* No LanguageControl / Sign out here: TopHeader (AppShell) already
+            renders LanguageControl on every view, and its banner already
+            offers "Sign out" whenever a token/session is present — the
+            view's own copies duplicated both (strict-mode violations). */}
         <div className="flex flex-wrap items-center gap-2">
-          <LanguageControl />
           <DensityControl />
           <JXButton color="neutral" variant="outlined" onClick={refresh} disabled={loading} loading={loading} loadingLabel={t("Refreshing…")} startIcon={<RefreshCw className="h-4 w-4" />}>{t("Refresh")}</JXButton>
-          <JXButton color="neutral" variant="text" onClick={signOut}>{t("Sign out")}</JXButton>
         </div>
       </div>
     </header>
@@ -263,7 +261,7 @@ export function LiveControlView() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h1>Live home</h1>
+            <h1>{t("Control plane")}</h1>
             <ProductModePill live={isLive} detail={apiOrigin.replace(/^https?:\/\//, "")} />
           </div>
           {snapshot ? (
@@ -294,7 +292,6 @@ export function LiveControlView() {
             onSecondary={() => navigate("overview")}
           />
         )}
-        {isLive && <JXButton color="neutral" variant="outlined" onClick={signOut}>Sign out</JXButton>}
       </div>}
       {loading && !snapshot && <p role="status" lang="en" dir="ltr" className="py-8 text-sm text-[color:var(--product-text-tertiary)]">Loading your control plane…</p>}
       {snapshot && <>
@@ -303,11 +300,16 @@ export function LiveControlView() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
                 <ShieldCheck className="h-4 w-4 shrink-0 text-[color:var(--product-text-tertiary)]" aria-hidden="true" />
-                <ProductStatusDot
-                  status={snapshot.health.emergency_stop ? "warn" : "online"}
-                  pulse={!snapshot.health.emergency_stop}
-                  label={snapshot.health.emergency_stop ? "Emergency stop is active." : "Emergency stop is not active."}
-                />
+                {/* role="status" wrapper (UX-37 pattern): ProductStatusDot
+                    itself carries no live region, so the Fleet safety status
+                    is wrapped here to be announced / queryable as a status. */}
+                <span role="status">
+                  <ProductStatusDot
+                    status={snapshot.health.emergency_stop ? "warn" : "online"}
+                    pulse={!snapshot.health.emergency_stop}
+                    label={snapshot.health.emergency_stop ? "Emergency stop is active." : "Emergency stop is not active."}
+                  />
+                </span>
               </div>
               <JXButton variant="outlined" color={snapshot.health.emergency_stop ? "success" : "error"}
                 disabled={Boolean(error) || snapshot.identity.role !== "admin"}

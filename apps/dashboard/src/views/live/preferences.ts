@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiOrigin } from "../../api";
 import { taskStates } from "./shared";
 
@@ -17,6 +17,10 @@ export function sanitizeFilters(input: unknown): Filters {
     tag: typeof value.tag === "string" ? value.tag.slice(0, 40) : "",
   };
 }
+const sameFilters = (a: Filters, b: Filters) =>
+  a.query === b.query && a.status === b.status && a.sort === b.sort &&
+  a.taskStatus === b.taskStatus && (a.group || "") === (b.group || "") && (a.tag || "") === (b.tag || "");
+
 export function usePreferences(identity: string) {
   const key = `ai_bridge_views:v1:${apiOrigin}:${identity}`;
   const [initial] = useState(() => {
@@ -33,6 +37,15 @@ export function usePreferences(identity: string) {
   const [filters, setFilters] = useState(initial.filters);
   const [views, setViews] = useState(initial.views);
   const [storageError, setStorageError] = useState("");
+  // Last filters committed by a render. LiveWorkspace.navigate() preserves
+  // the current filter params in the URL and re-dispatches hashchange; the
+  // URL copy is stale until the write effect below runs, so a sync that
+  // matches what is already applied must be ignored — otherwise it
+  // overwrites a just-applied saved view (or any setFilters) with the old
+  // URL values. Genuine back/forward navigation carries different params
+  // and is still applied.
+  const filtersRef = useRef(initial.filters);
+  useEffect(() => { filtersRef.current = filters; });
   useEffect(() => {
     try { localStorage.setItem(key, JSON.stringify({ filters, views })); setStorageError(""); }
     catch { setStorageError("Browser storage is unavailable. Filters and saved views will not survive a reload."); }
@@ -40,7 +53,10 @@ export function usePreferences(identity: string) {
   useEffect(() => {
     const sync = () => {
       const params = new URLSearchParams(window.location.hash.split("?")[1] || "");
-      if (params.get("filters") === "1") setFilters(sanitizeFilters(Object.fromEntries(params)));
+      if (params.get("filters") === "1") {
+        const incoming = sanitizeFilters(Object.fromEntries(params));
+        if (!sameFilters(incoming, filtersRef.current)) setFilters(incoming);
+      }
     };
     window.addEventListener("popstate", sync); window.addEventListener("hashchange", sync);
     return () => { window.removeEventListener("popstate", sync); window.removeEventListener("hashchange", sync); };

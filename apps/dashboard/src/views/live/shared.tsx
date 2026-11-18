@@ -35,9 +35,16 @@ export const time = (timestamp?: number | null) => timestamp ? formatDate(new Da
   translate(resolveLocale(typeof document !== "undefined" ? document.documentElement.lang || "en" : "en"), "Not reported");
 export const taskStates = ["all", "queued", "running", "completed", "failed", "needs_approval", "canceled", "timed_out"];
 export const normalizeTaskStatus = (status: string) => status === "cancelled" ? "canceled" : status;
-// NOTE (UX-05): the old taskStatus() label helper was deleted — task states
-// render through the shared <StatusBadge> (ui.tsx) and option labels read
-// the shared STATUS_TONES map, so one state never gets two colours again.
+// Live-workspace task labels (E2E contract, restored after the UX-05
+// StatusBadge migration dropped them): a queued task reads "Submitted"
+// and needs_approval reads "Awaiting approval". The shared <StatusBadge>
+// keeps its own "Queued"/"Pending approval" labels — pass taskStatus(...)
+// as its `label` prop where the live wording is required, so the tone
+// stays shared while the words stay the live ones.
+export const taskStatus = (status: string) => ({
+  queued: "Submitted", running: "Running", completed: "Completed", failed: "Failed",
+  needs_approval: "Awaiting approval", canceled: "Canceled", cancelled: "Canceled", timed_out: "Timed out",
+}[status] || status.replace(/_/g, " "));
 export function argsOf(task: LiveTask): Record<string, unknown> {
   try { const args = JSON.parse(task.args_json || "{}"); return args && typeof args === "object" && !Array.isArray(args) ? args : {}; }
   catch { return {}; }

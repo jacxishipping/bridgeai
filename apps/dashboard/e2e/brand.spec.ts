@@ -14,9 +14,14 @@ for (const view of ["login", "overview", "live"]) {
     expect((await page.request.get(favicon!)).ok()).toBe(true);
     if (view === "login") {
       await expect(page).toHaveTitle("Sign in · AI Bridge");
-      // The Sign in button is the brand blue (#2563eb); modern Chromium
-      // serializes the computed color as oklch, not rgb.
-      await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCSS("background-color", "oklch(0.585 0.233 277.117)");
+      // The Sign in button is the brand blue (#2563eb). The old comment
+      // claimed modern Chromium serializes the computed color as oklch;
+      // that is wrong for this Chromium: the button's background comes
+      // from the --product-accent token, which is specified as hex
+      // (#2563eb in src/tailwind.css), and getComputedStyle serializes a
+      // hex-specified color as rgb. oklch serialization only happens
+      // when the specified value itself is oklch.
+      await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCSS("background-color", "rgb(37, 99, 235)");
     }
   });
 }

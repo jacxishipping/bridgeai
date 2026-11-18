@@ -127,13 +127,23 @@ test("simplified inventory filters and device links still work", async ({ page }
   await page.getByRole("button", { name: "Offline (1)", exact: true }).click();
   const inventory = page.getByRole("region", { name: "Device inventory" });
   await expect(inventory.getByRole("row")).toHaveCount(2);
-  await expect(inventory.getByRole("columnheader")).toHaveCount(5);
-  const hostname = await inventory.getByRole("row").nth(1).getByRole("cell").nth(1).innerText();
+  // 6 column headers, not 5: the UX-34 bulk multi-select (UX remediation)
+  // added a "Select all devices" checkbox column as the first <th> in
+  // src/views/DevicesView.tsx (Status/Device/OS/Last seen/Actions + checkbox).
+  await expect(inventory.getByRole("columnheader")).toHaveCount(6);
+  // Cell index 2, not 1: the same UX-34 checkbox column above shifted every
+  // data cell by one (checkbox 0 / Status 1 / Device 2), so the hostname
+  // now lives in the third cell. The assertion itself is unchanged.
+  const hostname = await inventory.getByRole("row").nth(1).getByRole("cell").nth(2).innerText();
   await inventory.getByRole("button", { name: "Details", exact: true }).click();
   await expect(page).toHaveURL(/#\/device-360-system\?device=/);
-  await expect(page.locator("main").getByText(hostname, { exact: true })).toBeVisible();
+  // The hostname appears twice in <main> (shell breadcrumb + device-header
+  // span); the in-view BreadcrumbTrail was removed as a duplicate of the
+  // shell breadcrumb, so .last() targets the device header — the assertion
+  // the test actually intends (the device-360 view shows this device).
+  await expect(page.locator("main").getByText(hostname, { exact: true }).last()).toBeVisible();
   await page.reload();
-  await expect(page.locator("main").getByText(hostname, { exact: true })).toBeVisible();
+  await expect(page.locator("main").getByText(hostname, { exact: true }).last()).toBeVisible();
 });
 
 test("invalid token is rejected by the API, not accepted locally", async ({ page }) => {
@@ -199,7 +209,12 @@ test("expired sessions show a recovery path without sample data", async ({ page 
   await page.route("**/health", (route) => route.fulfill({ json: { version: "test", emergency_stop: false } }));
   await page.goto("/#/live");
   await expect(page.getByRole("alert")).toContainText("session expired");
-  await expect(page.getByRole("button", { name: "Return to sign in", exact: true })).toBeVisible();
+  // UX-38 (class a — intentional copy change): the remediation renamed the
+  // expired-session recovery button from "Return to sign in" to "Sign out"
+  // (LiveControlView.tsx, and the AppShell banner's "Sign out" is the copy
+  // used everywhere else). The live view's own copies were removed as
+  // duplicates of that banner button, so the visible one is the banner's.
+  await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
   await expect(page.getByText("No devices enrolled yet")).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.getItem("ai_bridge_session_token"))).toBeNull();
 });

@@ -306,6 +306,13 @@ test("enrollment is actionable and one-time credentials are never persisted", as
   await page.getByRole("button", { name: "Enroll device", exact: true }).click();
   await page.getByLabel("Device name", { exact: true }).fill("New agent");
   await page.getByRole("button", { name: "Create enrollment", exact: true }).click();
+  // UX-21 (intentional, Inventory.tsx maskToken): the one-time token is
+  // masked by default and only shown in full after an explicit reveal, so
+  // it is never rendered in plain text unprompted. It stays actionable via
+  // Show token / Copy token.
+  await expect(page.getByLabel("Device token", { exact: true })).toHaveValue("one-••••cret");
+  await expect(page.getByRole("button", { name: "Copy token", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Show device token", exact: true }).click();
   await expect(page.getByLabel("Device token", { exact: true })).toHaveValue("one-time-secret");
   await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.getByLabel("Device token", { exact: true })).toHaveCount(0);

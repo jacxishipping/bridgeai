@@ -735,7 +735,6 @@ export const Device360View: React.FC = () => {
           >
             Back to Devices
           </JXButton>
-          <BreadcrumbTrail crumbs={["Devices", selectedDevice.hostname]} />
           {isLive && (
             <Freshness checkedAt={lastSyncAt} loading={syncState === "loading"} label="Updated" />
           )}
