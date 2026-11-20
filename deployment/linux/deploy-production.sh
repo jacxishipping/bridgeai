@@ -155,6 +155,14 @@ log_info "Building and launching production containers with docker-compose.prod.
 docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml build
 docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml up -d --remove-orphans
 
+# nginx resolves upstream hostnames once at startup and caches them.
+# Recreating control-api gives it a new container IP, so a long-running
+# nginx keeps proxying to the dead IP and answers 502 — observed live
+# 18 Nov 2026, after a redeploy that reported "operational". Restart
+# nginx after every deploy so it re-resolves control-api (and mcp/oauth).
+log_info "Restarting nginx so it re-resolves the recreated upstreams..."
+docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml restart nginx
+
 log_info "Waiting for database and control plane to reach healthy state..."
 MAX_RETRIES=20
 COUNT=0
@@ -163,10 +171,14 @@ HEALTHY=false
 while [ $COUNT -lt $MAX_RETRIES ]; do
     COUNT=$((COUNT + 1))
     if docker compose -f docker-compose.prod.yml ps | grep -q "control-api.*Up"; then
-        # Plain-HTTP loopback probe (no TLS involved, so no -k).
-        # nginx now redirects :80 to HTTPS (P-03); 301 counts as healthy.
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:80/health/ready" || true)
-        if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ]; then
+        # Probe the upstream directly inside its container. The old probe
+        # hit port 80, where nginx (P-03) only answers a 301 redirect to
+        # HTTPS — counting 301 as healthy made
+        # the script report "operational" while the plane returned 502.
+        # A 200 here means control-api itself answers /health/ready.
+        # curl is in the control-api image (Dockerfile.prod healthcheck).
+        HTTP_CODE=$(docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml exec -T control-api curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8000/health/ready" || true)
+        if [ "$HTTP_CODE" = "200" ]; then
             HEALTHY=true
             break
         fi

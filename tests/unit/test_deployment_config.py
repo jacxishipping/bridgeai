@@ -200,6 +200,29 @@ class TestNoDefaultSecrets(unittest.TestCase):
         text = _read(DEPLOY_PROD)
         self.assertIn('AI_BRIDGE_DOMAIN="${DOMAIN:-jxiptvplayer.app}"', text)
 
+    def test_deploy_script_restarts_nginx_after_up(self):
+        # EC2 redeploy 18 Nov 2026: nginx resolves control-api once at
+        # startup and caches the IP; recreating control-api gave it a new
+        # IP, so the stale nginx proxied to a dead address and clideos.us
+        # returned 502 while the script reported "operational". The script
+        # must restart nginx after `up` so it re-resolves the upstreams.
+        text = _read(DEPLOY_PROD)
+        up = text.index("up -d --remove-orphans")
+        restart = text.index("restart nginx")
+        self.assertLess(up, restart, "nginx restart must come after `up -d`")
+
+    def test_deploy_script_health_probe_requires_200_from_upstream(self):
+        # Same redeploy: the old probe hit :80/health/ready and counted
+        # nginx's 301 redirect as healthy, so it never reached the
+        # upstream. The probe must hit control-api directly and require
+        # a 200; a 301 must not count as healthy.
+        text = _read(DEPLOY_PROD)
+        self.assertIn("exec -T control-api", text)
+        self.assertIn("http://127.0.0.1:8000/health/ready", text)
+        self.assertNotIn("http://127.0.0.1:80/health/ready", text)
+        self.assertNotRegex(text, r'\$HTTP_CODE"\s*=\s*"301"')
+        self.assertIn('"$HTTP_CODE" = "200"', text)
+
     def test_control_api_receives_turn_secret(self):
         # R-P0-15 follow-up (EC2 deploy): the production readiness check
         # reads AI_BRIDGE_TURN_SECRET inside the control-api process
